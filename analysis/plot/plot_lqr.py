@@ -12,12 +12,13 @@ from scipy.linalg import solve_continuous_are
 from scipy.integrate import solve_ivp
 import kuafu as kc
 from kuafu import OI, savefig, G, MM, R_WHEEL, M_TOT
+from kuafu_physics import MC, MP, LP, LQR_K, OMEGA_N
 
-# ---- cart-pole 参数 ----
-mc = 0.70                       # cart = 轮 + 髋组件
-mp = 1.51                       # pendulum = 机身
-Lp = 0.0711                     # COM 高
-lp = Lp
+# ---- cart-pole 参数 (从物理真源 kuafu_physics 导入) ----
+mc = MC                            # cart = 轮 (DDSM315 ×2)
+mp = MP                            # pendulum = 机身 + 腿 + 电子件
+lp = LP                            # 摆长 = pendulum 质心相对轮轴
+Lp = lp
 Ip = mp*lp*lp/3
 R = R_WHEEL*MM
 # 惯性矩阵元

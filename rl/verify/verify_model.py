@@ -98,19 +98,17 @@ def main():
 
     # ---- 5. 静态稳定 ----
     print("\n[5/6] 静态稳定性")
-    # 驻留态放手: 关闭执行器, 看 1s 内是否倒下
+    # 腿保持驻留 (position actuator ctrl=0 维持 q=0), 轮无控制 (motor ctrl=0 无力矩)
+    # 轮式倒立摆本质不稳定, 无轮控制时机身必然倾倒; 此处验证腿关节在重力下不松脱 (q 保持 ≈0)
     d3 = mujoco.MjData(m)
     mujoco.mj_resetDataKeyframe(m, d3, 0)
-    d3.ctrl[:] = 0
-    initial_z = d3.xpos[cid][2]
-    for _ in range(500):  # 1s @ 500Hz timestep
+    mujoco.mj_forward(m, d3)          # 更新 xpos, 确保 initial 状态正确
+    d3.ctrl[:] = 0                    # 腿: ctrl=0 -> PD 维持 q=0 (驻留); 轮: ctrl=0 -> 无力矩
+    for _ in range(500):              # 1s @ 500Hz timestep
         mujoco.mj_step(m, d3)
-    final_z = d3.xpos[cid][2]
-    drop = initial_z - final_z
-    # 轮式倒立摆驻留态理论上不稳定(会倒), 但腿自锁 + 承重面应支撑住
-    # 这里验证"没有立即塌陷"(d0 不变, 腿没垮)
-    r.check("驻留态不立即塌陷", drop < 0.03,
-            f"1s 内下落 {drop*1000:.1f} mm")
+    hip_drift = max(abs(d3.qpos[7]), abs(d3.qpos[10]), abs(d3.qpos[12]), abs(d3.qpos[15]))
+    r.check("腿驻留态关节不松脱 (q 保持)", hip_drift < 0.05,
+            f"1s 后 hip 关节最大偏移 {hip_drift*1e3:.1f} mrad ({np.degrees(hip_drift):.2f}°)")
 
     # ---- 6. LQR baseline 闭环 ----
     print("\n[6/6] LQR baseline 平衡能力")
@@ -119,27 +117,29 @@ def main():
     mujoco.mj_resetDataKeyframe(m, d4, 0)
     # 初始倾角 5° (绕 Y 轴 = pitch)
     th0 = np.radians(5)
-    # root quat: w=cos(th/2), x=0, y=sin(th/2), z=0
+    # root quat [w,x,y,z]: pitch 绕 Y -> w=cos(th/2), y=sin(th/2)
     d4.qpos[3:7] = [np.cos(th0/2), 0, np.sin(th0/2), 0]
     mujoco.mj_forward(m, d4)
     K = P.LQR_K
     recovered = False
     for step in range(2000):  # 4s
         # 状态 [x, theta, xdot, thetadot]
+        # root qpos: [x,y,z, qw,qx,qy,qz], pitch=绕Y -> qy=qpos[5]
+        # root qvel: [vx,vy,vz, wx,wy,wz], pitch角速度=绕Y -> wy=qvel[4]
         x = d4.qpos[0]
-        theta = 2*np.arctan2(d4.qpos[4], d4.qpos[3])  # 从四元数取 pitch
+        theta = 2*np.arctan2(d4.qpos[5], d4.qpos[3])  # 从四元数取 pitch (qy/qw)
         xdot = d4.qvel[0]
-        thetadot = d4.qvel[1]
+        thetadot = d4.qvel[4]                          # pitch 角速度 (wy)
         F = -(K @ np.array([x, theta, xdot, thetadot]))
         # 两轮各施加 F/2 (力矩 = F*R/2)
         tau = F * P.R / 2
         d4.ctrl[0] = tau  # tau_l
         d4.ctrl[1] = tau  # tau_r
-        # 腿保持驻留 (position actuator = 驻留角)
-        d4.ctrl[2] = -3.655  # hip_A 驻留角
-        d4.ctrl[3] = 0.514   # hip_B 驻留角
-        d4.ctrl[4] = -3.655
-        d4.ctrl[5] = 0.514
+        # 腿保持驻留: q=0 即驻留姿态 (geom fromto 按驻留态绘制, position actuator ctrl=0)
+        d4.ctrl[2] = 0  # hip_A_l
+        d4.ctrl[3] = 0  # hip_B_l
+        d4.ctrl[4] = 0  # hip_A_r
+        d4.ctrl[5] = 0  # hip_B_r
         mujoco.mj_step(m, d4)
         if abs(theta) < np.radians(1) and step > 50:
             recovered = True
@@ -147,7 +147,7 @@ def main():
                     f"{step*0.002:.2f}s 内恢复到 <1°")
             break
     if not recovered:
-        final_th = 2*np.arctan2(d4.qpos[4], d4.qpos[3])
+        final_th = 2*np.arctan2(d4.qpos[5], d4.qpos[3])
         r.check("LQR 恢复 5° 扰动", False,
                 f"4s 后仍 {np.degrees(final_th):.1f}° (未恢复)")
 

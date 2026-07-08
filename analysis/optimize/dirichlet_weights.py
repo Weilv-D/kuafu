@@ -91,17 +91,21 @@ def run():
     print(f"选定解胜出: {sel_wins} / {N_WEIGHTS} = {100*win_rate:.1f}%")
 
     # 各前沿解的胜出分布 (前5)
+    # uniq = 去重后的候选索引, counts = 对应胜出次数, order = counts 降序排列的 uniq 内位置
     uniq, counts = np.unique(winners, return_counts=True)
     order = np.argsort(-counts)
     print(f"\n胜出次数前 5 候选:")
-    for i in order[:5]:
-        if i == sel_idx:
+    for j in order[:5]:
+        cand_idx = int(uniq[j])         # 真实候选索引 (在候选集 0..n_cand-1 中)
+        n_win = int(counts[j])
+        if cand_idx == sel_idx:
             tag = "← 选定解"
             params = f"d={SELECTED['d']}, a={SELECTED['a']}, b={SELECTED['b']}"
         else:
             tag = ""
-            params = f"d={d_arr[pf_mask][i]:.1f}, a={a_arr[pf_mask][i]:.1f}, b={b_arr[pf_mask][i]:.1f}"
-        print(f"  idx={i:4d}: {counts[i]:3d} 次 ({100*counts[i]/N_WEIGHTS:.1f}%) {params} {tag}")
+            # 前沿解在候选集前 n_pf 个, cand_idx 直接索引 d_arr[pf_mask]
+            params = f"d={d_arr[pf_mask][cand_idx]:.1f}, a={a_arr[pf_mask][cand_idx]:.1f}, b={b_arr[pf_mask][cand_idx]:.1f}"
+        print(f"  idx={cand_idx:4d}: {n_win:3d} 次 ({100*n_win/N_WEIGHTS:.1f}%) {params} {tag}")
 
     # 存档
     out = os.path.join(OUTPUT, "dirichlet_results.npz")
