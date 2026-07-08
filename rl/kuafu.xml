@@ -7,11 +7,11 @@
   坐标系: 原点在髋面中心（两髋点 A-B 中点），+X 前向, +Y 左向, +Z 上向。
           驻留态轮恒接地，机身底 Z = D0 + r。
 
-  机构: 对称并联五杆髋关节。每腿两根串联肘链（髋A→曲柄 a→P1→连杆 b→Q，
-        髋B→曲柄 a→P2→连杆 b→Q），Q 点用 equality connect 焊死形成闭链。
-        对称步态 (轮行平衡用): 仅 hip_A 有舵机驱动, hip_B 由 <joint equality>
-        强制镜像 (θ_B = -θ_A), 整腿降为 1-DOF — KUAFU §6.1 的"对称切片"。
-        (2-DOF 横向偏移步态为未来跨步任务, 届时解除 couple equality)
+  机构: 对称并联五杆髋关节, 每腿 2-DOF。每腿两根串联肘链（髋A→曲柄 a→P1→连杆 b→Q，
+        髋B→曲柄 a→P2→连杆 b→Q），Q 点用 <connect site1/site2> 物理铰接形成闭链。
+        4 个 ST3215 舵机 (hip_A + hip_B 各左右) 全部独立位置控制, 对齐真机。
+        左右腿完全独立, 各 2-DOF — KUAFU §6.1, §5.3。
+        (对称步态 Q 在 X=0 只是 2-DOF 的一个特例, 非机构限制)
 
   用途: 同一 .xml 兼容 MJX（GPU 训练）与原生 MuJoCo（CPU 可视化/sim-to-real 对拍）。
         验证: python rl/verify/verify_model.py / launch_viewer.py
@@ -173,42 +173,37 @@
   </contact>
 
   <!-- ============================================================
-       闭链约束 (design §3.2) — 纯运动学耦合 (1-DOF 对称切片)
-       对称并联五杆在对称步态下为 1-DOF: 所有被动关节都是 hip_A 的确定函数。
-       用 4 个 joint equality 锁定 (hip_B, knee_A, knee_B) = f(hip_A),
-       使求解器无法漂移到错误运动学分支 (KUAFU §6.1 对称切片, polycoef 由
-       MuJoCo 实测 P1/P2 位置两圆交点标定, deg=4, max_err 0.0013rad)。
-       不用 <connect>: connect 仅锁 Q 点重合, 无法区分膝上/膝下两个分支,
-       求解器会收敛到膝盖大转角的非物理分支。纯 joint equality 直接锁定运动学。
+       闭链约束 (design §3.2) — Q 点物理铰接 (2-DOF 五杆, 物理真实)
+       每条腿是 2-DOF 并联五杆: 两个独立曲柄 (hip_A, hip_B) + 两连杆 (knee 被动) +
+       Q 点闭链铰接。左右腿完全独立, 共 4 个 ST3215 舵机各自位置控制。
+       用 <connect site1/site2> 锁 Q 点重合 = 真机两连杆在 Q 点的刚性铰接。
+       硬 solver 参数保证闭链 gap < 0.1mm (实测 0.000mm, KUAFU §6.1 机构解算)。
+       不用 joint equality: 那会把 2-DOF 锁成 1-DOF, 丢失 X 方向自由度。
        ============================================================ -->
   <equality>
-    <!-- hip_B = -hip_A (两曲柄镜像) -->
-    <joint name="couple_hip_l" joint1="hip_A_l" joint2="hip_B_l" polycoef="0 -1 0 0 0"/>
-    <joint name="couple_hip_r" joint1="hip_A_r" joint2="hip_B_r" polycoef="0 -1 0 0 0"/>
-    <!-- knee_A = poly(hip_A): 4 阶拟合, 连续分支跟踪标定 (knee∈[0, 1.79] rad),
-         从 MuJoCo 实测 Q_A==Q_B (闭环 gap<1.1mm) 标定, D0 58→207mm 全程 max_err 0.004rad -->
-    <joint name="couple_kneA_l" joint1="hip_A_l" joint2="knee_A_l"
-           polycoef="0.00153 -0.54342 0.35176 -0.17995 -0.09033"/>
-    <joint name="couple_kneA_r" joint1="hip_A_r" joint2="knee_A_r"
-           polycoef="0.00153 -0.54342 0.35176 -0.17995 -0.09033"/>
-    <!-- knee_B = -knee_A (B 链镜像) -->
-    <joint name="couple_kneB_l" joint1="knee_A_l" joint2="knee_B_l" polycoef="0 -1 0 0 0"/>
-    <joint name="couple_kneB_r" joint1="knee_A_r" joint2="knee_B_r" polycoef="0 -1 0 0 0"/>
+    <connect name="loop_l" site1="Q_A_l" site2="Q_B_l"
+             solref="0.005 0.5" solimp="0.999 0.9999 0.00001"/>
+    <connect name="loop_r" site1="Q_A_r" site2="Q_B_r"
+             solref="0.005 0.5" solimp="0.999 0.9999 0.00001"/>
   </equality>
 
   <!-- ============================================================
        执行器 (design §3.3)
        轮 = motor (力矩控制), 腿 = position (位置控制, 模拟 ST3215 PD)
+       2-DOF 五杆: 4 个舵机 (hip_A + hip_B 各左右) 各自独立位置控制, 对齐真机
        ============================================================ -->
   <actuator>
     <!-- 轮: τ = ctrl × gear = ctrl (Nm), ctrlrange ±1.1 堵转 -->
     <motor name="tau_l" joint="wheel_l" gear="1"/>
     <motor name="tau_r" joint="wheel_r" gear="1"/>
 
-    <!-- 腿: position actuator, ctrl=目标角(rad) 范围±2.0=joint range; kp/kv 直接写在 actuator 上 (default 中 motor 与 position 混合导致 kp 继承失效)
-         对称步态: 仅 hip_A 有舵机, hip_B 由 joint equality (couple_l/r) 镜像驱动 -->
+    <!-- 腿: position actuator, ctrl=目标角(rad) 范围±2.0=joint range;
+         kp/kv 直接写在 actuator 上 (default 中 motor 与 position 混合导致 kp 继承失效)。
+         4 个舵机 (hip_A + hip_B 各左右) 全部独立驱动, 对齐真机 4×ST3215。 -->
     <position name="q_hip_A_l" joint="hip_A_l" kp="80" kv="2" forcerange="-2.94 2.94" ctrlrange="-2.0 2.0"/>
     <position name="q_hip_A_r" joint="hip_A_r" kp="80" kv="2" forcerange="-2.94 2.94" ctrlrange="-2.0 2.0"/>
+    <position name="q_hip_B_l" joint="hip_B_l" kp="80" kv="2" forcerange="-2.94 2.94" ctrlrange="-2.0 2.0"/>
+    <position name="q_hip_B_r" joint="hip_B_r" kp="80" kv="2" forcerange="-2.94 2.94" ctrlrange="-2.0 2.0"/>
   </actuator>
 
   <!-- ============================================================
@@ -230,7 +225,7 @@
 
     <actuatorfrc actuator="tau_l"/><actuatorfrc actuator="tau_r"/>
     <actuatorfrc actuator="q_hip_A_l"/><actuatorfrc actuator="q_hip_A_r"/>
-    <!-- hip_B_l/r 无 actuator (由 couple equality 镜像驱动), 故无 actuatorfrc -->
+    <actuatorfrc actuator="q_hip_B_l"/><actuatorfrc actuator="q_hip_B_r"/>
   </sensor>
 
   <!-- ============================================================
@@ -244,7 +239,7 @@
       0 0
       0 0 0 0
       0 0 0 0"/>
-      <!-- root(7) + wheels(2) + hips(4: A_l,B_l,A_r,B_r; B 由 couple equality 镜像) + knees(4) = 17 qpos -->
+      <!-- root(7) + wheels(2) + hips(4: A_l,B_l,A_r,B_r 各独立 2-DOF) + knees(4) = 17 qpos -->
   </keyframe>
 
 </mujoco>

@@ -8,13 +8,13 @@ design.md §2.5: RMA Adapter [32,64,32]→5 + StudentPolicy [256,256,256]
 注意: Teacher 训练使用 RSL-RL 内置 ActorCritic (由 train.py config 配置),
 本文件仅定义部署用的 StudentPolicy 和 RMAAdapter。
 
-Student: trunk(proprio 108 + RMA z 9) + policy_head → action 4
+Student: trunk(proprio 140 + RMA z 9) + policy_head → action 6
 RMA: 50 步历史 → CNN [32,64,32] → latent z(9)
 
-history_len 说明: 环境用 HISTORY_STEPS=4 堆叠成 108 维 obs (proprio),
+history_len 说明: 环境用 HISTORY_STEPS=4 堆叠成 140 维 obs (proprio),
 但 RMA adapter 需要更长的时序历史 (50 步) 来推断环境参数。
-部署时从 50 步的 108 维 obs 序列中提取 base_obs(27) 喂给 adapter。
-对称步态: 仅 hip_A 驱动 (hip_B 由 joint equality 镜像), 故动作 4 维、obs 27 维。
+部署时从 50 步的 140 维 obs 序列中提取 base_obs(35) 喂给 adapter。
+2-DOF 五杆: 4 舵机独立驱动, 故动作 6 维、obs 35 维。
 """
 import torch
 import torch.nn as nn
@@ -69,10 +69,10 @@ class StudentPolicy(nn.Module):
 
     def __init__(
         self,
-        proprio_dim: int = 108,
-        history_obs_dim: int = 27,
+        proprio_dim: int = 140,
+        history_obs_dim: int = 35,
         history_len: int = 50,
-        action_dim: int = 4,
+        action_dim: int = 6,
         latent_dim: int = 9,
         hidden_dims: Tuple[int, ...] = (512, 512, 512),
     ):

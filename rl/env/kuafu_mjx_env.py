@@ -72,26 +72,25 @@ QVEL_WHEEL_R = 13    # qpos 14 - 1
 QVEL_HIP_B_R = 14    # qpos 15 - 1
 QVEL_KNEE_B_R = 15
 
-# 执行器索引 (actuator 顺序: tau_l, tau_r, q_hip_A_l, q_hip_A_r)
-# 对称步态: 仅 hip_A 有舵机, hip_B/knee 由 joint equality 镜像驱动 (见 kuafu.xml equality)
+# 执行器索引 (actuator 顺序: tau_l, tau_r, q_hip_A_l, q_hip_A_r, q_hip_B_l, q_hip_B_r)
+# 2-DOF 五杆: 4 个舵机 (hip_A + hip_B 各左右) 全部独立位置控制, 对齐真机
 ACT_TAU_L = 0
 ACT_TAU_R = 1
 ACT_HIP_A_L = 2
 ACT_HIP_A_R = 3
+ACT_HIP_B_L = 4
+ACT_HIP_B_R = 5
 
-# 五杆对称耦合多项式: knee_A = poly(hip_A), 从 MuJoCo 实测 Q_A==Q_B 标定 (deg=4, max_err 0.004rad)
-# hip_B = -hip_A, knee_B = -knee_A (镜像)。D0 58→207mm 全程对应 hip_A ∈ [0, -1.52] rad
-HIP_STROKE = 1.52    # 曲柄半行程 rad (对称步态 D0 58→207mm)
-_KNEE_POLY = jp.array([0.00153, -0.54342, 0.35176, -0.17995, -0.09033])  # [c0,c1,c2,c3,c4]
+# 五杆机构行程: 曲柄半行程 rad (2-DOF 五杆, 各曲柄独立 ±HIP_STROKE)
+HIP_STROKE = 1.52    # 曲柄半行程 rad
 
 # 观测维度
-# 训练用 4 步堆叠 → 108 维 proprio (RSL-RL ActorCritic 直接消费)
-# RMA adapter 需 50 步历史 → 蒸馏时从 obs 序列提取, 见 distill.py
-OBS_DIM_BASE = 27     # 9 组本体感受 (对称步态只观测驱动侧 hip_A_l/r)
+# 训练用 4 步堆叠 → 124 维 proprio (RSL-RL ActorCritic 直接消费)
+OBS_DIM_BASE = 35    # 全观测 4 舵机 (hip_A + hip_B 各左右): 3+3+4+8+2+4+6+3+2
 HISTORY_STEPS = 4
-OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS  # 108
+OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS  # 140
 PRIVILEGED_DIM = 9    # friction(1)+mass_scale(1)+com_bias(3)+inertia_scale(1)+torque_scale(1)+delay(2)
-ACTION_DIM = 4        # [dtau_L, dtau_R, hip_A_l_goal, hip_A_r_goal]
+ACTION_DIM = 6        # [dtau_L, dtau_R, hip_A_l, hip_A_r, hip_B_l, hip_B_r]
 DELAY_BUFFER_LEN = 3   # 最大延迟缓冲 (3步×20ms=60ms, 覆盖 DR_DELAY_ACT=30ms + DR_DELAY_SENSE=20ms)
 
 # 物理常量 (JAX 数组)
@@ -338,7 +337,7 @@ class KuafuMjxEnv(MjxEnv):
 
     # ---- 观测 ----
     def _base_observation(self, data: mjx.Data, env_state: EnvState) -> jax.Array:
-        """27 维本体感受观测 (对称步态: 只观测驱动侧 hip_A_l/r)."""
+        """31 维本体感受观测 (2-DOF 五杆: 全观测 4 舵机 hip_A + hip_B 各左右)."""
         # 机身姿态 (3): roll/pitch/yaw from quaternion (Pitch 采用 arcsin)
         qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
         roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
@@ -355,9 +354,13 @@ class KuafuMjxEnv(MjxEnv):
         wheel_vel = jp.stack([data.qvel[QVEL_WHEEL_L], data.qvel[QVEL_WHEEL_R]])
         wheel_state = jp.concatenate([wheel_pos, wheel_vel])
 
-        # 髋关节状态 (4): 驱动侧 2 舵机位置+速度 (hip_B 由对称耦合确定, 不冗余观测)
-        hip_pos = jp.stack([data.qpos[QPOS_HIP_A_L], data.qpos[QPOS_HIP_A_R]])
-        hip_vel = jp.stack([data.qvel[QVEL_HIP_A_L], data.qvel[QVEL_HIP_A_R]])
+        # 髋关节状态 (8): 4 舵机位置+速度 (hip_A + hip_B 各左右, 2-DOF 独立)
+        hip_pos = jp.stack([
+            data.qpos[QPOS_HIP_A_L], data.qpos[QPOS_HIP_A_R],
+            data.qpos[QPOS_HIP_B_L], data.qpos[QPOS_HIP_B_R]])
+        hip_vel = jp.stack([
+            data.qvel[QVEL_HIP_A_L], data.qvel[QVEL_HIP_A_R],
+            data.qvel[QVEL_HIP_B_L], data.qvel[QVEL_HIP_B_R]])
         hip_state = jp.concatenate([hip_pos, hip_vel])
 
         # 轮力矩观测 (2): 执行器力 (actuator_force)
@@ -365,12 +368,13 @@ class KuafuMjxEnv(MjxEnv):
             data.actuator_force[ACT_TAU_L], data.actuator_force[ACT_TAU_R]
         ])
 
-        # 腿力矩观测 (2): 驱动侧舵机电流→力矩代理
+        # 腿力矩观测 (4): 4 舵机电流→力矩代理
         hip_torque = jp.array([
             data.actuator_force[ACT_HIP_A_L], data.actuator_force[ACT_HIP_A_R],
+            data.actuator_force[ACT_HIP_B_L], data.actuator_force[ACT_HIP_B_R],
         ])
 
-        # 上一步动作 (4)
+        # 上一步动作 (6)
         last_action = env_state.prev_action
 
         # 命令 (3): v_cmd, w_cmd, d0_cmd
@@ -384,13 +388,13 @@ class KuafuMjxEnv(MjxEnv):
             attitude,        # 3
             ang_vel,         # 3
             wheel_state,     # 4
-            hip_state,       # 4
+            hip_state,       # 8
             wheel_torque,    # 2
-            hip_torque,      # 2
-            last_action,     # 4
+            hip_torque,      # 4
+            last_action,     # 6
             command,         # 3
             phase_clock,     # 2
-        ])                    # = 27
+        ])                    # = 31
 
     def _privileged_observation(self, env_state: EnvState) -> jax.Array:
         """9 维特权观测 (teacher only)."""
@@ -447,19 +451,27 @@ class KuafuMjxEnv(MjxEnv):
         ang_vel_error = (yaw_rate - env_state.w_cmd) ** 2
         ang_vel_tracking = jp.exp(-ang_vel_error / 0.25)
 
-        # default_pose: 跟踪 d0_cmd (关节空间正则)。对称步态下驱动曲柄 hip_A 单调编码 D0
-        # d0_cmd=dwell 时 hip_target=0, 即惩罚偏离默认站立姿态 (joint pose regularization)
-        # (hip_A ∈ [0, -1.52] ↔ D0 ∈ [58, 207]mm, 标定见 _KNEE_POLY)
+        # default_pose: 关节空间正则, 惩罚偏离默认站立姿态 (joint pose regularization)
+        # 2-DOF 五杆: 4 个曲柄都应回到目标。d0_cmd=dwell 时目标=0 (全部曲柄归零)
+        # 伸展时 hip_A 目标=-d0_norm×HIP_STROKE, hip_B 镜像 (对称伸展驻留构型)
         d0_norm = (env_state.d0_cmd - P.D0_MIN) / (P.D0_MAX - P.D0_MIN)
-        hip_target = -d0_norm * HIP_STROKE          # 目标 hip_A 角 (伸展为负)
-        hip_actual = (data.qpos[QPOS_HIP_A_L] + data.qpos[QPOS_HIP_A_R]) / 2.0
-        default_pose = jp.exp(-((hip_actual - hip_target) ** 2) / 0.1)
+        hip_A_target = -d0_norm * HIP_STROKE       # A 链目标 (伸展为负)
+        hip_B_target = d0_norm * HIP_STROKE        # B 链镜像 (对称构型 Q 在 X=0)
+        hip_A_actual = (data.qpos[QPOS_HIP_A_L] + data.qpos[QPOS_HIP_A_R]) / 2.0
+        hip_B_actual = (data.qpos[QPOS_HIP_B_L] + data.qpos[QPOS_HIP_B_R]) / 2.0
+        pose_err = ((hip_A_actual - hip_A_target) ** 2
+                    + (hip_B_actual - hip_B_target) ** 2)
+        default_pose = jp.exp(-pose_err / 0.1)
 
         # alive: 存活奖励, 对抗训练初期"一碰就死"的局部最优 (T1 轮式用 0.25, KUAFU 有
         # 坚实 orientation+tracking 故降至 0.1; 配合 FALL_GRACE_STEPS 软终止)
         alive = 1.0
 
         # --- style (负向惩罚) ---
+        # ang_vel_xy: 惩罚 roll/pitch 角速度 (ωx²+ωy²), 抑制高频抖动。
+        # orientation 只约束姿态角, ang_vel_xy 约束角速度 — 两者互补防"姿态正但抖动"
+        ang_vel_xy = -(ang_vel_local[0] ** 2 + ang_vel_local[1] ** 2)
+
         # action_rate: -‖a_t - a_{t-1}‖² (一阶, Go1/T1 不用二阶 jerk)
         action_rate = -jp.sum((action - env_state.prev_action) ** 2)
 
@@ -472,12 +484,17 @@ class KuafuMjxEnv(MjxEnv):
             + jp.abs(data.qvel[QVEL_WHEEL_R] * data.actuator_force[ACT_TAU_R]))
         hip_energy = (
             data.actuator_force[ACT_HIP_A_L] ** 2
-            + data.actuator_force[ACT_HIP_A_R] ** 2)
+            + data.actuator_force[ACT_HIP_A_R] ** 2
+            + data.actuator_force[ACT_HIP_B_L] ** 2
+            + data.actuator_force[ACT_HIP_B_R] ** 2)
         energy = -(wheel_energy + hip_energy)
 
-        # torque_limit: 超连续安全扭矩惩罚 (仅驱动侧 2 舵机)
-        tau_excess = jp.maximum(jp.abs(data.actuator_force[ACT_HIP_A_L]) - TAU_CONT, 0) \
+        # torque_limit: 超连续安全扭矩惩罚 (4 舵机)
+        tau_excess = (
+            jp.maximum(jp.abs(data.actuator_force[ACT_HIP_A_L]) - TAU_CONT, 0)
             + jp.maximum(jp.abs(data.actuator_force[ACT_HIP_A_R]) - TAU_CONT, 0)
+            + jp.maximum(jp.abs(data.actuator_force[ACT_HIP_B_L]) - TAU_CONT, 0)
+            + jp.maximum(jp.abs(data.actuator_force[ACT_HIP_B_R]) - TAU_CONT, 0))
         torque_limit = -tau_excess
 
         total = (
@@ -486,6 +503,7 @@ class KuafuMjxEnv(MjxEnv):
             + 1.0 * orientation
             + 0.3 * default_pose
             + 0.1 * alive
+            + 0.05 * ang_vel_xy
             + 0.01 * action_rate
             + 0.001 * energy
             + 0.5 * torque_limit
@@ -625,48 +643,27 @@ class KuafuMjxEnv(MjxEnv):
             data.qvel[QVEL_WHEEL_R])
 
         # 腿: 位置目标 (q=0 = 驻留态, delayed_action±1 → ±HIP_STROKE rad)
-        # 对称步态: action[2]=hip_A_l 目标, action[3]=hip_A_r 目标 (hip_B 由 equality 镜像)
-        hip_goal = delayed_action[2:4] * HIP_STROKE
+        # 2-DOF 五杆: action[2:4]=hip_A_l/r 目标, action[4:6]=hip_B_l/r 目标 (4 舵机独立)
+        hip_goal = delayed_action[2:6] * HIP_STROKE
 
         # 舵机死区: |hip_goal| < deadband 时输出 0 (齿轮间隙)
         hip_goal = jp.where(jp.abs(hip_goal) < env_state.deadband, 0.0, hip_goal)
 
-        # 组装 ctrl (用随机化后的 model, 非 self._mjx_model; nu=4: tau_l, tau_r, q_hip_A_l, q_hip_A_r)
+        # 组装 ctrl (用随机化后的 model; nu=6: tau_l, tau_r, q_hip_A_l/r, q_hip_B_l/r)
         ctrl = jp.zeros(model.nu)
         ctrl = ctrl.at[ACT_TAU_L].set(tau_wheel_l)
         ctrl = ctrl.at[ACT_TAU_R].set(tau_wheel_r)
         ctrl = ctrl.at[ACT_HIP_A_L].set(hip_goal[0])
         ctrl = ctrl.at[ACT_HIP_A_R].set(hip_goal[1])
+        ctrl = ctrl.at[ACT_HIP_B_L].set(hip_goal[2])
+        ctrl = ctrl.at[ACT_HIP_B_R].set(hip_goal[3])
         data = data.replace(ctrl=ctrl)
 
         # ---- 物理步进 (10 子步) ----
+        # 2-DOF 五杆: 闭链靠 <connect site1/site2> 物理铰接维持 (硬 solver),
+        # 无需 follower forcing — 训练/eval/真机三者一致。
         for _ in range(N_SUBSTEPS):
             data = mjx.step(model, data)
-            # 强制对称耦合 follower (权威运动学, 防止约束求解器漂移到错误分支)
-            # hip_B = -hip_A, knee_A = poly(hip_A), knee_B = -knee_A
-            hA_l = data.qpos[QPOS_HIP_A_L]; hA_r = data.qpos[QPOS_HIP_A_R]
-            dhA_l = data.qvel[QVEL_HIP_A_L]; dhA_r = data.qvel[QVEL_HIP_A_R]
-            kA_l = jp.polyval(_KNEE_POLY[::-1], hA_l)   # jp.polyval 高阶在前
-            kA_r = jp.polyval(_KNEE_POLY[::-1], hA_r)
-            # knee 对 hip_A 的导数 (链法则用于 qvel)
-            dkA_l = jp.polyval((_KNEE_POLY[1:]*jp.arange(1,5))[::-1], hA_l)
-            dkA_r = jp.polyval((_KNEE_POLY[1:]*jp.arange(1,5))[::-1], hA_r)
-            # 链式 .at[].set() 更新多索引 (单 qpos/qvel 参数内串接)
-            qpos = (data.qpos
-                    .at[QPOS_HIP_B_L].set(-hA_l)
-                    .at[QPOS_HIP_B_R].set(-hA_r)
-                    .at[QPOS_KNEE_A_L].set(kA_l)
-                    .at[QPOS_KNEE_A_R].set(kA_r)
-                    .at[QPOS_KNEE_B_L].set(-kA_l)
-                    .at[QPOS_KNEE_B_R].set(-kA_r))
-            qvel = (data.qvel
-                    .at[QVEL_HIP_B_L].set(-dhA_l)
-                    .at[QVEL_HIP_B_R].set(-dhA_r)
-                    .at[QVEL_KNEE_A_L].set(dkA_l*dhA_l)
-                    .at[QVEL_KNEE_A_R].set(dkA_r*dhA_r)
-                    .at[QVEL_KNEE_B_L].set(-dkA_l*dhA_l)
-                    .at[QVEL_KNEE_B_R].set(-dkA_r*dhA_r))
-            data = data.replace(qpos=qpos, qvel=qvel)
 
         # ---- 更新状态 ----
         rng, resample_rng = jax.random.split(env_state.rng)

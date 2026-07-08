@@ -4,12 +4,12 @@ KUAFU Teacher 推理模型 — 匹配 RSL-RL 2.x checkpoint 的真实结构
 
 checkpoint 实际键名 (从 model_0.pt 实读, 对称步态降 DOF 后):
   model_state_dict:
-    std:               (ACTION_DIM,)   动作标准差 (4)
-    actor.0.weight:    (H, OBS_DIM)    actor 输入=OBS_DIM (仅 proprio, 108)
+    std:               (ACTION_DIM,)   动作标准差 (6)
+    actor.0.weight:    (H, OBS_DIM)    actor 输入=OBS_DIM (仅 proprio, 140)
     actor.0.bias:      (H,)
     actor.2.weight:    (H, H)
     actor.4.weight:    (H, H)
-    actor.6.weight:    (ACTION_DIM, H) 最后一层 Linear 在 Sequential 内 (4)
+    actor.6.weight:    (ACTION_DIM, H) 最后一层 Linear 在 Sequential 内 (6)
     critic.0.weight:   (H, PRIVILEGED_DIM)  critic 输入=9 (仅 privileged)
     critic.6.weight:   (1, H)
   obs_norm_state_dict:
@@ -36,7 +36,7 @@ class TeacherInferenceModel(nn.Module):
       action = model(obs_tensor)  # obs: (B, OBS_DIM) → action: (B, ACTION_DIM)
     """
 
-    def __init__(self, obs_dim: int = 108, action_dim: int = 4, hidden: tuple = (512, 512, 512)):
+    def __init__(self, obs_dim: int = 140, action_dim: int = 6, hidden: tuple = (512, 512, 512)):
         super().__init__()
         # actor: Linear(140,256) ELU Linear(256,256) ELU Linear(256,256) ELU Linear(256,6)
         # 键名: actor.0, actor.2, actor.4, actor.6 (Sequential 索引)
@@ -59,7 +59,7 @@ class TeacherInferenceModel(nn.Module):
         return torch.tanh(self.actor(obs_norm))
 
     @classmethod
-    def from_checkpoint(cls, ckpt_path: str, obs_dim: int = 108, action_dim: int = 4) -> "TeacherInferenceModel":
+    def from_checkpoint(cls, ckpt_path: str, obs_dim: int = 140, action_dim: int = 6) -> "TeacherInferenceModel":
         """从 RSL-RL checkpoint 加载, 并断言权重全部命中."""
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         model_state = ckpt.get("model_state_dict", {})

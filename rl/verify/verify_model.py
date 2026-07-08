@@ -55,11 +55,11 @@ def main():
 
     # 期望: floating(7) + 2 轮 + 4 腿曲柄 + 4 膝(被动) = 但膝是闭链被动关节
     # nq: root 7 + wheel_l/r 各1 + hip_A/B_l/r 各1 + knee_A/B_l/r 各1 = 7+2+4+4=17
-    # nu: 对称步态仅 2 轮 motor + 2 驱动 hip_A position = 4 (hip_B 由 joint equality 镜像)
-    # neq: 6 个 joint equality (hip_B×2, knee_A×2, knee_B×2) 锁定对称 1-DOF 切片
+    # nu: 2 轮 motor + 4 舵机 position (hip_A + hip_B 各左右, 2-DOF 五杆全独立驱动) = 6
+    # neq: 2 个 connect (每条腿 Q 点物理铰接闭链约束)
     r.check("自由度数 nq=17", m.nq == 17, f"nq={m.nq}")
-    r.check("执行器 nu=4 (2轮+2驱动髋)", m.nu == 4, f"nu={m.nu}")
-    r.check("对称耦合约束 neq=6", m.neq == 6, f"neq={m.neq}")
+    r.check("执行器 nu=6 (2轮+4舵机)", m.nu == 6, f"nu={m.nu}")
+    r.check("Q点闭链约束 neq=2", m.neq == 2, f"neq={m.neq}")
     r.check("keyframe 数=1", m.nkey == 1, f"nkey={m.nkey}")
 
     # ---- 2. 总质量与 COM ----
@@ -140,9 +140,11 @@ def main():
         tau = F * P.R / 2
         d4.ctrl[0] = tau  # tau_l
         d4.ctrl[1] = tau  # tau_r
-        # 腿保持驻留: q=0 即驻留姿态 (position actuator ctrl=0; hip_B 由 equality 镜像)
+        # 腿保持驻留: q=0 即驻留姿态 (4 舵机 ctrl=0, position actuator 维持)
         d4.ctrl[2] = 0  # q_hip_A_l
         d4.ctrl[3] = 0  # q_hip_A_r
+        d4.ctrl[4] = 0  # q_hip_B_l
+        d4.ctrl[5] = 0  # q_hip_B_r
         mujoco.mj_step(m, d4)
         if abs(theta) < np.radians(1) and step > 50:
             recovered = True

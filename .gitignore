@@ -48,3 +48,5 @@ desktop.ini
 ~$*.SLDPRT
 ~$*.SLDDRW
 MUJOCO_LOG.TXT
+logs/
+*.bak
