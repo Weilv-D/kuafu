@@ -9,10 +9,11 @@ design.md 对应章节:
   §2.1 观测空间 / §2.2 动作空间 / §2.3 Reward / §2.4 域随机化
   §2.5 Teacher-Student + RMA / §3.x MJCF 建模
 
-通过 mujoco_playground.wrapper_torch.RSLRLBraxWrapper 桥接到 PyTorch/RSL-RL:
+通过 train.py 的 DirectVecEnv 适配器桥接到 PyTorch/RSL-RL 2.x:
   DLPack 零拷贝 (JAX DeviceArray ↔ torch.Tensor), JAX cuda13 与 torch cu130 共享 runtime。
+  (绕过 playground 的 BraxAutoResetWrapper, 避免 info 结构不兼容)
 
-依赖: mujoco-mjx, jax, mujoco_playground
+依赖: mujoco-mjx, jax, mujoco_playground (MjxEnv 基类)
 """
 import os
 import sys
@@ -505,8 +506,8 @@ class KuafuMjxEnv(MjxEnv):
         # 腿: 位置目标 (q=0 = 驻留态, action 映射到角度)
         hip_goal = action[2:6] * 1.0  # ±1 rad 范围
 
-        # 组装 ctrl
-        ctrl = jp.zeros(self._mjx_model.nu)
+        # 组装 ctrl (用随机化后的 model, 非 self._mjx_model)
+        ctrl = jp.zeros(model.nu)
         ctrl = ctrl.at[ACT_TAU_L].set(tau_wheel_l)
         ctrl = ctrl.at[ACT_TAU_R].set(tau_wheel_r)
         ctrl = ctrl.at[ACT_HIP_A_L].set(hip_goal[0])

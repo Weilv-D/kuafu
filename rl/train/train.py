@@ -2,7 +2,7 @@
 """
 KUAFU Teacher PPO 训练入口 — design.md §2.6 阶段 1
 
-MJX 环境 (JAX/GPU) → RSLRLBraxWrapper (DLPack 零拷贝) → RSL-RL 2.x PPO (PyTorch/GPU)
+MJX 环境 (JAX/GPU) → DirectVecEnv (DLPack 零拷贝) → RSL-RL 2.x PPO (PyTorch/GPU)
 Teacher: critic 含特权信息 (friction/mass/COM/inertia), actor 仅本体感受。
 
 运行:
@@ -152,7 +152,11 @@ def main():
             self.episode_length_buf = torch.where(
                 done > 0, torch.zeros_like(self.episode_length_buf), self.episode_length_buf)
 
-            info = {"time_outs": done.float(), "observations": {}, "log": {}}
+            # time_outs: 仅 timeout(非倒下) 时为 True, 用于 value bootstrap
+            # 倒下 (fallen) 的 episode 不做 bootstrap (终止态 value=0)
+            fallen = self._to_torch(self._state.metrics.get("fallen", jax.numpy.zeros_like(done_jax)))
+            time_outs = (done > 0) & (fallen < 0.5)  # done 但未倒下 = 超时
+            info = {"time_outs": time_outs.float(), "observations": {}, "log": {}}
             if isinstance(obs, dict) and "privileged_state" in obs:
                 info["observations"]["critic"] = self._to_torch(obs["privileged_state"])
             return state_obs, reward, done, info

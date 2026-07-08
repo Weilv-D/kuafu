@@ -51,9 +51,10 @@ def playback_teacher(ckpt_path: str, xml_path: str, duration: float = 10.0):
         for _ in range(int(duration / model.opt.timestep)):
             if not viewer.is_running():
                 break
-            # 简化: LQR 控制保持平衡 (实际应用 policy 推理)
-            # theta = pitch from quaternion
-            theta = 2 * np.arctan2(data.qpos[5], data.qpos[3])
+            # LQR 控制保持平衡 (简化: 实际应用 policy 推理)
+            # pitch 从完整四元数提取 (与 kuafu_mjx_env.py 一致)
+            qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
+            theta = np.arctan2(2 * (qw * qy - qx * qz), 1 - 2 * (qy**2 + qz**2))
             x = data.qpos[0]
             xdot = data.qvel[0]
             thetadot = data.qvel[4]
@@ -104,9 +105,10 @@ def playback_student(ckpt_path: str, xml_path: str, duration: float = 10.0):
                 action = student(proprio_tensor, history_tensor)
             action_np = action.numpy()[0]
 
-            # 应用动作 (简化: 用 LQR 底层 + RL 残差)
+            # 应用动作 (LQR 底层 + RL 残差)
             import kuafu_physics as P
-            theta = 2 * np.arctan2(data.qpos[5], data.qpos[3])
+            qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
+            theta = np.arctan2(2 * (qw * qy - qx * qz), 1 - 2 * (qy**2 + qz**2))
             F = -(P.LQR_K @ np.array([data.qpos[0], theta, data.qvel[0], data.qvel[4]]))
             tau_lqr = F * P.R / 2.0
             data.ctrl[0] = np.clip(tau_lqr + action_np[0] * P.TAU_WHEEL_RATED, -1.1, 1.1)

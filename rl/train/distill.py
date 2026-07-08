@@ -151,6 +151,16 @@ def distill(
             jax_action = jp.array(action_np)
             state = step_fn(state, jax_action)
 
+            # auto-reset done 环境 (与 train.py 一致)
+            done_jax = state.done
+            if bool(jax.device_get(done_jax.any())):
+                reset_state = reset_fn(jax.random.split(jax.random.PRNGKey(it * 1000 + collected), num_envs))
+                done_mask = done_jax.astype(jax.numpy.bool_)
+                state = jax.tree_util.tree_map(
+                    lambda cur, new: jax.numpy.where(
+                        done_mask.reshape((-1,) + (1,) * (cur.ndim - 1)), new, cur),
+                    state, reset_state)
+
             # 更新历史缓冲 (用最新 proprio 的前 35 维 base obs)
             # 简化: 从 140 维 obs 取最后 35 维作为当前步 base_obs
             current_base = proprio_np[:, -35:]  # (num_envs, 35)
