@@ -80,6 +80,8 @@ ACT_HIP_A_R = 4
 ACT_HIP_B_R = 5
 
 # 观测维度
+# 训练用 4 步堆叠 → 140 维 proprio (RSL-RL ActorCritic 直接消费)
+# RMA adapter 需 50 步历史 → 蒸馏时从 obs 序列提取, 见 distill.py
 OBS_DIM_BASE = 35     # 9 组本体感受
 HISTORY_STEPS = 4
 OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS  # 140

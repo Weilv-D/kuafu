@@ -2,6 +2,9 @@
 """
 KUAFU 课程地形系统 — design.md §2.6 / §3.4
 
+[状态: 未接入训练] 当前 train.py 不引用本模块。平地平衡 reward 收敛后,
+在 train.py 外层循环中调用 CurriculumController, 将 difficulty 传入环境。
+
 按课程阶段 (difficulty 0.0→1.0) 程序化生成地形:
   0.0: plane (平地平衡)
   0.3: plane_tilt (坡度 ±10°)

@@ -72,6 +72,8 @@ def main():
     print(f"  JAX 设备: {jax.devices()}")
 
     # ---- 创建环境 ----
+    # 当前: 平地训练 (difficulty=0)。课程地形 (terrain.py CurriculumController)
+    #       待平地 reward 收敛后在此处接入: 按 episode 成功率更新 difficulty。
     from rl.env.kuafu_mjx_env import KuafuMjxEnv, OBS_DIM, PRIVILEGED_DIM
     import torch
 
