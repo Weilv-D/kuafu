@@ -88,6 +88,7 @@ HISTORY_STEPS = 4
 OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS  # 140
 PRIVILEGED_DIM = 9    # friction(1)+mass_scale(1)+com_bias(3)+inertia_scale(1)+torque_scale(1)+delay(2)
 ACTION_DIM = 6
+DELAY_BUFFER_LEN = 3   # 最大延迟缓冲 (3步×20ms=60ms, 覆盖 DR_DELAY_ACT=30ms + DR_DELAY_SENSE=20ms)
 
 # 物理常量 (JAX 数组)
 LQR_K = jp.array(P.LQR_K)          # [-4.47, -61.18, -5.82, -4.02]
@@ -140,6 +141,12 @@ class EnvState:
     com_bias: jax.Array
     inertia_scale: jax.Array
     torque_scale: jax.Array
+    # deadband (舵机死区, rad)
+    deadband: jax.Array
+    # delay (执行器延迟, 单位: 控制步数; 1步=20ms)
+    delay_steps: jax.Array
+    # 动作延迟缓冲 (DELAY_BUFFER_LEN × ACTION_DIM)
+    action_buffer: jax.Array
 
 
 class KuafuMjxEnv(MjxEnv):
@@ -200,7 +207,7 @@ class KuafuMjxEnv(MjxEnv):
     def _randomize_model(self, model: mjx.Model, rng: jax.Array) -> mjx.Model:
         """对 mjx.Model 注入域随机化 (per-env).
 
-        在 reset 时调用, 对 mass/friction/inertia 注入随机扰动。
+        在 reset 时调用, 对 mass/friction/inertia/COM/wheel_radius/servo_pd 注入随机扰动。
         """
         # mass ±15%
         mass_scale = jax.random.uniform(
@@ -229,6 +236,30 @@ class KuafuMjxEnv(MjxEnv):
         # chassis 是 body 1, 修改其 inertial pos
         new_ipos = model.body_ipos.at[1].set(model.body_ipos[1] + com_bias)
         model = model.replace(body_ipos=new_ipos)
+
+        # wheel_radius ±1mm (修改轮 geom size[0])
+        rng, wr_rng = jax.random.split(rng)
+        wheel_r_delta = jax.random.uniform(
+            wr_rng, minval=P.DR_WHEEL_R[0], maxval=P.DR_WHEEL_R[1])
+        # 轮 geom 是 wheel_l(idx 4) 和 wheel_r(idx 9), size[0]=半径
+        geom_size = model.geom_size
+        geom_size = geom_size.at[4, 0].set(geom_size[4, 0] + wheel_r_delta)
+        geom_size = geom_size.at[9, 0].set(geom_size[9, 0] + wheel_r_delta)
+        model = model.replace(geom_size=geom_size)
+
+        # servo_pd ±30% (修改 position actuator 的 gainprm[0]=kp, biasprm[1]=-kp*d, biasprm[2]=-kv)
+        rng, pd_rng = jax.random.split(rng)
+        pd_scale = jax.random.uniform(
+            pd_rng, minval=P.DR_SERVO_PD[0], maxval=P.DR_SERVO_PD[1])
+        # position actuator idx: 2,3,4,5 (q_hip_A_l..q_hip_B_r)
+        # gainprm[0] = kp, biasprm[2] = -kv (MuJoCo position actuator: gain=fixed kp, bias=affine -kp*q0 -kv*vel)
+        gainprm = model.actuator_gainprm
+        biasprm = model.actuator_biasprm
+        for i in [2, 3, 4, 5]:
+            gainprm = gainprm.at[i, 0].set(gainprm[i, 0] * pd_scale)
+            biasprm = biasprm.at[i, 0].set(biasprm[i, 0] * pd_scale)  # -kp*q0
+            biasprm = biasprm.at[i, 2].set(biasprm[i, 2] * pd_scale)  # -kv
+        model = model.replace(actuator_gainprm=gainprm, actuator_biasprm=biasprm)
 
         return model, friction, mass_scale, inertia_scale, com_bias
 
@@ -342,7 +373,8 @@ class KuafuMjxEnv(MjxEnv):
             env_state.com_bias,                   # 3
             env_state.inertia_scale[jp.newaxis],  # 1
             env_state.torque_scale[jp.newaxis],   # 1
-            jp.zeros(2),                          # 2 (delay 占位)
+            env_state.deadband[jp.newaxis],       # 1 死区真值
+            env_state.delay_steps.astype(jp.float32)[jp.newaxis],  # 1 延迟步数真值
         ])
 
     def _observation(self, data: mjx.Data, env_state: EnvState):
@@ -437,13 +469,22 @@ class KuafuMjxEnv(MjxEnv):
     # ============================================================
     def reset(self, rng: jax.Array) -> State:
         """重置环境到驻留态 + 域随机化 + 命令采样."""
-        rng, cmd_rng, dr_rng, torque_rng = jax.random.split(rng, 4)
+        rng, cmd_rng, dr_rng, torque_rng, db_rng, delay_rng = jax.random.split(rng, 6)
 
-        # 域随机化 (含 COM 偏移注入物理)
+        # 域随机化 (mass/friction/inertia/COM/wheel_r/servo_pd 注入物理)
         model, friction, mass_scale, inertia_scale, com_bias = self._randomize_model(
             self._mjx_model, dr_rng)
         torque_scale = jax.random.uniform(
             torque_rng, minval=DR["torque_const"][0], maxval=DR["torque_const"][1])
+
+        # deadband [0, 2°] (舵机齿轮间隙)
+        deadband = jax.random.uniform(
+            db_rng, minval=P.DR_DEADBAND[0], maxval=P.DR_DEADBAND[1])
+
+        # delay [0, 30ms] → 步数 (1步=20ms, 最大 1-2 步)
+        delay_s = jax.random.uniform(
+            delay_rng, minval=P.DR_DELAY_ACT[0], maxval=P.DR_DELAY_ACT[1])
+        delay_steps = jp.round(delay_s / CTRL_DT).astype(jp.int32)
 
         # 命令
         cmd_rng, v_cmd, w_cmd, d0_cmd = self._sample_command(cmd_rng)
@@ -475,6 +516,9 @@ class KuafuMjxEnv(MjxEnv):
             com_bias=com_bias,
             inertia_scale=inertia_scale,
             torque_scale=torque_scale,
+            deadband=deadband,
+            delay_steps=delay_steps,
+            action_buffer=jp.zeros((DELAY_BUFFER_LEN, ACTION_DIM)),
         )
 
         obs = self._observation(data, env_state)
@@ -494,13 +538,30 @@ class KuafuMjxEnv(MjxEnv):
         env_state = state.info["env_state"]
         model = state.info["model"]
 
+        # ---- 执行器延迟: 从 action_buffer 取延迟前的动作 ----
+        # action_buffer shape: (DELAY_BUFFER_LEN, ACTION_DIM), [0]=最旧, [-1]=最新
+        # delay_steps=0 → 用当前 action; delay_steps=1 → 用上一步; delay_steps=2 → 用上上步
+        delayed_action = jp.where(
+            env_state.delay_steps >= 2,
+            env_state.action_buffer[0],  # 2 步前
+            jp.where(
+                env_state.delay_steps >= 1,
+                env_state.action_buffer[1],  # 1 步前
+                action,                      # 当前
+            )
+        )
+        # 更新 action_buffer: 推入当前 action, 丢弃最旧
+        new_action_buffer = jp.concatenate([
+            env_state.action_buffer[1:],
+            action[jp.newaxis, :],
+        ], axis=0)
+
         # ---- LQR 底层 (torque_scale 模拟电机常数偏差, 对 LQR+RL 统一生效) ----
         tau_lqr = self._lqr_balance(data) * env_state.torque_scale
 
-        # ---- RL 残差叠加 ----
-        # 轮: τ = clip(LQR + Δτ×τ_rated, ±堵转), 再 back-EMF 限制
-        tau_wheel_l = tau_lqr + action[0] * TAU_WHEEL_RATED * env_state.torque_scale
-        tau_wheel_r = tau_lqr + action[1] * TAU_WHEEL_RATED * env_state.torque_scale
+        # ---- RL 残差叠加 (用延迟后的动作) ----
+        tau_wheel_l = tau_lqr + delayed_action[0] * TAU_WHEEL_RATED * env_state.torque_scale
+        tau_wheel_r = tau_lqr + delayed_action[1] * TAU_WHEEL_RATED * env_state.torque_scale
         tau_wheel_l = self._limit_wheel_torque(
             jp.clip(tau_wheel_l, -TAU_WHEEL_STALL, TAU_WHEEL_STALL),
             data.qvel[QVEL_WHEEL_L])
@@ -508,9 +569,12 @@ class KuafuMjxEnv(MjxEnv):
             jp.clip(tau_wheel_r, -TAU_WHEEL_STALL, TAU_WHEEL_STALL),
             data.qvel[QVEL_WHEEL_R])
 
-        # 腿: 位置目标 (q=0 = 驻留态, action±1 → ±1.52 rad)
-        # D0 全程 58→207mm 对应曲柄偏转 ±1.52 rad (analysis 运动学确认)
-        hip_goal = action[2:6] * 1.52
+        # 腿: 位置目标 (q=0 = 驻留态, delayed_action±1 → ±1.52 rad)
+        # D0 全程 58→207mm 对应曲柄偏转 ±1.52 rad
+        hip_goal = delayed_action[2:6] * 1.52
+
+        # 舵机死区: |hip_goal| < deadband 时输出 0 (齿轮间隙)
+        hip_goal = jp.where(jp.abs(hip_goal) < env_state.deadband, 0.0, hip_goal)
 
         # 组装 ctrl (用随机化后的 model, 非 self._mjx_model)
         ctrl = jp.zeros(model.nu)
@@ -551,6 +615,7 @@ class KuafuMjxEnv(MjxEnv):
             prev_prev_action=env_state.prev_action,
             prev_action=action,
             step_count=env_state.step_count + 1,
+            action_buffer=new_action_buffer,
         )
 
         # 更新 obs history (append 当前帧, 丢弃最老帧)

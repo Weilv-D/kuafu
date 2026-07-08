@@ -5,8 +5,8 @@ KUAFU 课程地形系统 — design.md §2.6 / §3.4
 [状态: 未接入训练] 当前 train.py 不引用本模块。平地平衡 reward 收敛后,
 在 train.py 外层循环中调用 CurriculumController, 将 difficulty 传入环境。
 
-注意: get_terrain_params 使用 Python if/elif (不可 JIT)。
-接入 vmap 环境时需重写为 jax.lax.switch, 或从 host 侧每 episode 更新 difficulty。
+get_terrain_params 使用 difficulty 连续缩放 (JIT 兼容, 无 Python if 分支)。
+terrain_type 选择由 host 侧 CurriculumController (Python 类) 决定。
 
 按课程阶段 (difficulty 0.0→1.0) 程序化生成地形:
   0.0: plane (平地平衡)
@@ -24,43 +24,27 @@ import numpy as np
 
 
 def get_terrain_params(difficulty: float, rng: jax.Array) -> dict:
-    """按课程难度生成地形参数.
+    """按课程难度生成地形参数 (JIT 兼容).
+
+    使用 difficulty 连续缩放而非 if/elif 分支, 保证 jax.jit/vmap 安全。
+    terrain_type 由 host 侧 CurriculumController 决定 (Python if), 仅传 difficulty 标量给 JAX。
 
     Args:
-        difficulty: 0.0 (平地) → 1.0 (最难)
+        difficulty: 0.0 (平地) → 1.0 (最难), 连续值
         rng: JAX 随机数种子
 
     Returns:
-        dict: terrain_type, tilt_angle, roughness_amplitude, stair_height, push_force
+        dict: tilt_angle, roughness, stair_height, push_force (均为 JAX array)
     """
-    rng, t_rng, tilt_rng, rough_rng, stair_rng, push_rng = jax.random.split(rng, 6)
+    rng, tilt_rng, rough_rng, stair_rng, push_rng = jax.random.split(rng, 5)
 
-    # 地形类型按 difficulty 分段
-    if difficulty < 0.2:
-        terrain_type = "plane"
-    elif difficulty < 0.4:
-        terrain_type = "plane_tilt"
-    elif difficulty < 0.6:
-        terrain_type = "hfield"
-    elif difficulty < 0.8:
-        terrain_type = "mesh_stair"
-    else:
-        terrain_type = "perturbation"
-
-    # 坡度 (plane_tilt): difficulty 越高坡度越大, 最大 ±10°
+    # 所有参数由 difficulty 连续缩放 (无 if 分支, JIT 安全)
     tilt_angle = jax.random.uniform(tilt_rng, minval=-1, maxval=1) * jp.radians(10) * difficulty
-
-    # 粗糙度 (hfield): 噪声幅度 0-15mm
     roughness = jax.random.uniform(rough_rng, maxval=0.015) * difficulty
-
-    # 台阶高度 (mesh_stair): 0-30mm
     stair_height = jax.random.uniform(stair_rng, maxval=0.030) * difficulty
-
-    # 推力扰动 (perturbation): 随机脉冲力 0-2N
     push_force = jax.random.uniform(push_rng, minval=-2.0, maxval=2.0) * difficulty
 
     return {
-        "terrain_type": terrain_type,
         "tilt_angle": tilt_angle,
         "roughness": roughness,
         "stair_height": stair_height,
