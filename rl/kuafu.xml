@@ -97,6 +97,12 @@
           <joint name="knee_A_l" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
           <geom type="capsule" fromto="0 0 0  0.107 0 -0.1037" size="0.006" mass="0.035"/>
           <site name="Q_A_l" pos="0.107 0 -0.1037" size="0.003"/>   <!-- Q 相对 P1 -->
+          <!-- 左轮: 挂在 Q 点 (link_A_l 末端), 随闭链运动; pos=Q 相对 P1 -->
+          <body name="wheel_l" pos="0.107 0 -0.1037">
+            <joint name="wheel_l" type="hinge" axis="0 1 0" frictionloss="0" damping="0" limited="false"/>
+            <geom type="cylinder" size="0.03908 0.0174" zaxis="0 1 0" mass="0.349"
+                  friction="0.8 0.02 0.001" rgba="0.1 0.1 0.1 1"/>
+          </body>
         </body>
       </body>
 
@@ -111,13 +117,6 @@
         </body>
       </body>
 
-      <!-- 左轮 (Q 点处, 绕 Y 轴滚; Q=(0,-58) 相对髋面) -->
-      <body name="wheel_l" pos="0 0.098 -0.058">
-        <joint name="wheel_l" type="hinge" axis="0 1 0" frictionloss="0" damping="0" limited="false"/>
-        <geom type="cylinder" size="0.03908 0.0174" zaxis="0 1 0" mass="0.349"
-              friction="0.8 0.02 0.001" rgba="0.1 0.1 0.1 1"/>
-      </body>
-
       <!-- ============================================================
            右腿 (Y=-0.098) 闭链五杆 — 几何与左腿一致 (仅 Y 镜像)
            ============================================================ -->
@@ -128,6 +127,12 @@
           <joint name="knee_A_r" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
           <geom type="capsule" fromto="0 0 0  0.107 0 -0.1037" size="0.006" mass="0.035"/>
           <site name="Q_A_r" pos="0.107 0 -0.1037" size="0.003"/>
+          <!-- 右轮: 挂在 Q 点 (link_A_r 末端), 随闭链运动; pos=Q 相对 P1 -->
+          <body name="wheel_r" pos="0.107 0 -0.1037">
+            <joint name="wheel_r" type="hinge" axis="0 1 0" frictionloss="0" damping="0" limited="false"/>
+            <geom type="cylinder" size="0.03908 0.0174" zaxis="0 1 0" mass="0.349"
+                  friction="0.8 0.02 0.001" rgba="0.1 0.1 0.1 1"/>
+          </body>
         </body>
       </body>
 
@@ -139,13 +144,6 @@
           <geom type="capsule" fromto="0 0 0  -0.107 0 -0.1037" size="0.006" mass="0.035"/>
           <site name="Q_B_r" pos="-0.107 0 -0.1037" size="0.003"/>
         </body>
-      </body>
-
-      <!-- 右轮 -->
-      <body name="wheel_r" pos="0 -0.098 -0.058">
-        <joint name="wheel_r" type="hinge" axis="0 1 0" frictionloss="0" damping="0" limited="false"/>
-        <geom type="cylinder" size="0.03908 0.0174" zaxis="0 1 0" mass="0.349"
-              friction="0.8 0.02 0.001" rgba="0.1 0.1 0.1 1"/>
       </body>
 
     </body>
