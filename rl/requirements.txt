@@ -1,16 +1,19 @@
-# KUAFU RL 依赖（分两组）
-# 安装: pip install -r rl/requirements.txt
+# KUAFU RL 依赖（分三组）
+# 安装: rl/.venv/bin/pip install -r rl/requirements.txt
 
 # ---- 验证必需（CPU 即可，物理验证 + viewer）----
 mujoco>=3.1
 numpy>=1.24
 scipy>=1.10
 
-# ---- 训练必需（GPU + MJX，验证物理后装）----
+# ---- 训练必需（GPU + MJX + PyTorch 混合栈）----
+# JAX cuda13 与 PyTorch >=2.11 共享 CUDA 13 runtime, DLPack 零拷贝桥接
 jax[cuda13]>=0.4
 mujoco-mjx>=3.1
-flax>=0.8
-optax>=0.2
-# rsl-rl          # MuJoCo Playground 训练栈，从源码装: pip install git+https://github.com/erikwijmans/rsl_rl
-# torch>=2.2      # ONNX 导出用，导出时装
-# onnxruntime>=1.17  # 推理验证用
+playground>=0.0.3            # MuJoCo Playground: MjxEnv 基类 + wrapper_torch.RSLRLBraxWrapper
+rsl-rl-lib>=2.0              # RSL-RL PPO + OnPolicyRunner (PyTorch, legged_gym 事实标准)
+torch>=2.11                  # CUDA 13 稳定 wheel (PyTorch 2.11+, 2026.3+)
+
+# ---- 导出 + 日志 ----
+onnxruntime>=1.17            # ONNX 推理验证 (Pi5 aarch64 部署用)
+wandb                        # 训练日志
