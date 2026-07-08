@@ -59,7 +59,7 @@ def make_train_cfg() -> dict:
 def main():
     parser = argparse.ArgumentParser(description="KUAFU Teacher PPO Training")
     parser.add_argument("--num_envs", type=int, default=1024, help="并行环境数")
-    parser.add_argument("--iterations", type=int, default=1000, help="训练迭代数")
+    parser.add_argument("--iterations", type=int, default=3000, help="训练迭代数")
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
     parser.add_argument("--log_dir", type=str, default="rl/checkpoints", help="checkpoint 目录")
     parser.add_argument("--smoke_test", action="store_true", help="烟测模式 (5 iteration)")
