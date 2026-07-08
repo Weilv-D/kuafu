@@ -7,25 +7,30 @@
 ```
 KuaFu/
 ├── README.md
+├── mechanism.html                  ← 3D 交互可视化
 ├── docs/                           ← 设计文档
-│   └── KUAFU.md                    ← 单一真源（总览/硬件/结构/分析/装机/符号）
-├── analysis/                       ← 分析代码
-│   ├── kuafu/                      ← 共享包 (机构解算 + 统一样式)
-│   │   ├── mechanism.py            ←   运动学/静力学/动力学/力椭球 (纯 numpy)
-│   │   └── styling.py              ←   色盲安全色板 + 出版级排版
-│   ├── plot/                       ← 绘图脚本
-│   │   ├── plot_dynamics.py
-│   │   ├── plot_force_ellipsoid.py
-│   │   ├── plot_workspace.py
-│   │   └── plot_lqr.py
-│   ├── test/                       ← 单元测试
-│   │   └── test_kinematics.py
-│   ├── output/                     ← 生成图表
-│   ├── run_all.py                  ← 一键运行
-│   ├── pyproject.toml              ← 包定义 (pip install -e .)
-│   └── requirements.txt
-├── 3Dmodel/                        ← CAD 模型
-└── mechanism.html                  ← 3D 交互可视化
+│   ├── KUAFU.md                    ← 单一真源（总览/硬件/结构/分析/装机/符号）
+│   └── plans/                      ← 设计过程文档
+└── analysis/                       ← 分析代码
+    ├── kuafu/                      ← 共享包 (机构解算 + 统一样式)
+    │   ├── mechanism.py            ←   运动学/静力学/动力学/力椭球 (纯 numpy)
+    │   └── styling.py              ←   色盲安全色板 + 出版级排版
+    ├── plot/                       ← 绘图脚本
+    │   ├── plot_dynamics.py
+    │   ├── plot_force_ellipsoid.py
+    │   ├── plot_workspace.py
+    │   └── plot_lqr.py
+    ├── optimize/                   ← 蒙特卡洛参数优化
+    │   ├── analyze_params.py
+    │   ├── monte_carlo.py
+    │   ├── dirichlet_weights.py
+    │   └── plot_optimization.py
+    ├── test/                       ← 单元测试
+    │   └── test_kinematics.py
+    ├── output/                     ← 生成图表
+    ├── run_all.py                  ← 一键运行
+    ├── pyproject.toml              ← 包定义 (pip install -e .)
+    └── requirements.txt
 ```
 
 ## 快速开始
@@ -38,9 +43,9 @@ python run_all.py        # 生成图表 + 运行测试
 
 ## 关键参数
 
-整机 2.21 kg（含充电宝），包络 240 × 231 × 147 mm（驻留态），预算 ≤1500 元。
+整机 2.21 kg（含充电宝），包络 240 × 231 × 147 mm（驻留态）。
 机构参数（d/a/b/D₀）经蒙特卡洛 10 万采样优化验证，详见 `docs/KUAFU.md`。
 
 ---
 
-v2.1 / 2026-07-08
+v2.2 / 2026-07-08
