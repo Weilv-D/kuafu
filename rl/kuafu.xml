@@ -34,8 +34,12 @@
   <default>
     <joint armature="0.01" damping="0.05" frictionloss="0.005" limited="true"/>
     <geom condim="3" friction="0.8 0.02 0.001" rgba="0.6 0.6 0.7 1"/>
-    <position kp="80" kv="2" forcerange="-1 1"/>   <!-- design §3.3: ST3215 位置环初值, forcerange=连续安全±1Nm -->
+    <position kp="80" kv="2" forcerange="-1 1"/>   <!-- design §3.3: ST3215 位置环, ctrlrange 在各 actuator 显式指定 -->
     <motor ctrlrange="-1.1 1.1"/>        <!-- design §3.3: DDSM315 堵转 ±1.1 Nm -->
+    <!-- 腿/机身连杆不参与碰撞, 只保留轮-地接触 (闭链关节 + equality 已约束运动学) -->
+    <default class="leg">
+      <geom contype="0" conaffinity="0"/>
+    </default>
   </default>
 
   <!-- ============================================================
@@ -67,7 +71,7 @@
       <inertial pos="0 0 0.003" mass="0.609" diaginertia="0.0014 0.0018 0.0022"/>
         <!-- 机架结构: 上甲板179g + 下甲板370g + 线材60g = 609g (9000he CAD实测体积×1.01), 电子件由下方质量点承担 -->
       <geom name="body_box" type="box" size="0.120 0.098 0.025" pos="0 0 0.025"
-            rgba="0.5 0.5 0.6 1" mass="0"/>  <!-- KUAFU §4.1: 240×196×50, 质量由 inertial 承担 -->
+            rgba="0.5 0.5 0.6 1" mass="0" contype="0" conaffinity="0"/>  <!-- KUAFU §4.1: 240×196×50, 质量由 inertial 承担, 不参与碰撞 -->
       <!-- 电子件质量点 (KUAFU §5.4 COM 表), inertial pos 在 body 局部为原点 -->
       <body name="battery" pos="0 0 -0.018"><inertial pos="0 0 0" mass="0.285" diaginertia="1e-5 1e-5 1e-5"/></body>
       <body name="buck"    pos="0 0 -0.016"><inertial pos="0 0 0" mass="0.140" diaginertia="1e-5 1e-5 1e-5"/></body>
@@ -92,10 +96,10 @@
       <!-- A 链: 髋A → 曲柄 a → P1 → 连杆 b → Q -->
       <body name="crank_A_l" pos="-0.026 0.098 0">
         <joint name="hip_A_l" type="hinge" axis="0 1 0" range="-2.0 2.0"/>
-        <geom type="capsule" fromto="0 0 0  -0.081 0 0.0457" size="0.006" mass="0.036"/>
+        <geom type="capsule" class="leg" fromto="0 0 0  -0.081 0 0.0457" size="0.006" mass="0.036"/>
         <body name="link_A_l" pos="-0.081 0 0.0457">   <!-- P1 相对髋A -->
           <joint name="knee_A_l" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
-          <geom type="capsule" fromto="0 0 0  0.107 0 -0.1037" size="0.006" mass="0.035"/>
+          <geom type="capsule" class="leg" fromto="0 0 0  0.107 0 -0.1037" size="0.006" mass="0.035"/>
           <site name="Q_A_l" pos="0.107 0 -0.1037" size="0.003"/>   <!-- Q 相对 P1 -->
           <!-- 左轮: 挂在 Q 点 (link_A_l 末端), 随闭链运动; pos=Q 相对 P1 -->
           <body name="wheel_l" pos="0.107 0 -0.1037">
@@ -109,10 +113,10 @@
       <!-- B 链: 髋B → 曲柄 a → P2 → 连杆 b → Q -->
       <body name="crank_B_l" pos="0.026 0.098 0">
         <joint name="hip_B_l" type="hinge" axis="0 1 0" range="-2.0 2.0"/>
-        <geom type="capsule" fromto="0 0 0  0.081 0 0.0457" size="0.006" mass="0.036"/>
+        <geom type="capsule" class="leg" fromto="0 0 0  0.081 0 0.0457" size="0.006" mass="0.036"/>
         <body name="link_B_l" pos="0.081 0 0.0457">   <!-- P2 相对髋B -->
           <joint name="knee_B_l" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
-          <geom type="capsule" fromto="0 0 0  -0.107 0 -0.1037" size="0.006" mass="0.035"/>
+          <geom type="capsule" class="leg" fromto="0 0 0  -0.107 0 -0.1037" size="0.006" mass="0.035"/>
           <site name="Q_B_l" pos="-0.107 0 -0.1037" size="0.003"/>  <!-- Q 相对 P2 -->
         </body>
       </body>
@@ -122,10 +126,10 @@
            ============================================================ -->
       <body name="crank_A_r" pos="-0.026 -0.098 0">
         <joint name="hip_A_r" type="hinge" axis="0 1 0" range="-2.0 2.0"/>
-        <geom type="capsule" fromto="0 0 0  -0.081 0 0.0457" size="0.006" mass="0.036"/>
+        <geom type="capsule" class="leg" fromto="0 0 0  -0.081 0 0.0457" size="0.006" mass="0.036"/>
         <body name="link_A_r" pos="-0.081 0 0.0457">
           <joint name="knee_A_r" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
-          <geom type="capsule" fromto="0 0 0  0.107 0 -0.1037" size="0.006" mass="0.035"/>
+          <geom type="capsule" class="leg" fromto="0 0 0  0.107 0 -0.1037" size="0.006" mass="0.035"/>
           <site name="Q_A_r" pos="0.107 0 -0.1037" size="0.003"/>
           <!-- 右轮: 挂在 Q 点 (link_A_r 末端), 随闭链运动; pos=Q 相对 P1 -->
           <body name="wheel_r" pos="0.107 0 -0.1037">
@@ -138,10 +142,10 @@
 
       <body name="crank_B_r" pos="0.026 -0.098 0">
         <joint name="hip_B_r" type="hinge" axis="0 1 0" range="-2.0 2.0"/>
-        <geom type="capsule" fromto="0 0 0  0.081 0 0.0457" size="0.006" mass="0.036"/>
+        <geom type="capsule" class="leg" fromto="0 0 0  0.081 0 0.0457" size="0.006" mass="0.036"/>
         <body name="link_B_r" pos="0.081 0 0.0457">
           <joint name="knee_B_r" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
-          <geom type="capsule" fromto="0 0 0  -0.107 0 -0.1037" size="0.006" mass="0.035"/>
+          <geom type="capsule" class="leg" fromto="0 0 0  -0.107 0 -0.1037" size="0.006" mass="0.035"/>
           <site name="Q_B_r" pos="-0.107 0 -0.1037" size="0.003"/>
         </body>
       </body>
@@ -185,11 +189,11 @@
     <motor name="tau_l" joint="wheel_l" gear="1"/>
     <motor name="tau_r" joint="wheel_r" gear="1"/>
 
-    <!-- 腿: position actuator, forcerange=±1Nm 连续安全 (design §3.3, 由 default 继承) -->
-    <position name="q_hip_A_l" joint="hip_A_l"/>
-    <position name="q_hip_B_l" joint="hip_B_l"/>
-    <position name="q_hip_A_r" joint="hip_A_r"/>
-    <position name="q_hip_B_r" joint="hip_B_r"/>
+    <!-- 腿: position actuator, ctrl=目标角(rad) 范围±2.0=joint range; forcerange=±1Nm 连续安全 -->
+    <position name="q_hip_A_l" joint="hip_A_l" ctrlrange="-2.0 2.0"/>
+    <position name="q_hip_B_l" joint="hip_B_l" ctrlrange="-2.0 2.0"/>
+    <position name="q_hip_A_r" joint="hip_A_r" ctrlrange="-2.0 2.0"/>
+    <position name="q_hip_B_r" joint="hip_B_r" ctrlrange="-2.0 2.0"/>
   </actuator>
 
   <!-- ============================================================
