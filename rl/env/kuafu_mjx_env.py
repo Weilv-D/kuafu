@@ -463,12 +463,17 @@ class KuafuMjxEnv(MjxEnv):
         # action_rate: -‖a_t - a_{t-1}‖² (一阶, Go1/T1 不用二阶 jerk)
         action_rate = -jp.sum((action - env_state.prev_action) ** 2)
 
-        # energy: -Σ|ω·τ| 全驱动关节 (轮 + 髋, Go1 _cost_energy 形式)
-        energy = -(
+        # energy: 分执行器类型度量 (保护电机不过热 + 鼓励省电)
+        # 轮 DDSM315 (准直驱 gear≈1): |τ·ω| = 机械功率 ≈ 电能消耗 ✓
+        # 髋 ST3215 (1:345 高减速比): τ² = 铜损 I²R 代理 (保持力矩时 ω=0 但仍发热,
+        #   |τ·ω| 无法惩罚静态大力矩; τ² 才能反映过热风险 ∝ 电流²)
+        wheel_energy = (
             jp.abs(data.qvel[QVEL_WHEEL_L] * data.actuator_force[ACT_TAU_L])
-            + jp.abs(data.qvel[QVEL_WHEEL_R] * data.actuator_force[ACT_TAU_R])
-            + jp.abs(data.qvel[QVEL_HIP_A_L] * data.actuator_force[ACT_HIP_A_L])
-            + jp.abs(data.qvel[QVEL_HIP_A_R] * data.actuator_force[ACT_HIP_A_R]))
+            + jp.abs(data.qvel[QVEL_WHEEL_R] * data.actuator_force[ACT_TAU_R]))
+        hip_energy = (
+            data.actuator_force[ACT_HIP_A_L] ** 2
+            + data.actuator_force[ACT_HIP_A_R] ** 2)
+        energy = -(wheel_energy + hip_energy)
 
         # torque_limit: 超连续安全扭矩惩罚 (仅驱动侧 2 舵机)
         tau_excess = jp.maximum(jp.abs(data.actuator_force[ACT_HIP_A_L]) - TAU_CONT, 0) \

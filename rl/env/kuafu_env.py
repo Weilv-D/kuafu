@@ -83,7 +83,7 @@ REWARD_TASK = {
 }
 REWARD_STYLE = {
     "action_rate":       ("-‖a_t - a_{t-1}‖² (一阶)",  0.01),
-    "energy":            ("-Σ|ω·τ| 全驱动关节",         0.001),
+    "energy":            ("轮|τ·ω|(机械功率) + 髋τ²(铜损)", 0.001),
     "torque_limit":      ("超连续安全扭矩惩罚",          0.5),
 }
 REWARD_SAFETY = {
