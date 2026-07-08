@@ -416,8 +416,8 @@ class KuafuMjxEnv(MjxEnv):
         # 归一化目标: (d0_cmd - 58) / (207 - 58) × 1.52
         d0_norm = (env_state.d0_cmd - P.D0_MIN) / (P.D0_MAX - P.D0_MIN)
         hip_diff_target = d0_norm * 1.52
-        hip_diff_l = data.qpos[QPOS_HIP_A_L] - data.qpos[QPOS_HIP_B_L]
-        hip_diff_r = data.qpos[QPOS_HIP_A_R] - data.qpos[QPOS_HIP_B_R]
+        hip_diff_l = 0.5 * (data.qpos[QPOS_HIP_A_L] - data.qpos[QPOS_HIP_B_L])
+        hip_diff_r = 0.5 * (data.qpos[QPOS_HIP_A_R] - data.qpos[QPOS_HIP_B_R])
         hip_diff = (hip_diff_l + hip_diff_r) / 2.0
         leg_height = jp.exp(-((hip_diff - hip_diff_target) ** 2) / 0.1)
 

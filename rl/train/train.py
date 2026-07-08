@@ -135,7 +135,6 @@ def main():
             done_jax = self._state.done
             reward_jax = self._state.reward
             fallen_jax = self._state.metrics.get("fallen", jax.numpy.zeros_like(done_jax))
-            obs_before_reset = self._state.obs
 
             # auto-reset done 环境 (保持 JAX array 在 GPU 上)
             done_any = jax.device_get(done_jax.any())
@@ -148,8 +147,8 @@ def main():
                         done_mask.reshape((-1,) + (1,) * (cur.ndim - 1)), new, cur),
                     self._state, reset_state)
 
-            # 用 reset 前的 obs (done 环境返回终止态 obs, 非 reset 后的初始 obs)
-            obs = obs_before_reset
+            # done 帧返回 reset 后的初始观测 (PPO 新 episode 首步用初始 obs)
+            obs = self._state.obs
             state_obs = self._to_torch(obs["state"]) if isinstance(obs, dict) else self._to_torch(obs)
             reward = self._to_torch(reward_jax)
             done = self._to_torch(done_jax)
