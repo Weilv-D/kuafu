@@ -60,9 +60,13 @@ CURRICULUM = [
 ]
 
 # ============================================================
-# 域随机化 (design.md §2.4, 从 env.kuafu_env 取)
+# 域随机化 (design.md §2.4, 从物理真源取, 避免链式加载 JAX)
 # ============================================================
-from rl.env import DOMAIN_RANDOMIZATION  # noqa: E402
+DR_MASS = P.DR_MASS
+DR_COM = P.DR_COM
+DR_INERTIA = P.DR_INERTIA
+DR_FRICTION = P.DR_FRICTION
+DR_TORQUE_CONST = P.DR_TORQUE_CONST
 
 # ============================================================
 # 收敛判据 (design.md M5 验收)

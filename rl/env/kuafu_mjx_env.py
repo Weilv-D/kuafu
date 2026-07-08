@@ -219,15 +219,18 @@ class KuafuMjxEnv(MjxEnv):
         rng, inertia_rng = jax.random.split(rng)
         inertia_scale = jax.random.uniform(
             inertia_rng, minval=DR["inertia"][0], maxval=DR["inertia"][1])
-        diaginertia = model.body_inertia[:, :3] * inertia_scale
+        diaginertia = model.body_inertia * inertia_scale
         model = model.replace(body_inertia=diaginertia)
 
-        return model, friction, mass_scale, inertia_scale
+        # COM 偏移 ±20mm (注入到 chassis body_ipos)
+        rng, com_rng = jax.random.split(rng)
+        com_bias = jax.random.uniform(
+            com_rng, (3,), minval=P.DR_COM[0], maxval=P.DR_COM[1])
+        # chassis 是 body 1, 修改其 inertial pos
+        new_ipos = model.body_ipos.at[1].set(model.body_ipos[1] + com_bias)
+        model = model.replace(body_ipos=new_ipos)
 
-    def _randomize_com(self, rng: jax.Array) -> jax.Array:
-        """COM 偏移 ±20mm (3 轴)."""
-        return jax.random.uniform(
-            rng, (3,), minval=P.DR_COM[0], maxval=P.DR_COM[1])
+        return model, friction, mass_scale, inertia_scale, com_bias
 
     # ---- 命令采样 ----
     def _sample_command(self, rng: jax.Array):
@@ -379,10 +382,14 @@ class KuafuMjxEnv(MjxEnv):
         ang_vel_error = (yaw_rate - env_state.w_cmd) ** 2
         ang_vel_tracking = jp.exp(-ang_vel_error / 0.25)
 
-        # leg_height: 鼓励接近 d0_cmd (髋关节角偏离 → D0 变化)
+        # leg_height: 跟踪 d0_cmd (髋角均值跟踪命令对应的目标角)
+        # d0_cmd ∈ [58, 207]mm, 驻留态 D0=58 → hip≈0, 伸展 D0=207 → hip≈+1.5rad
+        # 归一化目标: (d0_cmd - 58) / (207 - 58) × 1.5 ≈ d0_cmd_norm × 1.5
+        d0_norm = (env_state.d0_cmd - P.D0_MIN) / (P.D0_MAX - P.D0_MIN)
+        hip_target = d0_norm * 1.5  # 目标髋角
         hip_avg = (data.qpos[QPOS_HIP_A_L] + data.qpos[QPOS_HIP_B_L]
                    + data.qpos[QPOS_HIP_A_R] + data.qpos[QPOS_HIP_B_R]) / 4.0
-        leg_height = jp.exp(-hip_avg**2 / 0.1)
+        leg_height = jp.exp(-((hip_avg - hip_target) ** 2) / 0.1)
 
         # --- style ---
         # action_rate: -‖a_t - a_{t-1}‖²
@@ -432,12 +439,11 @@ class KuafuMjxEnv(MjxEnv):
     # ============================================================
     def reset(self, rng: jax.Array) -> State:
         """重置环境到驻留态 + 域随机化 + 命令采样."""
-        rng, cmd_rng, dr_rng, com_rng, torque_rng = jax.random.split(rng, 5)
+        rng, cmd_rng, dr_rng, torque_rng = jax.random.split(rng, 4)
 
-        # 域随机化
-        model, friction, mass_scale, inertia_scale = self._randomize_model(
+        # 域随机化 (含 COM 偏移注入物理)
+        model, friction, mass_scale, inertia_scale, com_bias = self._randomize_model(
             self._mjx_model, dr_rng)
-        com_bias = self._randomize_com(com_rng)
         torque_scale = jax.random.uniform(
             torque_rng, minval=DR["torque_const"][0], maxval=DR["torque_const"][1])
 
@@ -503,8 +509,9 @@ class KuafuMjxEnv(MjxEnv):
             jp.clip(tau_wheel_r, -TAU_WHEEL_STALL, TAU_WHEEL_STALL),
             data.qvel[QVEL_WHEEL_R])
 
-        # 腿: 位置目标 (q=0 = 驻留态, action 映射到角度)
-        hip_goal = action[2:6] * 1.0  # ±1 rad 范围
+        # 腿: 位置目标 (q=0 = 驻留态, action±1 → ±1 rad)
+        # 行程限制在 ±1 rad (非 joint range ±2.0), 避免五杆奇异区 (D0 边界)
+        hip_goal = action[2:6] * 1.0
 
         # 组装 ctrl (用随机化后的 model, 非 self._mjx_model)
         ctrl = jp.zeros(model.nu)
@@ -521,9 +528,8 @@ class KuafuMjxEnv(MjxEnv):
             data = mjx.step(model, data)
 
         # ---- 更新状态 ----
-        rng, cmd_rng = jax.random.split(env_state.rng)
+        rng, resample_rng = jax.random.split(env_state.rng)
         # 每 100 步重采样命令 (2s @ 50Hz)
-        rng, resample_rng = jax.random.split(rng)
         need_resample = (env_state.step_count % 100 == 0) & (env_state.step_count > 0)
         rng, k1, k2, k3 = jax.random.split(resample_rng, 4)
         new_v = jax.random.uniform(k1, minval=V_CMD_RANGE[0], maxval=V_CMD_RANGE[1])
@@ -533,7 +539,11 @@ class KuafuMjxEnv(MjxEnv):
         w_cmd = jp.where(need_resample, new_w, env_state.w_cmd)
         d0_cmd = jp.where(need_resample, new_d0, env_state.d0_cmd)
 
-        # 先更新 env_state (含 prev_action/step_count), 再用新 state 算 obs
+        # ---- reward / done / obs (用旧 env_state, 因 reward 需要 prev_action) ----
+        reward = self._compute_reward(data, env_state, action)
+        done = self._is_done(data, env_state)
+
+        # 更新 env_state (reward 算完后再更新 prev_action)
         env_state = env_state.replace(
             rng=rng,
             v_cmd=v_cmd,
@@ -544,17 +554,13 @@ class KuafuMjxEnv(MjxEnv):
             step_count=env_state.step_count + 1,
         )
 
-        # 用更新后的 env_state 统一计算 base_obs + history (避免双重计算的不一致)
+        # 用更新后的 env_state 计算 obs (obs 里的 last_action 应是新动作)
         base_obs = self._base_observation(data, env_state)
         new_history = jp.concatenate([
             env_state.obs_history[1:],
             base_obs[jp.newaxis, :],
         ], axis=0)
         env_state = env_state.replace(obs_history=new_history)
-
-        # ---- reward / done / obs ----
-        reward = self._compute_reward(data, env_state, action)
-        done = self._is_done(data, env_state)
 
         # 倒下惩罚
         qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]

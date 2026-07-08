@@ -22,49 +22,70 @@ import mujoco.viewer
 
 
 def playback_teacher(ckpt_path: str, xml_path: str, duration: float = 10.0):
-    """加载 RSL-RL Teacher checkpoint, 在原生 MuJoCo 中回放.
-
-    Teacher policy = ActorCritic, 输入 obs, 输出 action_mean。
-    """
+    """加载 RSL-RL Teacher checkpoint, 在原生 MuJoCo 中回放 policy 行为."""
     import torch
+    from rl.train.teacher_model import TeacherInferenceModel
 
-    # 加载模型
+    # 加载 MuJoCo 模型
     model = mujoco.MjModel.from_xml_path(xml_path)
     data = mujoco.MjData(model)
     mujoco.mj_resetDataKeyframe(model, data, 0)
     mujoco.mj_forward(model, data)
 
-    # 加载 checkpoint
-    checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    actor_state = checkpoint.get("actor_state_dict") or checkpoint.get("model_state_dict", {})
-    print(f"Checkpoint keys: {list(checkpoint.keys())[:5]}")
+    # 加载 teacher policy (精确匹配 checkpoint 结构)
+    teacher = TeacherInferenceModel.from_checkpoint(ckpt_path)
+    teacher.eval()
+    print(f"Teacher policy 加载成功")
 
-    # 构造 obs (简化: 用随机 obs 验证管线)
-    obs_dim = 140
-    obs = np.zeros(obs_dim, dtype=np.float32)
-
-    print(f"启动回放: {duration:.0f}s, obs_dim={obs_dim}")
+    print(f"启动回放: {duration:.0f}s")
     print("  (关闭窗口退出)")
 
-    # 启动 viewer
+    # 历史缓冲 (4 步 × 35 维)
+    obs_history = np.zeros((4, 35), dtype=np.float32)
+
     with mujoco.viewer.launch_passive(model, data) as viewer:
         for _ in range(int(duration / model.opt.timestep)):
             if not viewer.is_running():
                 break
-            # LQR 控制保持平衡 (简化: 实际应用 policy 推理)
-            # pitch 从完整四元数提取 (与 kuafu_mjx_env.py 一致)
+
+            # 构造 35 维 base obs (简化版, 实际从 sensor 读)
             qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
-            theta = np.arctan2(2 * (qw * qy - qx * qz), 1 - 2 * (qy**2 + qz**2))
+            roll = np.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
+            pitch = np.arctan2(2 * (qw * qy - qx * qz), 1 - 2 * (qy**2 + qz**2))
+            yaw = np.arctan2(2 * (qw * qz + qx * qy), 1 - 2 * (qz**2 + qy**2))
+            attitude = np.array([roll, pitch, yaw])
+            ang_vel = data.qvel[3:6]
+            wheel_state = np.array([data.qpos[9], data.qpos[14], data.qvel[8], data.qvel[13]])
+            hip_state = np.array([data.qpos[7], data.qpos[10], data.qpos[12], data.qpos[15],
+                                  data.qvel[6], data.qvel[9], data.qvel[11], data.qvel[14]])
+            wheel_torque = np.array([data.actuator_force[0], data.actuator_force[1]])
+            hip_torque = np.array([data.actuator_force[2], data.actuator_force[3],
+                                   data.actuator_force[4], data.actuator_force[5]])
+            last_action = np.zeros(6)  # 简化
+            command = np.array([0.0, 0.0, 58.0])  # 静止 + 驻留
+            phase_clock = np.array([0.0, 1.0])
+            base_obs = np.concatenate([attitude, ang_vel, wheel_state, hip_state,
+                                       wheel_torque, hip_torque, last_action, command, phase_clock])
+
+            # 更新历史
+            obs_history = np.roll(obs_history, -1, axis=0)
+            obs_history[-1] = base_obs
+            obs_flat = obs_history.flatten()  # (140,)
+
+            # Teacher 推理
+            with torch.no_grad():
+                action = teacher(torch.from_numpy(obs_flat).float()).numpy()
+
+            # LQR 底层 + RL 残差
+            import kuafu_physics as P
             x = data.qpos[0]
             xdot = data.qvel[0]
             thetadot = data.qvel[4]
-            import kuafu_physics as P
-            F = -(P.LQR_K @ np.array([x, theta, xdot, thetadot]))
-            tau = F * P.R / 2.0
-            data.ctrl[0] = np.clip(tau, -P.TAU_WHEEL_STALL, P.TAU_WHEEL_STALL)
-            data.ctrl[1] = np.clip(tau, -P.TAU_WHEEL_STALL, P.TAU_WHEEL_STALL)
-            # 腿保持驻留
-            data.ctrl[2:6] = 0.0
+            F = -(P.LQR_K @ np.array([x, pitch, xdot, thetadot]))
+            tau_lqr = F * P.R / 2.0
+            data.ctrl[0] = np.clip(tau_lqr + action[0] * P.TAU_WHEEL_RATED, -1.1, 1.1)
+            data.ctrl[1] = np.clip(tau_lqr + action[1] * P.TAU_WHEEL_RATED, -1.1, 1.1)
+            data.ctrl[2:6] = action[2:6]
 
             mujoco.mj_step(model, data)
             viewer.sync()

@@ -50,51 +50,17 @@ def distill(
     """
     from rl.env.kuafu_mjx_env import KuafuMjxEnv, OBS_DIM, PRIVILEGED_DIM, ACTION_DIM
     from rl.train.networks import StudentPolicy, count_parameters
+    from rl.train.teacher_model import TeacherInferenceModel
 
     print("=" * 60)
     print("KUAFU Student 蒸馏 (design.md §2.6 阶段 2)")
     print("=" * 60)
 
-    # ---- 加载 Teacher checkpoint ----
+    # ---- 加载 Teacher (精确匹配 RSL-RL checkpoint 结构) ----
     print(f"  加载 Teacher: {teacher_ckpt}")
-    teacher_ckpt_data = torch.load(teacher_ckpt, map_location="cpu", weights_only=False)
-    teacher_model_state = teacher_ckpt_data.get("model_state_dict", {})
-    teacher_obs_norm_state = teacher_ckpt_data.get("obs_norm_state_dict", {})
-    print(f"  Teacher keys: {list(teacher_ckpt_data.keys())}")
-
-    # 构造 Teacher actor (RSL-RL ActorCritic 结构) 用于推理参考动作
-    class TeacherActor(torch.nn.Module):
-        def __init__(self, obs_dim, action_dim, hidden=(256, 256, 256)):
-            super().__init__()
-            layers = []
-            in_d = obs_dim
-            for h in hidden:
-                layers.append(nn.Linear(in_d, h))
-                layers.append(nn.ELU())
-                in_d = h
-            self.actor = nn.Sequential(*layers)
-            self.actor_mean = nn.Linear(in_d, action_dim)
-            self.obs_mean = nn.Parameter(torch.zeros(obs_dim))
-            self.obs_std = nn.Parameter(torch.ones(obs_dim))
-
-        def forward(self, obs):
-            obs_n = (obs - self.obs_mean) / (self.obs_std + 1e-8)
-            return torch.tanh(self.actor_mean(self.actor(obs_n)))
-
-    # Teacher obs = proprio(140) + privileged(9) = 149
-    teacher = TeacherActor(OBS_DIM + PRIVILEGED_DIM, ACTION_DIM).cuda()
-    renamed = {}
-    for k, v in teacher_model_state.items():
-        if k.startswith("actor."):
-            renamed[k[len("actor."):]] = v
-        elif k.startswith("actor_mean."):
-            renamed[k] = v
-    teacher.load_state_dict(renamed, strict=False)
-    if teacher_obs_norm_state and "obs_rms.mean" in teacher_obs_norm_state:
-        teacher.obs_mean.data = teacher_obs_norm_state["obs_rms.mean"].cuda()
-        teacher.obs_std.data = torch.sqrt(teacher_obs_norm_state["obs_rms.var"]).cuda()
+    teacher = TeacherInferenceModel.from_checkpoint(teacher_ckpt, obs_dim=OBS_DIM).cuda()
     teacher.eval()
-    print("  Teacher 推理模型就绪")
+    print("  Teacher 推理模型就绪 (actor 140维 + obs_normalizer)")
 
     # ---- 创建 Student 网络 ----
     student = StudentPolicy(
@@ -132,10 +98,6 @@ def distill(
         while collected < batch_size:
             obs = state.obs
             proprio_jax = obs["state"]       # (num_envs, 140)
-            priv_jax = obs["privileged_state"]  # (num_envs, 9)
-
-            # 构建 teacher 输入: proprio + privileged
-            teacher_input = jp.concatenate([proprio_jax, priv_jax], axis=-1)  # (num_envs, 149)
 
             # student 推理动作 (用于环境执行, DAgger)
             proprio_np = np.array(proprio_jax)
@@ -161,26 +123,23 @@ def distill(
                         done_mask.reshape((-1,) + (1,) * (cur.ndim - 1)), new, cur),
                     state, reset_state)
 
-            # 更新历史缓冲 (用最新 proprio 的前 35 维 base obs)
-            # 简化: 从 140 维 obs 取最后 35 维作为当前步 base_obs
-            current_base = proprio_np[:, -35:]  # (num_envs, 35)
+            # 更新历史缓冲 (从 140 维 obs 取最后 35 维作为当前步 base_obs)
+            current_base = proprio_np[:, -35:]
             history_buffer = np.roll(history_buffer, -1, axis=1)
             history_buffer[:, -1, :] = current_base
 
             # 采集
             proprio_list.append(proprio_np)
             history_list.append(history_np)
-            teacher_full_obs_list.append(np.array(teacher_input))
             collected += num_envs
 
-        # 2. Teacher 给参考动作
+        # 2. Teacher 给参考动作 (teacher 只吃 proprio 140 维, 不吃特权)
         proprio_batch = np.concatenate(proprio_list, axis=0)[:batch_size]
         history_batch = np.concatenate(history_list, axis=0)[:batch_size]
-        teacher_input_batch = np.concatenate(teacher_full_obs_list, axis=0)[:batch_size]
 
         with torch.no_grad():
             teacher_action = teacher(
-                torch.from_numpy(teacher_input_batch).float().cuda())
+                torch.from_numpy(proprio_batch).float().cuda())
 
         # 3. Student 训练 (DAgger: 拟合 teacher 动作)
         student_action = student(

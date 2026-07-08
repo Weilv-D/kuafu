@@ -25,69 +25,15 @@ import kuafu_physics as P
 
 
 def export_teacher(ckpt_path: str, out_path: str):
-    """导出 RSL-RL Teacher ActorCritic → ONNX (仅 actor + obs_normalizer).
+    """导出 RSL-RL Teacher ActorCritic → ONNX (actor + obs_normalizer 合并).
 
-    RSL-RL checkpoint 结构:
-      - model_state_dict: ActorCritic 权重 (actor.* / critic.* / log_std)
-      - obs_norm_state_dict: EmpiricalNormalization 权重
-    导出时合并 obs_normalizer 到 actor 前端, 保证推理时 obs 归一化一致。
+    使用共享的 TeacherInferenceModel (精确匹配 checkpoint 键名)。
     """
     import torch
     from rl.env.kuafu_mjx_env import OBS_DIM, ACTION_DIM
+    from rl.train.teacher_model import TeacherInferenceModel
 
-    checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    print(f"Checkpoint keys: {list(checkpoint.keys())}")
-
-    model_state = checkpoint.get("model_state_dict", {})
-    obs_norm_state = checkpoint.get("obs_norm_state_dict", None)
-
-    # 构造 actor + obs_normalizer 合并的推理模型
-    class TeacherInferenceModel(torch.nn.Module):
-        """obs → normalizer → actor_mean → tanh → action."""
-        def __init__(self, obs_dim, action_dim, hidden=(256, 256, 256)):
-            super().__init__()
-            layers = []
-            in_d = obs_dim
-            for h in hidden:
-                layers.append(torch.nn.Linear(in_d, h))
-                layers.append(torch.nn.ELU())
-                in_d = h
-            self.actor = torch.nn.Sequential(*layers)
-            self.actor_mean = torch.nn.Linear(in_d, action_dim)
-            # EmpiricalNormalization (mean/var 缩放)
-            self.obs_mean = torch.nn.Parameter(torch.zeros(obs_dim))
-            self.obs_std = torch.nn.Parameter(torch.ones(obs_dim))
-
-        def forward(self, obs):
-            obs_norm = (obs - self.obs_mean) / (self.obs_std + 1e-8)
-            h = self.actor(obs_norm)
-            action = torch.tanh(self.actor_mean(h))
-            return action
-
-    model = TeacherInferenceModel(OBS_DIM, ACTION_DIM)
-
-    # 加载 actor 权重 (RSL-RL key: actor.0.weight, actor_mean.weight)
-    renamed = {}
-    for k, v in model_state.items():
-        # 去掉 "actor." 前缀以匹配我们的 self.actor Sequential
-        if k.startswith("actor."):
-            renamed[k[len("actor."):]] = v
-        elif k.startswith("actor_mean."):
-            renamed[k] = v
-    missing, unexpected = model.load_state_dict(renamed, strict=False)
-    print(f"  Actor 权重: missing={len(missing)}, unexpected={len(unexpected)}")
-
-    # 加载 obs normalizer
-    if obs_norm_state:
-        # EmpiricalNormalization: obs_rms.mean / obs_rms.var
-        if "obs_rms.mean" in obs_norm_state:
-            model.obs_mean.data = obs_norm_state["obs_rms.mean"]
-            model.obs_std.data = torch.sqrt(obs_norm_state.get("obs_rms.var", torch.ones_like(model.obs_mean.data)))
-            print("  obs_normalizer: 加载成功")
-        else:
-            print(f"  obs_normalizer: key 不匹配 {list(obs_norm_state.keys())[:5]}")
-
-    model.eval()
+    model = TeacherInferenceModel.from_checkpoint(ckpt_path, obs_dim=OBS_DIM)
 
     # 导出
     dummy_obs = torch.randn(1, OBS_DIM)
@@ -114,8 +60,9 @@ def export_student(ckpt_path: str, out_path: str):
     )
 
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    state = ckpt.get("student_state_dict", ckpt)
-    student.load_state_dict(state, strict=False)
+    state = ckpt.get("student_state_dict", ckpt.get("model_state_dict", ckpt))
+    missing, unexpected = student.load_state_dict(state, strict=False)
+    assert len(missing) == 0, f"Student 权重缺失: {missing}"
     student.eval()
 
     # StudentPolicy.forward(proprio, history) → action
