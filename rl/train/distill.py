@@ -51,10 +51,10 @@ def distill(
     """Student DAgger 蒸馏.
 
     design.md §2.5:
-      Student = trunk(proprio 140 + z 9) + adapter(history→z 9) + policy_head(trunk+z→action 6)
-      Teacher 已训练好, 在特权信息下给出参考动作; student 拟合 teacher 动作与特权信息。
+      Student = trunk(proprio + z) + adapter(history→z) + policy_head(trunk+z→action)
+      Teacher 已训练好 (actor 仅吃 proprio), student 用历史推测特权 z, 拟合 teacher 动作。
     """
-    from rl.env.kuafu_mjx_env import KuafuMjxEnv, OBS_DIM, PRIVILEGED_DIM, ACTION_DIM
+    from rl.env.kuafu_mjx_env import KuafuMjxEnv, OBS_DIM, OBS_DIM_BASE, PRIVILEGED_DIM, ACTION_DIM
     from rl.train.networks import StudentPolicy, count_parameters
     from rl.train.teacher_model import TeacherInferenceModel
 
@@ -62,28 +62,26 @@ def distill(
     print("KUAFU Student 蒸馏 (design.md §2.6 阶段 2)")
     print("=" * 60)
 
-    # ---- 加载 Teacher (吃 combined_obs = 149 维) ----
+    # ---- 加载 Teacher (actor 只吃 proprio, 不含特权) ----
     print(f"  加载 Teacher: {teacher_ckpt}")
-    teacher = TeacherInferenceModel.from_checkpoint(teacher_ckpt, obs_dim=OBS_DIM + PRIVILEGED_DIM).cuda()
+    teacher = TeacherInferenceModel.from_checkpoint(teacher_ckpt, obs_dim=OBS_DIM).cuda()
     teacher.eval()
-    print("  Teacher 推理模型就绪 (actor 149维 + obs_normalizer)")
+    print(f"  Teacher 推理模型就绪 (actor {OBS_DIM}维 proprio + obs_normalizer)")
 
     # ---- 创建 Student 网络 (动态匹配 Teacher 隐藏层维度) ----
     teacher_hidden = [layer.out_features for layer in teacher.actor[:-1] if isinstance(layer, nn.Linear)]
     student = StudentPolicy(
         proprio_dim=OBS_DIM,
-        history_obs_dim=35,
+        history_obs_dim=OBS_DIM_BASE,
         history_len=50,
         action_dim=ACTION_DIM,
         latent_dim=PRIVILEGED_DIM,
         hidden_dims=tuple(teacher_hidden),
     ).cuda()
 
-    # 载入 Teacher 的 Normalizer 参数到 Student Policy Buffers 中
-    student.obs_mean.copy_(teacher._mean[:, :OBS_DIM])
-    student.obs_std.copy_(teacher._std[:, :OBS_DIM])
-    student.priv_mean.copy_(teacher._mean[:, OBS_DIM:])
-    student.priv_std.copy_(teacher._std[:, OBS_DIM:])
+    # 载入 Teacher actor 的 proprio normalizer 到 Student (z 的归一化由 RMA 自适应学习)
+    student.obs_mean.copy_(teacher._mean)
+    student.obs_std.copy_(teacher._std)
     print(f"  Student 参数: {count_parameters(student):,}")
 
     optimizer = optim.Adam(student.parameters(), lr=1e-4)
@@ -97,8 +95,8 @@ def distill(
     state = reset_fn(jax.random.split(jax.random.PRNGKey(42), num_envs))
 
     n_iter = 5 if smoke_test else iterations
-    # 历史缓冲放在 GPU 显存上
-    history_buffer = torch.zeros(num_envs, 50, 35, device="cuda")
+    # 历史缓冲放在 GPU 显存上 (RMA adapter 消费 50 步 base_obs)
+    history_buffer = torch.zeros(num_envs, 50, OBS_DIM_BASE, device="cuda")
 
     print(f"\n开始 DAgger 蒸馏: {n_iter} iterations")
     t0 = time.time()
@@ -106,14 +104,14 @@ def distill(
     for it in range(n_iter):
         # 1. 采集当前环境状态 (JAX GPU → PyTorch GPU 零拷贝)
         obs = state.obs
-        proprio_jax = obs["state"]               # (num_envs, 140)
-        privileged_jax = obs["privileged_state"] # (num_envs, 9)
+        proprio_jax = obs["state"]               # (num_envs, OBS_DIM)
+        privileged_jax = obs["privileged_state"] # (num_envs, PRIVILEGED_DIM)
 
         proprio_torch = to_torch(proprio_jax)
         privileged_torch = to_torch(privileged_jax)
 
         # 时序对齐: 推理动作前先更新 history
-        current_base = proprio_torch[:, -35:]
+        current_base = proprio_torch[:, -OBS_DIM_BASE:]
         history_buffer = torch.roll(history_buffer, shifts=-1, dims=1)
         history_buffer[:, -1, :] = current_base
 
@@ -141,10 +139,9 @@ def distill(
             done_mask_torch = to_torch(done_jax).bool()
             history_buffer[done_mask_torch] = 0.0
 
-        # 2. Teacher 给参考动作 (Teacher 吃 149 维 combined_obs)
-        combined_obs = torch.cat([proprio_torch, privileged_torch], dim=-1)
+        # 2. Teacher 给参考动作 (Teacher actor 只吃 proprio, 无特权泄漏)
         with torch.no_grad():
-            teacher_action = teacher(combined_obs)
+            teacher_action = teacher(proprio_torch)
 
         # 3. Student 训练 (将 1024 样本乱序切分为大小为 256 的 mini-batches)
         student.train()

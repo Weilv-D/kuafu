@@ -2,22 +2,22 @@
 """
 KUAFU Teacher 推理模型 — 匹配 RSL-RL 2.x checkpoint 的真实结构
 
-checkpoint 实际键名 (从 model_0.pt 实读):
+checkpoint 实际键名 (从 model_0.pt 实读, 对称步态降 DOF 后):
   model_state_dict:
-    std:               (6,)            动作标准差
-    actor.0.weight:    (256, 140)      actor 输入=140 (仅 proprio)
-    actor.0.bias:      (256,)
-    actor.2.weight:    (256, 256)
-    actor.4.weight:    (256, 256)
-    actor.6.weight:    (6, 256)        最后一层 Linear 在 Sequential 内
-    critic.0.weight:   (256, 9)        critic 输入=9 (仅 privileged)
-    critic.6.weight:   (1, 256)
+    std:               (ACTION_DIM,)   动作标准差 (4)
+    actor.0.weight:    (H, OBS_DIM)    actor 输入=OBS_DIM (仅 proprio, 108)
+    actor.0.bias:      (H,)
+    actor.2.weight:    (H, H)
+    actor.4.weight:    (H, H)
+    actor.6.weight:    (ACTION_DIM, H) 最后一层 Linear 在 Sequential 内 (4)
+    critic.0.weight:   (H, PRIVILEGED_DIM)  critic 输入=9 (仅 privileged)
+    critic.6.weight:   (1, H)
   obs_norm_state_dict:
-    _mean: (1, 140)    EmpiricalNormalization
-    _var:  (1, 140)
-    _std:  (1, 140)
+    _mean: (1, OBS_DIM)    EmpiricalNormalization
+    _var:  (1, OBS_DIM)
+    _std:  (1, OBS_DIM)
 
-关键: actor 只吃 proprio(140), critic 只吃 privileged(9)。
+关键: actor 只吃 proprio(OBS_DIM), critic 只吃 privileged(9)。
       actor 是 4 层 Linear 全在 Sequential 内 (含输出层), 不是 trunk+head 拆分。
       obs_norm 键名是 _mean/_var/_std, 不是 obs_rms.mean。
 """
@@ -33,10 +33,10 @@ class TeacherInferenceModel(nn.Module):
 
     用法:
       model = TeacherInferenceModel.from_checkpoint(ckpt_path)
-      action = model(obs_tensor)  # obs: (B, 140) → action: (B, 6)
+      action = model(obs_tensor)  # obs: (B, OBS_DIM) → action: (B, ACTION_DIM)
     """
 
-    def __init__(self, obs_dim: int = 140, action_dim: int = 6, hidden: tuple = (256, 256, 256)):
+    def __init__(self, obs_dim: int = 108, action_dim: int = 4, hidden: tuple = (512, 512, 512)):
         super().__init__()
         # actor: Linear(140,256) ELU Linear(256,256) ELU Linear(256,256) ELU Linear(256,6)
         # 键名: actor.0, actor.2, actor.4, actor.6 (Sequential 索引)
@@ -54,12 +54,12 @@ class TeacherInferenceModel(nn.Module):
         self.register_buffer("_std", torch.ones(1, obs_dim))
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        """obs(140) → normalize → actor → action(6)."""
+        """obs(OBS_DIM) → normalize → actor → action(ACTION_DIM)."""
         obs_norm = (obs - self._mean) / (self._std + 1e-8)
         return torch.tanh(self.actor(obs_norm))
 
     @classmethod
-    def from_checkpoint(cls, ckpt_path: str, obs_dim: int = 140, action_dim: int = 6) -> "TeacherInferenceModel":
+    def from_checkpoint(cls, ckpt_path: str, obs_dim: int = 108, action_dim: int = 4) -> "TeacherInferenceModel":
         """从 RSL-RL checkpoint 加载, 并断言权重全部命中."""
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         model_state = ckpt.get("model_state_dict", {})

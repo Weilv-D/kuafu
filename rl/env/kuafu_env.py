@@ -22,23 +22,24 @@ XML = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
 
 
 # ============================================================
-# 观测空间 (design.md §2.1) — M5 student 本体感受 ~35 维 + 历史
+# 观测空间 (design.md §2.1) — M5 student 本体感受 27 维 + 历史
+# 对称步态: 只观测驱动侧 2 舵机 (hip_A_l/r), hip_B 由对称耦合确定不冗余观测
 # ============================================================
 OBS_SPEC = [
     # (组名, 维度, 内容, 来源)
     ("attitude",       3, "机身 roll/pitch/yaw",                 "BMI088 Mahony"),
     ("ang_vel",        3, "机身角速度 ωx/ωy/ωz (陀螺)",           "BMI088, 1kHz→50Hz 降采样"),
     ("wheel_state",    4, "左右轮位置+速度",                      "DDSM315 回传"),
-    ("hip_state",      8, "4 舵机位置+速度",                      "ST3215 回传"),
+    ("hip_state",      4, "驱动侧 2 舵机位置+速度",               "ST3215 回传"),
     ("wheel_torque",   2, "左右轮力矩电流→τ",                    "DDSM315, 关键"),
-    ("hip_torque",     4, "4 舵机电流→力矩代理",                 "ST3215 6.5mA/LSB, 关键"),
-    ("last_action",    6, "上一步动作 [Δτ_L, Δτ_R, q_hip×4]",    "动作平滑性诊断"),
+    ("hip_torque",     2, "驱动侧 2 舵机电流→力矩代理",          "ST3215 6.5mA/LSB, 关键"),
+    ("last_action",    4, "上一步动作 [Δτ_L, Δτ_R, q_hip_A×2]",  "动作平滑性诊断"),
     ("command",        3, "[v_cmd, ω_cmd, D0_cmd]",              "高层下发"),
     ("phase_clock",    2, "sin/cos(2π t/T_phase)",               "步态相位编码"),
 ]
-OBS_DIM_BASE = sum(d for _, d, _, _ in OBS_SPEC)     # = 35
+OBS_DIM_BASE = sum(d for _, d, _, _ in OBS_SPEC)     # = 27
 HISTORY_STEPS = 4                                      # design.md §2.1: 堆叠 N=4
-OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS                # = 140
+OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS                # = 108
 
 # teacher 特权观测 (仅训练, design.md §2.1)
 PRIVILEGED_SPEC = [
@@ -54,21 +55,20 @@ RMA_LATENT_DIM = 5
 
 
 # ============================================================
-# 动作空间 (design.md §2.2) — 混合 6 维, 50Hz
+# 动作空间 (design.md §2.2) — 混合 4 维, 50Hz
+# 对称步态: 仅 hip_A 有舵机 (hip_B 由 joint equality 镜像驱动)
 # ============================================================
 ACTION_SPEC = [
     # (维度名, 对象, 物理量, 范围, 叠加方式)
-    ("dtau_L",  "左轮",  "力矩残差 Δτ_L", [-1, 1], "τ_cmd = clip(LQR + Δτ×0.55, ±1.1)"),
-    ("dtau_R",  "右轮",  "力矩残差 Δτ_R", [-1, 1], "同上"),
-    ("q_LF",    "左前髋","位置目标",      [-1, 1], "q_goal = q_dwell + action×range"),
-    ("q_RF",    "右前髋","位置目标",      [-1, 1], "同上"),
-    ("q_LB",    "左后髋","位置目标",      [-1, 1], "同上"),
-    ("q_RB",    "右后髋","位置目标",      [-1, 1], "同上"),
+    ("dtau_L",  "左轮",    "力矩残差 Δτ_L", [-1, 1], "τ_cmd = clip(LQR + Δτ×0.55, ±1.1)"),
+    ("dtau_R",  "右轮",    "力矩残差 Δτ_R", [-1, 1], "同上"),
+    ("q_hip_A_l","左驱动髋","位置目标",     [-1, 1], "q_goal = action×HIP_STROKE (D0 58→207)"),
+    ("q_hip_A_r","右驱动髋","位置目标",     [-1, 1], "同上"),
 ]
-ACTION_DIM = len(ACTION_SPEC)     # = 6
+ACTION_DIM = len(ACTION_SPEC)     # = 4
 WHEEL_TAU_MAX = P.TAU_WHEEL_RATED  # 0.55 Nm, 残差归一化基准
 WHEEL_TAU_CLIP = P.TAU_WHEEL_STALL # 1.1 Nm, 叠加后硬限幅
-HIP_RANGE = 1.0                    # 腿位置目标半幅 (rad), 覆盖 D0 行程
+HIP_RANGE = 1.0                    # 腿位置目标半幅 (归一化), 实际 rad 由 HIP_STROKE 定
 
 
 # ============================================================

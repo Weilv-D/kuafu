@@ -40,9 +40,9 @@ PPO = {
 # Scaling: 隐藏层 256→512, 参数量~70万, Pi5 MLP 推理~1.5ms (< 20ms 周期)
 # ============================================================
 NETWORK = {
-    "actor":  [512, 512, 512],   # 主干 MLP: obs(~140) → 512×3 → action 6
-    "critic": [512, 512, 512],   # value head
-    "adapter_cnn": [32, 64, 32], # RMA: 50-step 历史 → 5 维 z
+    "actor":  [512, 512, 512],   # 主干 MLP: obs(108) → 512×3 → action 4
+    "critic": [512, 512, 512],   # value head (输入 9 维特权)
+    "adapter_cnn": [32, 64, 32], # RMA: 50-step 历史 → 9 维 z
     "vision_encoder": None,      # M6 启用: CNN ~80k 参数 → 32 维
     "activation": "elu",
     "total_params_target": 700_000,  # ~70万, Pi5 ONNX ~1.5ms (< 20ms 周期)

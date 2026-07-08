@@ -52,7 +52,7 @@ def export_student(ckpt_path: str, out_path: str):
     """导出 StudentPolicy → ONNX (trunk + adapter + policy_head)."""
     import torch
     from rl.train.networks import StudentPolicy
-    from rl.env.kuafu_mjx_env import OBS_DIM, ACTION_DIM, PRIVILEGED_DIM
+    from rl.env.kuafu_mjx_env import OBS_DIM, OBS_DIM_BASE, ACTION_DIM, PRIVILEGED_DIM
 
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     state = ckpt.get("student_state_dict", ckpt.get("model_state_dict", ckpt))
@@ -65,7 +65,7 @@ def export_student(ckpt_path: str, out_path: str):
         i += 1
 
     student = StudentPolicy(
-        proprio_dim=OBS_DIM, history_obs_dim=35, history_len=50,
+        proprio_dim=OBS_DIM, history_obs_dim=OBS_DIM_BASE, history_len=50,
         action_dim=ACTION_DIM, latent_dim=PRIVILEGED_DIM,
         hidden_dims=tuple(hidden_dims),
     )
@@ -76,7 +76,7 @@ def export_student(ckpt_path: str, out_path: str):
 
     # StudentPolicy.forward(proprio, history) → action
     dummy_proprio = torch.randn(1, OBS_DIM)
-    dummy_history = torch.randn(1, 50, 35)
+    dummy_history = torch.randn(1, 50, OBS_DIM_BASE)
 
     torch.onnx.export(
         student, (dummy_proprio, dummy_history), out_path,
