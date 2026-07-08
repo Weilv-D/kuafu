@@ -253,12 +253,14 @@ class KuafuMjxEnv(MjxEnv):
         状态 [x, θ, ẋ, θ̇], pitch 从完整四元数提取,
         角速度从 qvel[4] 提取 (wy)。输入地面力 F, τ_wheel = F·R/2。
         """
+        # LQR 状态 [x, θ, ẋ, θ̇]; 残差 RL 模式下 x 用速度积分的漂移估计
+        # (绝对位置 qpos[0] 无限累积, 与速度跟踪冲突; 残差 RL 不需要回中)
+        # 简化: x 项置 0, 只用 [0, θ, ẋ, θ̇] 做 pitch 阻尼平衡
         qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
-        x = data.qpos[0]
         theta = jp.arctan2(2 * (qw * qy - qx * qz), 1 - 2 * (qy**2 + qz**2))
         xdot = data.qvel[QVEL_X]
         thetadot = data.qvel[QVEL_PITCH_ANG]
-        state = jp.stack([x, theta, xdot, thetadot])
+        state = jp.stack([0.0, theta, xdot, thetadot])
         F = -(LQR_K @ state)
         tau = F * WHEEL_R / 2.0
         return tau
@@ -344,16 +346,11 @@ class KuafuMjxEnv(MjxEnv):
         ])
 
     def _observation(self, data: mjx.Data, env_state: EnvState):
-        """构建观测: teacher 返回 dict, student 返回扁平数组."""
-        base_obs = self._base_observation(data, env_state)  # (35,)
+        """构建观测: teacher 返回 dict, student 返回扁平数组.
 
-        # 堆叠历史: obs_history shape (HISTORY_STEPS, OBS_DIM_BASE)
-        # 最新观测加到末尾, 最老的丢弃
-        history = jp.concatenate([
-            env_state.obs_history[1:],   # 丢弃最老
-            base_obs[jp.newaxis, :],      # 加入最新
-        ], axis=0)
-        flat_obs = history.reshape(-1)    # (140,)
+        obs_history 已在 step() 中更新 (含最新帧), 这里只 reshape。
+        """
+        flat_obs = env_state.obs_history.reshape(-1)    # (140,)
 
         if self._teacher:
             priv = self._privileged_observation(env_state)  # (9,)
@@ -382,14 +379,15 @@ class KuafuMjxEnv(MjxEnv):
         ang_vel_error = (yaw_rate - env_state.w_cmd) ** 2
         ang_vel_tracking = jp.exp(-ang_vel_error / 0.25)
 
-        # leg_height: 跟踪 d0_cmd (髋角均值跟踪命令对应的目标角)
-        # d0_cmd ∈ [58, 207]mm, 驻留态 D0=58 → hip≈0, 伸展 D0=207 → hip≈+1.5rad
-        # 归一化目标: (d0_cmd - 58) / (207 - 58) × 1.5 ≈ d0_cmd_norm × 1.5
+        # leg_height: 跟踪 d0_cmd (用曲柄差值, 因五杆两曲柄对称反向旋转, 均值恒常数)
+        # hip_A - hip_B 随 D0 变化: 驻留 D0=58 → diff≈0, 伸展 D0=207 → diff≈1.52rad
+        # 归一化目标: (d0_cmd - 58) / (207 - 58) × 1.52
         d0_norm = (env_state.d0_cmd - P.D0_MIN) / (P.D0_MAX - P.D0_MIN)
-        hip_target = d0_norm * 1.5  # 目标髋角
-        hip_avg = (data.qpos[QPOS_HIP_A_L] + data.qpos[QPOS_HIP_B_L]
-                   + data.qpos[QPOS_HIP_A_R] + data.qpos[QPOS_HIP_B_R]) / 4.0
-        leg_height = jp.exp(-((hip_avg - hip_target) ** 2) / 0.1)
+        hip_diff_target = d0_norm * 1.52
+        hip_diff_l = data.qpos[QPOS_HIP_A_L] - data.qpos[QPOS_HIP_B_L]
+        hip_diff_r = data.qpos[QPOS_HIP_A_R] - data.qpos[QPOS_HIP_B_R]
+        hip_diff = (hip_diff_l + hip_diff_r) / 2.0
+        leg_height = jp.exp(-((hip_diff - hip_diff_target) ** 2) / 0.1)
 
         # --- style ---
         # action_rate: -‖a_t - a_{t-1}‖²
@@ -469,7 +467,8 @@ class KuafuMjxEnv(MjxEnv):
             d0_cmd=d0_cmd,
             prev_action=jp.zeros(ACTION_DIM),
             prev_prev_action=jp.zeros(ACTION_DIM),
-            obs_history=jp.zeros((HISTORY_STEPS, OBS_DIM_BASE)),
+            obs_history=jp.zeros((HISTORY_STEPS, OBS_DIM_BASE)),  # 初始全 0, 首帧 step 后填充
+
             step_count=jp.int32(0),
             friction=friction,
             mass_scale=mass_scale,
@@ -495,8 +494,8 @@ class KuafuMjxEnv(MjxEnv):
         env_state = state.info["env_state"]
         model = state.info["model"]
 
-        # ---- LQR 底层 ----
-        tau_lqr = self._lqr_balance(data)
+        # ---- LQR 底层 (torque_scale 模拟电机常数偏差, 对 LQR+RL 统一生效) ----
+        tau_lqr = self._lqr_balance(data) * env_state.torque_scale
 
         # ---- RL 残差叠加 ----
         # 轮: τ = clip(LQR + Δτ×τ_rated, ±堵转), 再 back-EMF 限制
@@ -509,9 +508,9 @@ class KuafuMjxEnv(MjxEnv):
             jp.clip(tau_wheel_r, -TAU_WHEEL_STALL, TAU_WHEEL_STALL),
             data.qvel[QVEL_WHEEL_R])
 
-        # 腿: 位置目标 (q=0 = 驻留态, action±1 → ±1 rad)
-        # 行程限制在 ±1 rad (非 joint range ±2.0), 避免五杆奇异区 (D0 边界)
-        hip_goal = action[2:6] * 1.0
+        # 腿: 位置目标 (q=0 = 驻留态, action±1 → ±1.52 rad)
+        # D0 全程 58→207mm 对应曲柄偏转 ±1.52 rad (analysis 运动学确认)
+        hip_goal = action[2:6] * 1.52
 
         # 组装 ctrl (用随机化后的 model, 非 self._mjx_model)
         ctrl = jp.zeros(model.nu)
@@ -554,7 +553,7 @@ class KuafuMjxEnv(MjxEnv):
             step_count=env_state.step_count + 1,
         )
 
-        # 用更新后的 env_state 计算 obs (obs 里的 last_action 应是新动作)
+        # 更新 obs history (append 当前帧, 丢弃最老帧)
         base_obs = self._base_observation(data, env_state)
         new_history = jp.concatenate([
             env_state.obs_history[1:],
@@ -562,10 +561,11 @@ class KuafuMjxEnv(MjxEnv):
         ], axis=0)
         env_state = env_state.replace(obs_history=new_history)
 
-        # 倒下惩罚
+        # 倒下惩罚 (pitch 或 roll 超阈值)
         qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
         pitch = jp.arctan2(2 * (qw * qy - qx * qz), 1 - 2 * (qy**2 + qz**2))
-        fallen = jp.abs(pitch) > PITCH_THRESH
+        roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
+        fallen = (jp.abs(pitch) > PITCH_THRESH) | (jp.abs(roll) > ROLL_THRESH)
         reward = jp.where(fallen, -50.0, reward)
 
         # lin_vel_tracking 实际值 (供 metric 记录)

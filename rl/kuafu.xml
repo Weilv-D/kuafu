@@ -34,8 +34,8 @@
   <default>
     <joint armature="0.01" damping="0.05" frictionloss="0.005" limited="true"/>
     <geom condim="3" friction="0.8 0.02 0.001" rgba="0.6 0.6 0.7 1"/>
-    <position kp="80" kv="2" forcerange="-1 1"/>   <!-- design §3.3: ST3215 位置环, ctrlrange 在各 actuator 显式指定 -->
-    <motor ctrlrange="-1.1 1.1"/>        <!-- design §3.3: DDSM315 堵转 ±1.1 Nm -->
+    <position kp="80" kv="2" forcerange="-2.94 2.94"/>   <!-- design §3.3: ST3215 位置环, forcerange=堵转±2.94Nm (连续安全1.0由reward惩罚) -->
+    <motor ctrlrange="-1.1 1.1" forcerange="-1.1 1.1"/>        <!-- design §3.3: DDSM315 堵转 ±1.1 Nm -->
     <!-- 轮关节: armature=0 (物理轮毂惯量由 geom 质量自然计算, 不叠加额外电枢惯量) -->
     <default class="wheel">
       <joint armature="0" damping="0" frictionloss="0" limited="false"/>
@@ -194,10 +194,10 @@
     <motor name="tau_r" joint="wheel_r" gear="1"/>
 
     <!-- 腿: position actuator, ctrl=目标角(rad) 范围±2.0=joint range; kp/kv 直接写在 actuator 上 (default 中 motor 与 position 混合导致 kp 继承失效) -->
-    <position name="q_hip_A_l" joint="hip_A_l" kp="80" kv="2" forcerange="-1 1" ctrlrange="-2.0 2.0"/>
-    <position name="q_hip_B_l" joint="hip_B_l" kp="80" kv="2" forcerange="-1 1" ctrlrange="-2.0 2.0"/>
-    <position name="q_hip_A_r" joint="hip_A_r" kp="80" kv="2" forcerange="-1 1" ctrlrange="-2.0 2.0"/>
-    <position name="q_hip_B_r" joint="hip_B_r" kp="80" kv="2" forcerange="-1 1" ctrlrange="-2.0 2.0"/>
+    <position name="q_hip_A_l" joint="hip_A_l" kp="80" kv="2" forcerange="-2.94 2.94" ctrlrange="-2.0 2.0"/>
+    <position name="q_hip_B_l" joint="hip_B_l" kp="80" kv="2" forcerange="-2.94 2.94" ctrlrange="-2.0 2.0"/>
+    <position name="q_hip_A_r" joint="hip_A_r" kp="80" kv="2" forcerange="-2.94 2.94" ctrlrange="-2.0 2.0"/>
+    <position name="q_hip_B_r" joint="hip_B_r" kp="80" kv="2" forcerange="-2.94 2.94" ctrlrange="-2.0 2.0"/>
   </actuator>
 
   <!-- ============================================================

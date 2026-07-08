@@ -338,13 +338,10 @@ function drawRobot(D0){
 }
 
 function staticTorqueMirror(D0){
+  // 右腿仅 Y 镜像 (Y=-98), X/Z 几何与左腿一致 (五杆对称, 非左右翻转)
   const r=staticTorque(D0);
   if(!r) return null;
-  return {...r,
-    P1:{x:-r.P1.x, z:r.P1.z},
-    P2:{x:-r.P2.x, z:r.P2.z},
-    Q:{x:-r.Q.x, z:r.Q.z}
-  };
+  return r;
 }
 
 function drawLeg(r, Y, D0, hipZ, isMirror){

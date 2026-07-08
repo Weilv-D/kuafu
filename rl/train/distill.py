@@ -122,6 +122,9 @@ def distill(
                     lambda cur, new: jax.numpy.where(
                         done_mask.reshape((-1,) + (1,) * (cur.ndim - 1)), new, cur),
                     state, reset_state)
+                # 同步清零 done 环境的 history_buffer (避免跨 episode 污染)
+                done_np = np.array(done_mask)
+                history_buffer[done_np] = 0.0
 
             # 更新历史缓冲 (从 140 维 obs 取最后 35 维作为当前步 base_obs)
             current_base = proprio_np[:, -35:]

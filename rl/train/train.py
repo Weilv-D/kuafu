@@ -131,8 +131,13 @@ def main():
             jax_action = self._to_jax(action)
             self._state = self._step_vmapped(self._state, jax_action)
 
-            # auto-reset done 环境 (保持 JAX array 在 GPU 上, 避免 host→device 传输)
+            # 在 auto-reset 前读取 done/reward/metrics/fallen (reset 后会清零)
             done_jax = self._state.done
+            reward_jax = self._state.reward
+            fallen_jax = self._state.metrics.get("fallen", jax.numpy.zeros_like(done_jax))
+            obs_before_reset = self._state.obs
+
+            # auto-reset done 环境 (保持 JAX array 在 GPU 上)
             done_any = jax.device_get(done_jax.any())
             if done_any:
                 self._rng, reset_rng = jax.random.split(self._rng)
@@ -143,9 +148,10 @@ def main():
                         done_mask.reshape((-1,) + (1,) * (cur.ndim - 1)), new, cur),
                     self._state, reset_state)
 
-            obs = self._state.obs
+            # 用 reset 前的 obs (done 环境返回终止态 obs, 非 reset 后的初始 obs)
+            obs = obs_before_reset
             state_obs = self._to_torch(obs["state"]) if isinstance(obs, dict) else self._to_torch(obs)
-            reward = self._to_torch(self._state.reward)
+            reward = self._to_torch(reward_jax)
             done = self._to_torch(done_jax)
 
             self.episode_length_buf += 1
@@ -154,7 +160,7 @@ def main():
 
             # time_outs: 仅 timeout(非倒下) 时为 True, 用于 value bootstrap
             # 倒下 (fallen) 的 episode 不做 bootstrap (终止态 value=0)
-            fallen = self._to_torch(self._state.metrics.get("fallen", jax.numpy.zeros_like(done_jax)))
+            fallen = self._to_torch(fallen_jax)
             time_outs = (done > 0) & (fallen < 0.5)  # done 但未倒下 = 超时
             info = {"time_outs": time_outs.float(), "observations": {}, "log": {}}
             if isinstance(obs, dict) and "privileged_state" in obs:
