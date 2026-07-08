@@ -113,9 +113,20 @@ def playback_student(ckpt_path: str, xml_path: str, duration: float = 10.0):
     mujoco.mj_resetDataKeyframe(model, data, 0)
     mujoco.mj_forward(model, data)
 
-    student = StudentPolicy(proprio_dim=140, history_obs_dim=35, history_len=50)
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     state = ckpt.get("student_state_dict", ckpt.get("model_state_dict", ckpt))
+
+    # 动态推断 Student trunk 的维度
+    hidden_dims = []
+    i = 0
+    while f"trunk.{i*2}.weight" in state:
+        hidden_dims.append(state[f"trunk.{i*2}.weight"].shape[0])
+        i += 1
+
+    student = StudentPolicy(
+        proprio_dim=140, history_obs_dim=35, history_len=50,
+        hidden_dims=tuple(hidden_dims),
+    )
     student.load_state_dict(state, strict=False)
     student.eval()
 

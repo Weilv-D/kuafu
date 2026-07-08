@@ -54,13 +54,22 @@ def export_student(ckpt_path: str, out_path: str):
     from rl.train.networks import StudentPolicy
     from rl.env.kuafu_mjx_env import OBS_DIM, ACTION_DIM
 
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    state = ckpt.get("student_state_dict", ckpt.get("model_state_dict", ckpt))
+
+    # 动态推断 Student trunk 的维度
+    hidden_dims = []
+    i = 0
+    while f"trunk.{i*2}.weight" in state:
+        hidden_dims.append(state[f"trunk.{i*2}.weight"].shape[0])
+        i += 1
+
     student = StudentPolicy(
         proprio_dim=OBS_DIM, history_obs_dim=35, history_len=50,
         action_dim=ACTION_DIM, latent_dim=5,
+        hidden_dims=tuple(hidden_dims),
     )
 
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    state = ckpt.get("student_state_dict", ckpt.get("model_state_dict", ckpt))
     missing, unexpected = student.load_state_dict(state, strict=False)
     assert len(missing) == 0, f"Student 权重缺失: {missing}"
     student.eval()

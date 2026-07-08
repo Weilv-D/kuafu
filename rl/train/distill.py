@@ -62,14 +62,15 @@ def distill(
     teacher.eval()
     print("  Teacher 推理模型就绪 (actor 140维 + obs_normalizer)")
 
-    # ---- 创建 Student 网络 ----
+    # ---- 创建 Student 网络 (动态匹配 Teacher 隐藏层维度) ----
+    teacher_hidden = [layer.out_features for layer in teacher.actor[:-1] if isinstance(layer, nn.Linear)]
     student = StudentPolicy(
         proprio_dim=OBS_DIM,
         history_obs_dim=35,
         history_len=50,
         action_dim=ACTION_DIM,
         latent_dim=5,
-        hidden_dims=(512, 512, 512),
+        hidden_dims=tuple(teacher_hidden),
     ).cuda()
     print(f"  Student 参数: {count_parameters(student):,}")
 

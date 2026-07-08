@@ -62,7 +62,18 @@ class TeacherInferenceModel(nn.Module):
     def from_checkpoint(cls, ckpt_path: str, obs_dim: int = 140, action_dim: int = 6) -> "TeacherInferenceModel":
         """从 RSL-RL checkpoint 加载, 并断言权重全部命中."""
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        model = cls(obs_dim=obs_dim, action_dim=action_dim)
+        model_state = ckpt.get("model_state_dict", {})
+
+        # 动态推断隐藏层维度
+        hidden = []
+        i = 0
+        while f"actor.{i*2}.weight" in model_state:
+            weight = model_state[f"actor.{i*2}.weight"]
+            if f"actor.{(i+1)*2}.weight" in model_state:
+                hidden.append(weight.shape[0])
+            i += 1
+
+        model = cls(obs_dim=obs_dim, action_dim=action_dim, hidden=tuple(hidden))
 
         # 加载 actor 权重 (键名完全匹配: actor.0.weight 等)
         model_state = ckpt.get("model_state_dict", {})

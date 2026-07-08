@@ -18,7 +18,7 @@ dist/
 .ruff_cache/
 
 # ---- 分析中间数据(可由 run_all.py 重新生成)----
-analysis/output/*.npz
+analysis/output/
 
 # ---- RL 训练产物(大文件, 不进库)----
 rl/checkpoints/
