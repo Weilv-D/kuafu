@@ -75,22 +75,23 @@ HIP_RANGE = 1.0                    # 腿位置目标半幅 (归一化), 实际 r
 # Reward (design.md §2.3) — task + style + safety
 # ============================================================
 REWARD_TASK = {
-    "lin_vel_tracking":  ("跟踪 v_cmd",            1.0),
-    "ang_vel_tracking":  ("跟踪 ω_cmd",            0.5),
-    "leg_height_tracking":("跟踪 D0_cmd (驻留主导)",0.3),
-    "upright":           ("exp(-pitch²) + exp(-roll²)", 1.0),
+    "lin_vel_tracking":  ("跟踪 v_cmd",                    1.0),
+    "ang_vel_tracking":  ("跟踪 ω_cmd",                    0.5),
+    "default_pose":      ("跟踪 D0_cmd / 关节正则",         0.3),
+    "orientation":       ("exp(-α·(gx²+gy²)) 重力向量",    1.0),
+    "alive":             ("存活奖励 (对抗过早终止)",        0.1),
 }
 REWARD_STYLE = {
-    "action_rate":       ("-‖a_t - a_{t-1}‖²",      0.01),
-    "action_smoothness": ("-‖a_t - 2a_{t-1} + a_{t-2}‖²", 0.01),
-    "energy":            ("-Σ|τ·ω|",               0.001),
-    "torque_limit":      ("超连续安全扭矩惩罚",      0.5),
+    "action_rate":       ("-‖a_t - a_{t-1}‖² (一阶)",  0.01),
+    "energy":            ("-Σ|ω·τ| 全驱动关节",         0.001),
+    "torque_limit":      ("超连续安全扭矩惩罚",          0.5),
 }
 REWARD_SAFETY = {
-    "fall":         ("|pitch|或|roll|>阈值 → 终止 -50", None),
-    "joint_limit":  ("超机械限位惩罚",             None),
-    "leg_overload": ("舵机电流超连续安全 → 回锁",   None),
+    "soft_termination":  ("连续倒下≥10步(200ms)才终止, 靠 episode 截断 + alive 门控", None),
+    "joint_limit":       ("超机械限位惩罚",             None),
+    "leg_overload":      ("舵机电流超连续安全 → 回锁",   None),
 }
+# 注: 所有 reward 项 ×scale 后统一乘 CTRL_DT (Go1/T1 标准, 保持 PPO value 尺度)
 
 
 # ============================================================

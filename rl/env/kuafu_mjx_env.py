@@ -111,8 +111,14 @@ W_CMD_RANGE = (-1.0, 1.0)     # rad/s
 D0_CMD_RANGE = (P.D0_MIN, P.D0_MAX)  # (58, 207) mm
 
 # 终止阈值
-PITCH_THRESH = jp.radians(45)  # 倒下判定
+PITCH_THRESH = jp.radians(45)  # 倒下判定 (硬阈值)
 ROLL_THRESH = jp.radians(45)
+# 软终止缓冲: 跌倒后不立即终止, 宽限 FALL_GRACE_STEPS 步 (×20ms) 让策略有机会恢复,
+# 避免"一碰就死"局部最优 (T1/legged_gym alive 奖励 + 软终止的工程共识)
+FALL_GRACE_STEPS = 10  # 10 步 × 20ms = 200ms 宽限
+
+# orientation reward 参数 (exp 包装, 输入为重力向量水平分量平方和)
+ORIENT_ALPHA = 8.0  # exp(-alpha * (gx²+gy²)), 直立时 gx²+gy²≈0 → reward≈1
 
 # 域随机化范围 (从 kuafu_physics)
 DR = {
@@ -163,6 +169,8 @@ class EnvState:
     delay_steps: jax.Array
     # 动作延迟缓冲 (DELAY_BUFFER_LEN × ACTION_DIM)
     action_buffer: jax.Array
+    # 软终止: 连续倒下步数计数 (≥FALL_GRACE_STEPS 才真正终止)
+    fall_count: jax.Array
 
 
 class KuafuMjxEnv(MjxEnv):
@@ -410,17 +418,24 @@ class KuafuMjxEnv(MjxEnv):
 
     # ---- Reward ----
     def _compute_reward(self, data: mjx.Data, env_state: EnvState, action: jax.Array) -> jax.Array:
-        """task + style + safety reward."""
-        qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
-        roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
-        pitch = jp.arcsin(jp.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
+        """task + style + safety reward (各项未乘 dt, step 中统一乘 CTRL_DT).
 
-        # --- task ---
-        # upright: exp(-pitch²) + exp(-roll²)
-        upright = jp.exp(-pitch**2 / 0.25) + jp.exp(-roll**2 / 0.25)
+        设计参照 MuJoCo Playground (Go1/T1 轮式人形/Berkeley Humanoid) 源码:
+        - tracking 用 exp(-error²/σ) 核, σ=0.25
+        - orientation 用重力向量水平分量 (无欧拉角万向锁歧义), exp 包装保 [0,1] 正奖励
+        - alive 存活奖励对抗过早终止 (配合软终止缓冲)
+        """
+        qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
+        q = jp.stack([qw, qx, qy, qz])
+
+        # --- task (正向) ---
+        # orientation: 重力向量在本体系的投影, 水平分量平方和 (gx²+gy²)
+        # 直立时重力沿 -z → gx²+gy²≈0 → exp≈1; 倾倒时水平分量增大 → exp→0
+        # 无欧拉角分解, 物理连续无歧义 (MIT Cheetah / Unitree 工业共识)
+        grav_local = rotate_vector_by_quaternion_conj(q, jp.array([0.0, 0.0, -1.0]))
+        orientation = jp.exp(-ORIENT_ALPHA * jp.sum(grav_local[:2] ** 2))
 
         # lin_vel_tracking: 跟踪 v_cmd (本体系前向速度 xdot)
-        q = jp.stack([qw, qx, qy, qz])
         lin_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
         xdot = lin_vel_local[0]
         lin_vel_error = (xdot - env_state.v_cmd) ** 2
@@ -432,27 +447,28 @@ class KuafuMjxEnv(MjxEnv):
         ang_vel_error = (yaw_rate - env_state.w_cmd) ** 2
         ang_vel_tracking = jp.exp(-ang_vel_error / 0.25)
 
-        # leg_height: 跟踪 d0_cmd。对称步态下驱动曲柄 hip_A 单调编码 D0
-        # (hip_A ∈ [0, -1.52] ↔ D0 ∈ [58, 207]mm, 标定见 _KNEE_POLY)。
-        # 目标曲柄角 = -d0_norm × HIP_STROKE (负向伸展), 实测 = 左右 hip_A 均值
+        # default_pose: 跟踪 d0_cmd (关节空间正则)。对称步态下驱动曲柄 hip_A 单调编码 D0
+        # d0_cmd=dwell 时 hip_target=0, 即惩罚偏离默认站立姿态 (joint pose regularization)
+        # (hip_A ∈ [0, -1.52] ↔ D0 ∈ [58, 207]mm, 标定见 _KNEE_POLY)
         d0_norm = (env_state.d0_cmd - P.D0_MIN) / (P.D0_MAX - P.D0_MIN)
         hip_target = -d0_norm * HIP_STROKE          # 目标 hip_A 角 (伸展为负)
         hip_actual = (data.qpos[QPOS_HIP_A_L] + data.qpos[QPOS_HIP_A_R]) / 2.0
-        leg_height = jp.exp(-((hip_actual - hip_target) ** 2) / 0.1)
+        default_pose = jp.exp(-((hip_actual - hip_target) ** 2) / 0.1)
 
-        # --- style ---
-        # action_rate: -‖a_t - a_{t-1}‖²
+        # alive: 存活奖励, 对抗训练初期"一碰就死"的局部最优 (T1 轮式用 0.25, KUAFU 有
+        # 坚实 orientation+tracking 故降至 0.1; 配合 FALL_GRACE_STEPS 软终止)
+        alive = 1.0
+
+        # --- style (负向惩罚) ---
+        # action_rate: -‖a_t - a_{t-1}‖² (一阶, Go1/T1 不用二阶 jerk)
         action_rate = -jp.sum((action - env_state.prev_action) ** 2)
 
-        # action_smoothness: -‖a_t - 2a_{t-1} + a_{t-2}‖²
-        action_smooth = -jp.sum(
-            (action - 2 * env_state.prev_action + env_state.prev_prev_action) ** 2)
-
-        # energy: -Σ|τ·ω| (每轮绝对功率之和)
-        wheel_energy = (
-            jp.abs(data.actuator_force[ACT_TAU_L] * data.qvel[QVEL_WHEEL_L])
-            + jp.abs(data.actuator_force[ACT_TAU_R] * data.qvel[QVEL_WHEEL_R]))
-        energy = -wheel_energy
+        # energy: -Σ|ω·τ| 全驱动关节 (轮 + 髋, Go1 _cost_energy 形式)
+        energy = -(
+            jp.abs(data.qvel[QVEL_WHEEL_L] * data.actuator_force[ACT_TAU_L])
+            + jp.abs(data.qvel[QVEL_WHEEL_R] * data.actuator_force[ACT_TAU_R])
+            + jp.abs(data.qvel[QVEL_HIP_A_L] * data.actuator_force[ACT_HIP_A_L])
+            + jp.abs(data.qvel[QVEL_HIP_A_R] * data.actuator_force[ACT_HIP_A_R]))
 
         # torque_limit: 超连续安全扭矩惩罚 (仅驱动侧 2 舵机)
         tau_excess = jp.maximum(jp.abs(data.actuator_force[ACT_HIP_A_L]) - TAU_CONT, 0) \
@@ -460,26 +476,40 @@ class KuafuMjxEnv(MjxEnv):
         torque_limit = -tau_excess
 
         total = (
-            1.0 * upright
-            + 1.0 * lin_vel_tracking
+            1.0 * lin_vel_tracking
             + 0.5 * ang_vel_tracking
-            + 0.3 * leg_height
+            + 1.0 * orientation
+            + 0.3 * default_pose
+            + 0.1 * alive
             + 0.01 * action_rate
-            + 0.01 * action_smooth
             + 0.001 * energy
             + 0.5 * torque_limit
         )
         return total
 
     # ---- 终止 ----
-    def _is_done(self, data: mjx.Data, env_state: EnvState) -> jax.Array:
-        """倒下或超时终止."""
+    def _is_fallen(self, data: mjx.Data) -> jax.Array:
+        """硬倒下判定 (pitch/roll 超阈值). 用于 fall_count 累加 + alive 门控."""
         qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
-        roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
-        pitch = jp.arcsin(jp.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
-        fallen = (jp.abs(pitch) > PITCH_THRESH) | (jp.abs(roll) > ROLL_THRESH)
+        # 重力向量判定 (与 orientation reward 一致, 无欧拉角歧义)
+        q = jp.stack([qw, qx, qy, qz])
+        grav_local = rotate_vector_by_quaternion_conj(q, jp.array([0.0, 0.0, -1.0]))
+        # 直立时 grav_local≈(0,0,-1), z 分量 < cos(45°)≈0.707 即倾倒超 45°
+        fallen = grav_local[2] > -jp.cos(PITCH_THRESH)
+        return fallen
+
+    def _is_done(self, data: mjx.Data, env_state: EnvState) -> jax.Array:
+        """软终止: 连续倒下 ≥ FALL_GRACE_STEPS 或超时.
+
+        跌倒后宽限 10 步 (200ms) 让策略有机会恢复, 避免训练初期"一碰就死"。
+        (与 alive=0.1 奖励配合, 鼓励长时平衡)
+        """
+        fallen = self._is_fallen(data)
+        # fall_count: 倒下时累加, 恢复时清零
+        new_fall_count = jp.where(fallen, env_state.fall_count + 1, 0)
+        hard_fall = new_fall_count >= FALL_GRACE_STEPS
         timeout = env_state.step_count >= self._episode_length
-        return fallen | timeout
+        return hard_fall | timeout
 
     # ============================================================
     # MjxEnv 接口实现
@@ -536,6 +566,7 @@ class KuafuMjxEnv(MjxEnv):
             deadband=deadband,
             delay_steps=delay_steps,
             action_buffer=jp.zeros((DELAY_BUFFER_LEN, ACTION_DIM)),
+            fall_count=jp.int32(0),
         )
 
         obs = self._observation(data, env_state)
@@ -643,8 +674,17 @@ class KuafuMjxEnv(MjxEnv):
         d0_cmd = jp.where(need_resample, new_d0, env_state.d0_cmd)
 
         # ---- reward / done / obs (用旧 env_state, 因 reward 需要 prev_action) ----
-        reward = self._compute_reward(data, env_state, action)
-        done = self._is_done(data, env_state)
+        raw_reward = self._compute_reward(data, env_state, action)
+        fallen = self._is_fallen(data)
+
+        # fall_count 软终止计数 (倒下累加, 恢复清零)
+        new_fall_count = jp.where(fallen, env_state.fall_count + 1, 0)
+        done = (new_fall_count >= FALL_GRACE_STEPS) | (
+            env_state.step_count >= self._episode_length)
+
+        # reward × CTRL_DT (Go1/T1 标准: 每项 ×scale 后乘 dt, 保持 PPO value 尺度一致)
+        # 软终止期间不额外惩罚 (靠 episode 结束截断后续 reward + alive 门控)
+        reward = raw_reward * CTRL_DT
 
         # 更新 env_state (reward 算完后再更新 prev_action)
         env_state = env_state.replace(
@@ -656,6 +696,7 @@ class KuafuMjxEnv(MjxEnv):
             prev_action=action,
             step_count=env_state.step_count + 1,
             action_buffer=new_action_buffer,
+            fall_count=new_fall_count,
         )
 
         # 更新 obs history (append 当前帧, 丢弃最老帧)
@@ -666,24 +707,21 @@ class KuafuMjxEnv(MjxEnv):
         ], axis=0)
         env_state = env_state.replace(obs_history=new_history)
 
-        # 倒下惩罚 (pitch 或 roll 超阈值)
-        qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
-        pitch = jp.arcsin(jp.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
-        roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
-        fallen = (jp.abs(pitch) > PITCH_THRESH) | (jp.abs(roll) > ROLL_THRESH)
-        reward = jp.where(fallen, -50.0, reward)
-
-        # lin_vel_tracking 实际值 (供 metric 记录)
-        q = jp.stack([qw, qx, qy, qz])
+        # lin_vel_tracking / orientation 实际值 (供 metric 记录)
+        q = jp.stack([data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]])
         lin_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
         xdot = lin_vel_local[0]
         lin_vel_track_val = jp.exp(-((xdot - v_cmd) ** 2) / 0.25)
+        grav_local = rotate_vector_by_quaternion_conj(q, jp.array([0.0, 0.0, -1.0]))
+        orient_val = jp.exp(-ORIENT_ALPHA * jp.sum(grav_local[:2] ** 2))
 
         obs = self._observation(data, env_state)
+        # terminated_by_fall: done 且因连续倒下触发 (供 train.py time_outs 区分 timeout vs fall)
+        terminated_by_fall = (new_fall_count >= FALL_GRACE_STEPS).astype(jp.float32)
         metrics = {
-            "upright": jp.exp(-pitch**2 / 0.25),
+            "orientation": orient_val,
             "lin_vel_tracking": lin_vel_track_val,
-            "fallen": fallen.astype(jp.float32),
+            "fallen": terminated_by_fall,  # done 帧的终止原因 (1=摔倒终止, 0=超时)
         }
         info = {"env_state": env_state, "model": model}
         return state.replace(
