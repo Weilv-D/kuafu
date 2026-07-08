@@ -7,7 +7,7 @@ Teacher (特权信息) → Student (仅本体感受 + RMA latent):
   2. adapter z 监督: MSE(student_z, teacher_z) [阶段 2 后期加入]
 
 运行:
-  rl/.venv/bin/python rl/train/distill.py --teacher_ckpt rl/checkpoints/teacher_*/model_500.pt
+  rl/.venv/bin/python rl/train/distill.py --teacher_ckpt rl/checkpoints/teacher_*/model_3000.pt
 
 产出:
   rl/checkpoints/student_{timestamp}/model_final.pt

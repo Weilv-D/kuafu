@@ -66,15 +66,18 @@ python3 rl/verify/launch_viewer.py
 rl/.venv/bin/python rl/verify/probe_envs.py  # 输出推荐 envs 数
 
 # 5. Teacher PPO 训练
-rl/.venv/bin/python rl/train/train.py --num_envs 1024 --iterations 1000
+rl/.venv/bin/python rl/train/train.py --num_envs 1024  # 默认 3000 iter, ~73M steps, RTX4070 约 6–12h
+# 推荐后台运行:
+nohup rl/.venv/bin/python rl/train/train.py --num_envs 1024 > train.log 2>&1 &
+tail -f train.log
 
 # 6. Student 蒸馏（teacher 训练后）
 rl/.venv/bin/python rl/train/distill.py \
-  --teacher_ckpt rl/checkpoints/teacher_*/model_1000.pt
+  --teacher_ckpt rl/checkpoints/teacher_*/model_3000.pt
 
 # 7. ONNX 导出
 rl/.venv/bin/python rl/export/export_policy.py \
-  --ckpt rl/checkpoints/teacher_*/model_1000.pt --mode teacher
+  --ckpt rl/checkpoints/teacher_*/model_3000.pt --mode teacher
 
 # 8. 策略回放（可视化）
 rl/.venv/bin/python rl/verify/playback.py --ckpt policy.onnx
