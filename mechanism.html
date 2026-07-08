@@ -148,7 +148,7 @@
 <div class="footer">
   <b>3D SYMMETRIC FIVE-BAR · 对称并联五杆髋关节</b>　整机坐标：原点底盘中心，+X 前 / +Y 左 / +Z 上。轮恒接地 Z=39，机身底 Z=39+D₀。D₀=58 为驻留态（最低姿态），曲柄贴合机身承重面。<br>
   <b>两态承力</b>：<code>D₀=58</code> 驻留态，曲柄贴合侧板承重面，载荷经曲柄→承重面→侧板→机架，<b>舵机零力矩</b>（腿被动，平衡降为纯倒立摆）。<code>D₀>58</code> 瞬态，曲柄离开承重面悬空，舵机承重 0.51–1.92 Nm。<br>
-  <b>对称非交叉</b>：a=93/b=149 对称构型，P₁ 落 Q 左、P₂ 落 Q 右，连杆平行不交叉。左右腿零件完全通用。经蒙特卡洛 10 万采样验证，该解位于 Pareto 前沿密集包络内，200 组 Dirichlet 权重下综合胜出率 24.5%、居候选前列（见 analysis/optimize/ 与 output/pareto_front.png）。
+  <b>对称非交叉</b>：a=93/b=149 对称构型，P₁ 落 Q 左、P₂ 落 Q 右，连杆平行不交叉。左右腿零件完全通用。经蒙特卡洛 10 万采样 + 工程先验权重 Dirichlet 扫掠验证，综合胜出率 50.5%、居候选第一（见 analysis/optimize/ 与 output/pareto_front.png）。
 </div>
 
 <script>

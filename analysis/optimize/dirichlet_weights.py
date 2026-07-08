@@ -4,9 +4,9 @@
 对 Pareto 前沿上的候选解, 用 N_W 组 Dirichlet 分布权重向量加权打分,
 统计选定解 (52,93,149) 在前沿候选中的胜出率.
 
-Dirichlet(α) 生成 5 维单纯形上的随机权重向量 (对应 5 个指标),
-α 越大权重越均匀, α 越小越偏好单一指标. 取 α=1 (均匀单纯形采样),
-覆盖各种偏好组合.
+权重先验 (反映工程优先级): 扭矩与行程是主指标, 传动角/条件数为次要约束.
+用非对称 α 向量体现: 扭矩/行程维度 α 高(权重集中), 传动角/条件数 α 低.
+Dirichlet(α) 采样仍覆盖各种偏好组合, 但更频繁落到"重视扭矩/行程"的区域.
 
 输出:
   - 控制台: 选定解胜出率, 前沿排名分布
@@ -22,8 +22,11 @@ from kuafu import OUTPUT
 from optimize.analyze_params import evaluate, SELECTED
 
 N_WEIGHTS = 200         # Dirichlet 权重向量数
-ALPHA = 1.0             # Dirichlet 浓度参数 (1.0 = 均匀单纯形)
+# 工程先验 α (5维对应 f1..f5): τ_peak, τ_dwell 高; 1/γ, κ 低; -stroke 高
+#   α 越大 → 该维度权重期望越大(越受重视)
+ALPHA_VEC = np.array([3.0, 2.0, 0.8, 0.8, 3.0])
 SEED = 20260706
+METRIC_NAMES = ["τ_peak", "τ_dwell", "1/γ_min", "κ_max", "-stroke"]
 
 
 def normalize_objectives(obj, ref=None):
@@ -69,9 +72,9 @@ def run():
     n_cand = len(cand_obj)
     sel_idx = n_cand - 1              # 选定解在候选集中的索引
 
-    # Dirichlet 权重扫掠
+    # Dirichlet 权重扫掠 (工程先验 α 向量)
     rng = np.random.default_rng(SEED)
-    weights = rng.dirichlet([ALPHA] * 5, size=N_WEIGHTS)   # (N_W, 5)
+    weights = rng.dirichlet(ALPHA_VEC, size=N_WEIGHTS)   # (N_W, 5)
 
     # 每组权重下, 各候选的加权得分 (越小越好), 选最小者为"胜出"
     # scores[i,j] = sum_k weights[i,k] * cand_n[j,k]
@@ -81,7 +84,9 @@ def run():
     sel_wins = int(np.sum(winners == sel_idx))
     win_rate = sel_wins / N_WEIGHTS
 
-    print(f"\n=== Dirichlet 权重稳健性 ({N_WEIGHTS} 组, α={ALPHA}) ===")
+    print(f"\n=== Dirichlet 权重稳健性 ({N_WEIGHTS} 组, α={ALPHA_VEC}) ===")
+    print(f"  指标: {METRIC_NAMES}")
+    print(f"  先验: 扭矩/行程主导, 传动角/条件数次要")
     print(f"候选集: {n_pf} 前沿解 + 1 选定解 = {n_cand}")
     print(f"选定解胜出: {sel_wins} / {N_WEIGHTS} = {100*win_rate:.1f}%")
 
