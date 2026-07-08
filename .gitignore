@@ -1,0 +1,41 @@
+# ============================================================
+# KUAFU — 版本控制忽略规则
+# ============================================================
+
+# ---- CAD 模型(体积大,单独管理)----
+3Dmodel/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 分析中间数据(可由 run_all.py 重新生成)----
+analysis/output/*.npz
+
+# ---- 环境 / 编辑器 ----
+.venv/
+venv/
+env/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- SolidWorks 临时文件 ----
+~$*.SLDASM
+~$*.SLDPRT
+~$*.SLDDRW
