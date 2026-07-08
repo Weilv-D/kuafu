@@ -118,17 +118,24 @@ def main():
                 extras["observations"]["critic"] = self._to_torch(obs["privileged_state"])
             return state_obs, extras
 
+        def reset(self):
+            """VecEnv 接口要求: 重置所有环境."""
+            self._rng, reset_rng = jax.random.split(self._rng)
+            self._state = self._reset_vmapped(jax.random.split(reset_rng, self.num_envs))
+            self.episode_length_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+            return self.get_observations()
+
         def step(self, action):
             jax_action = self._to_jax(action)
             self._state = self._step_vmapped(self._state, jax_action)
 
-            # auto-reset done 环境
-            done_np = jax.device_get(self._state.done)
-            if done_np.any():
+            # auto-reset done 环境 (保持 JAX array 在 GPU 上, 避免 host→device 传输)
+            done_jax = self._state.done
+            done_any = jax.device_get(done_jax.any())
+            if done_any:
                 self._rng, reset_rng = jax.random.split(self._rng)
-                reset_keys = jax.random.split(reset_rng, self.num_envs)
-                reset_state = self._reset_vmapped(reset_keys)
-                done_mask = done_np
+                reset_state = self._reset_vmapped(jax.random.split(reset_rng, self.num_envs))
+                done_mask = done_jax.astype(jax.numpy.bool_)
                 self._state = jax.tree_util.tree_map(
                     lambda cur, new: jax.numpy.where(
                         done_mask.reshape((-1,) + (1,) * (cur.ndim - 1)), new, cur),
@@ -137,7 +144,7 @@ def main():
             obs = self._state.obs
             state_obs = self._to_torch(obs["state"]) if isinstance(obs, dict) else self._to_torch(obs)
             reward = self._to_torch(self._state.reward)
-            done = self._to_torch(self._state.done)
+            done = self._to_torch(done_jax)
 
             self.episode_length_buf += 1
             self.episode_length_buf = torch.where(

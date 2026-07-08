@@ -56,10 +56,20 @@ QPOS_HIP_B_R = 15
 QPOS_KNEE_B_R = 16
 
 # qvel: root_lin(3) + root_ang(3) + joints(10) = 16
+# root free joint: qpos 7 (x,y,z,qw,qx,qy,qz) 但 qvel 只 6 (vx,vy,vz,wx,wy,wz)
+# 所以 joint 的 qvel idx = qpos idx - 1
 QVEL_X = 0
 QVEL_PITCH_ANG = 4   # wy (角速度 pitch 分量)
-QVEL_WHEEL_L = 9
-QVEL_WHEEL_R = 14
+QVEL_HIP_A_L = 6     # qpos 7 - 1
+QVEL_KNEE_A_L = 7
+QVEL_WHEEL_L = 8     # qpos 9 - 1
+QVEL_HIP_B_L = 9     # qpos 10 - 1
+QVEL_KNEE_B_L = 10
+QVEL_HIP_A_R = 11    # qpos 12 - 1
+QVEL_KNEE_A_R = 12
+QVEL_WHEEL_R = 13    # qpos 14 - 1
+QVEL_HIP_B_R = 14    # qpos 15 - 1
+QVEL_KNEE_B_R = 15
 
 # 执行器索引 (actuator 顺序: tau_l, tau_r, q_hip_A_l, q_hip_B_l, q_hip_A_r, q_hip_B_r)
 ACT_TAU_L = 0
@@ -73,7 +83,7 @@ ACT_HIP_B_R = 5
 OBS_DIM_BASE = 35     # 9 组本体感受
 HISTORY_STEPS = 4
 OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS  # 140
-PRIVILEGED_DIM = 9    # friction(1) + mass_bias(3) + com_bias(3) + delay(2)
+PRIVILEGED_DIM = 9    # friction(1)+mass_scale(1)+com_bias(3)+inertia_scale(1)+torque_scale(1)+delay(2)
 ACTION_DIM = 6
 
 # 物理常量 (JAX 数组)
@@ -159,9 +169,8 @@ class KuafuMjxEnv(MjxEnv):
         self._mj_model = mujoco.MjModel.from_xml_path(XML_PATH)
         self._mjx_model = mjx.put_model(self._mj_model)
 
-        # keyframe 0 (dwell) 的 qpos/qvel
+        # keyframe 0 (dwell) 的 qpos
         self._keyframe_qpos = self._mj_model.qpos0.copy()
-        self._keyframe_qvel = jp.zeros(self._mjx_model.nq - 7)  # free joint qvel 部分
 
     # ---- MjxEnv 抽象属性 ----
     @property
@@ -235,16 +244,17 @@ class KuafuMjxEnv(MjxEnv):
     def _lqr_balance(self, data: mjx.Data) -> jax.Array:
         """LQR 轮式倒立摆平衡: 输出每轮力矩.
 
-        状态 [x, θ, ẋ, θ̇], pitch 从四元数 qpos[5] 提取 (绕 Y 轴),
+        状态 [x, θ, ẋ, θ̇], pitch 从完整四元数提取,
         角速度从 qvel[4] 提取 (wy)。输入地面力 F, τ_wheel = F·R/2。
         """
-        x = data.qpos[0]                     # 位移
-        theta = 2 * jp.arctan2(data.qpos[5], data.qpos[3])  # pitch (qy, qw)
-        xdot = data.qvel[QVEL_X]             # 0
-        thetadot = data.qvel[QVEL_PITCH_ANG] # wy
+        qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
+        x = data.qpos[0]
+        theta = jp.arctan2(2 * (qw * qy - qx * qz), 1 - 2 * (qy**2 + qz**2))
+        xdot = data.qvel[QVEL_X]
+        thetadot = data.qvel[QVEL_PITCH_ANG]
         state = jp.stack([x, theta, xdot, thetadot])
-        F = -(LQR_K @ state)                 # 地面力
-        tau = F * WHEEL_R / 2.0              # 每轮力矩
+        F = -(LQR_K @ state)
+        tau = F * WHEEL_R / 2.0
         return tau
 
     # ---- DDSM back-EMF 限制 ----
@@ -278,8 +288,8 @@ class KuafuMjxEnv(MjxEnv):
             data.qpos[QPOS_HIP_A_R], data.qpos[QPOS_HIP_B_R],
         ])
         hip_vel = jp.stack([
-            data.qvel[QPOS_HIP_A_L - 7], data.qvel[QPOS_HIP_B_L - 7],
-            data.qvel[QPOS_HIP_A_R - 7], data.qvel[QPOS_HIP_B_R - 7],
+            data.qvel[QVEL_HIP_A_L], data.qvel[QVEL_HIP_B_L],
+            data.qvel[QVEL_HIP_A_R], data.qvel[QVEL_HIP_B_R],
         ])
         hip_state = jp.concatenate([hip_pos, hip_vel])
 
@@ -379,10 +389,10 @@ class KuafuMjxEnv(MjxEnv):
         action_smooth = -jp.sum(
             (action - 2 * env_state.prev_action + env_state.prev_prev_action) ** 2)
 
-        # energy: -Σ|τ·ω|
-        wheel_energy = jp.abs(
-            data.actuator_force[ACT_TAU_L] * data.qvel[QVEL_WHEEL_L]
-            + data.actuator_force[ACT_TAU_R] * data.qvel[QVEL_WHEEL_R])
+        # energy: -Σ|τ·ω| (每轮绝对功率之和)
+        wheel_energy = (
+            jp.abs(data.actuator_force[ACT_TAU_L] * data.qvel[QVEL_WHEEL_L])
+            + jp.abs(data.actuator_force[ACT_TAU_R] * data.qvel[QVEL_WHEEL_R]))
         energy = -wheel_energy
 
         # torque_limit: 超连续安全扭矩惩罚
@@ -520,13 +530,7 @@ class KuafuMjxEnv(MjxEnv):
         w_cmd = jp.where(need_resample, new_w, env_state.w_cmd)
         d0_cmd = jp.where(need_resample, new_d0, env_state.d0_cmd)
 
-        # 历史更新
-        base_obs = self._base_observation(data, env_state)
-        new_history = jp.concatenate([
-            env_state.obs_history[1:],
-            base_obs[jp.newaxis, :],
-        ], axis=0)
-
+        # 先更新 env_state (含 prev_action/step_count), 再用新 state 算 obs
         env_state = env_state.replace(
             rng=rng,
             v_cmd=v_cmd,
@@ -534,9 +538,16 @@ class KuafuMjxEnv(MjxEnv):
             d0_cmd=d0_cmd,
             prev_prev_action=env_state.prev_action,
             prev_action=action,
-            obs_history=new_history,
             step_count=env_state.step_count + 1,
         )
+
+        # 用更新后的 env_state 统一计算 base_obs + history (避免双重计算的不一致)
+        base_obs = self._base_observation(data, env_state)
+        new_history = jp.concatenate([
+            env_state.obs_history[1:],
+            base_obs[jp.newaxis, :],
+        ], axis=0)
+        env_state = env_state.replace(obs_history=new_history)
 
         # ---- reward / done / obs ----
         reward = self._compute_reward(data, env_state, action)
@@ -548,10 +559,15 @@ class KuafuMjxEnv(MjxEnv):
         fallen = jp.abs(pitch) > PITCH_THRESH
         reward = jp.where(fallen, -50.0, reward)
 
+        # lin_vel_tracking 实际值 (供 metric 记录)
+        wheel_avg_vel = (data.qvel[QVEL_WHEEL_L] + data.qvel[QVEL_WHEEL_R]) / 2.0
+        lin_vel = wheel_avg_vel * WHEEL_R
+        lin_vel_track_val = jp.exp(-((lin_vel - v_cmd) ** 2) / 0.25)
+
         obs = self._observation(data, env_state)
         metrics = {
             "upright": jp.exp(-pitch**2 / 0.25),
-            "lin_vel_tracking": state.metrics.get("lin_vel_tracking", jp.float32(0.0)),
+            "lin_vel_tracking": lin_vel_track_val,
             "fallen": fallen.astype(jp.float32),
         }
         info = {"env_state": env_state, "model": model}
