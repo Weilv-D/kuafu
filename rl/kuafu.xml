@@ -64,8 +64,8 @@
          ============================================================ -->
     <body name="chassis" pos="0 0 0.097">  <!-- Z=0.097: 机身底=D0+r=58+39=97mm (KUAFU §4.1), 髋面=机身坐标系原点 -->
       <freejoint name="root"/>
-      <inertial pos="0 0 0.003" mass="0.606" diaginertia="0.0014 0.0018 0.0022"/>
-        <!-- 机架结构: 上甲板179g + 下甲板370g + 线材60g (9000he, CAD实测体积), 电子件由下方质量点承担 -->
+      <inertial pos="0 0 0.003" mass="0.609" diaginertia="0.0014 0.0018 0.0022"/>
+        <!-- 机架结构: 上甲板179g + 下甲板370g + 线材60g = 609g (9000he CAD实测体积×1.01), 电子件由下方质量点承担 -->
       <geom name="body_box" type="box" size="0.120 0.098 0.025" pos="0 0 0.025"
             rgba="0.5 0.5 0.6 1" mass="0"/>  <!-- KUAFU §4.1: 240×196×50, 质量由 inertial 承担 -->
       <!-- 电子件质量点 (KUAFU §5.4 COM 表), inertial pos 在 body 局部为原点 -->
@@ -95,7 +95,7 @@
         <geom type="capsule" fromto="0 0 0  -0.081 0 0.0457" size="0.006" mass="0.036"/>
         <body name="link_A_l" pos="-0.081 0 0.0457">   <!-- P1 相对髋A -->
           <joint name="knee_A_l" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
-          <geom type="capsule" fromto="0 0 0  0.107 0 -0.1037" size="0.006" mass="0.036"/>
+          <geom type="capsule" fromto="0 0 0  0.107 0 -0.1037" size="0.006" mass="0.035"/>
           <site name="Q_A_l" pos="0.107 0 -0.1037" size="0.003"/>   <!-- Q 相对 P1 -->
         </body>
       </body>
@@ -106,7 +106,7 @@
         <geom type="capsule" fromto="0 0 0  0.081 0 0.0457" size="0.006" mass="0.036"/>
         <body name="link_B_l" pos="0.081 0 0.0457">   <!-- P2 相对髋B -->
           <joint name="knee_B_l" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
-          <geom type="capsule" fromto="0 0 0  -0.107 0 -0.1037" size="0.006" mass="0.036"/>
+          <geom type="capsule" fromto="0 0 0  -0.107 0 -0.1037" size="0.006" mass="0.035"/>
           <site name="Q_B_l" pos="-0.107 0 -0.1037" size="0.003"/>  <!-- Q 相对 P2 -->
         </body>
       </body>
@@ -126,7 +126,7 @@
         <geom type="capsule" fromto="0 0 0  -0.081 0 0.0457" size="0.006" mass="0.036"/>
         <body name="link_A_r" pos="-0.081 0 0.0457">
           <joint name="knee_A_r" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
-          <geom type="capsule" fromto="0 0 0  0.107 0 -0.1037" size="0.006" mass="0.036"/>
+          <geom type="capsule" fromto="0 0 0  0.107 0 -0.1037" size="0.006" mass="0.035"/>
           <site name="Q_A_r" pos="0.107 0 -0.1037" size="0.003"/>
         </body>
       </body>
@@ -136,7 +136,7 @@
         <geom type="capsule" fromto="0 0 0  0.081 0 0.0457" size="0.006" mass="0.036"/>
         <body name="link_B_r" pos="0.081 0 0.0457">
           <joint name="knee_B_r" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
-          <geom type="capsule" fromto="0 0 0  -0.107 0 -0.1037" size="0.006" mass="0.036"/>
+          <geom type="capsule" fromto="0 0 0  -0.107 0 -0.1037" size="0.006" mass="0.035"/>
           <site name="Q_B_r" pos="-0.107 0 -0.1037" size="0.003"/>
         </body>
       </body>
