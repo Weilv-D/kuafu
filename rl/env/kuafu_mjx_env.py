@@ -577,8 +577,10 @@ class KuafuMjxEnv(MjxEnv):
         obs = self._observation(data, env_state)
         reward = jp.float32(0.0)
         done = jp.bool_(False)
+        # metrics key 必须与 step() 返回的完全一致 (DirectVecEnv step 用 tree_map 合并
+        # done 帧的 reset_state, pytree 结构不同会抛 ValueError)
         metrics = {
-            "upright": jp.float32(0.0),
+            "orientation": jp.float32(0.0),
             "lin_vel_tracking": jp.float32(0.0),
             "fallen": jp.float32(0.0),
         }
