@@ -20,7 +20,7 @@ import time
 PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJ_ROOT)
 
-os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.80")
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 import jax
 import jax.numpy as jp
@@ -28,6 +28,17 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+
+
+# ---- DLPack 零拷贝辅助函数 ----
+def to_torch(x):
+    """JAX DeviceArray → torch.Tensor (DLPack 零拷贝)."""
+    return torch.utils.dlpack.from_dlpack(x)
+
+
+def to_jax(t):
+    """torch.Tensor → JAX DeviceArray (DLPack 零拷贝)."""
+    return jax.dlpack.from_dlpack(t.contiguous())
 
 
 def distill(
@@ -40,13 +51,8 @@ def distill(
     """Student DAgger 蒸馏.
 
     design.md §2.5:
-      Student = trunk(proprio 140) + adapter(history→z 5) + policy_head(trunk+z→action 6)
-      Teacher 已训练好, 在特权信息下给出参考动作; student 拟合 teacher 动作。
-
-    本轮实现 DAgger:
-      1. Student 在环境中执行动作 → 采集 (obs, proprio, history) 轨迹
-      2. Teacher 用特权 obs 推理 → 参考动作
-      3. Student 监督拟合 teacher 动作 (MSE loss)
+      Student = trunk(proprio 140 + z 9) + adapter(history→z 9) + policy_head(trunk+z→action 6)
+      Teacher 已训练好, 在特权信息下给出参考动作; student 拟合 teacher 动作与特权信息。
     """
     from rl.env.kuafu_mjx_env import KuafuMjxEnv, OBS_DIM, PRIVILEGED_DIM, ACTION_DIM
     from rl.train.networks import StudentPolicy, count_parameters
@@ -56,11 +62,11 @@ def distill(
     print("KUAFU Student 蒸馏 (design.md §2.6 阶段 2)")
     print("=" * 60)
 
-    # ---- 加载 Teacher (精确匹配 RSL-RL checkpoint 结构) ----
+    # ---- 加载 Teacher (吃 combined_obs = 149 维) ----
     print(f"  加载 Teacher: {teacher_ckpt}")
-    teacher = TeacherInferenceModel.from_checkpoint(teacher_ckpt, obs_dim=OBS_DIM).cuda()
+    teacher = TeacherInferenceModel.from_checkpoint(teacher_ckpt, obs_dim=OBS_DIM + PRIVILEGED_DIM).cuda()
     teacher.eval()
-    print("  Teacher 推理模型就绪 (actor 140维 + obs_normalizer)")
+    print("  Teacher 推理模型就绪 (actor 149维 + obs_normalizer)")
 
     # ---- 创建 Student 网络 (动态匹配 Teacher 隐藏层维度) ----
     teacher_hidden = [layer.out_features for layer in teacher.actor[:-1] if isinstance(layer, nn.Linear)]
@@ -69,9 +75,15 @@ def distill(
         history_obs_dim=35,
         history_len=50,
         action_dim=ACTION_DIM,
-        latent_dim=5,
+        latent_dim=PRIVILEGED_DIM,
         hidden_dims=tuple(teacher_hidden),
     ).cuda()
+
+    # 载入 Teacher 的 Normalizer 参数到 Student Policy Buffers 中
+    student.obs_mean.copy_(teacher._mean[:, :OBS_DIM])
+    student.obs_std.copy_(teacher._std[:, :OBS_DIM])
+    student.priv_mean.copy_(teacher._mean[:, OBS_DIM:])
+    student.priv_std.copy_(teacher._std[:, OBS_DIM:])
     print(f"  Student 参数: {count_parameters(student):,}")
 
     optimizer = optim.Adam(student.parameters(), lr=1e-4)
@@ -85,79 +97,93 @@ def distill(
     state = reset_fn(jax.random.split(jax.random.PRNGKey(42), num_envs))
 
     n_iter = 5 if smoke_test else iterations
-    batch_size = min(num_envs, 256)
-    history_buffer = np.zeros((num_envs, 50, 35), dtype=np.float32)  # 滑动历史窗口
+    # 历史缓冲放在 GPU 显存上
+    history_buffer = torch.zeros(num_envs, 50, 35, device="cuda")
 
     print(f"\n开始 DAgger 蒸馏: {n_iter} iterations")
     t0 = time.time()
 
     for it in range(n_iter):
-        # 1. 从环境采集 batch_size 条数据
-        collected = 0
-        proprio_list, history_list, teacher_full_obs_list = [], [], []
+        # 1. 采集当前环境状态 (JAX GPU → PyTorch GPU 零拷贝)
+        obs = state.obs
+        proprio_jax = obs["state"]               # (num_envs, 140)
+        privileged_jax = obs["privileged_state"] # (num_envs, 9)
 
-        while collected < batch_size:
-            obs = state.obs
-            proprio_jax = obs["state"]       # (num_envs, 140)
+        proprio_torch = to_torch(proprio_jax)
+        privileged_torch = to_torch(privileged_jax)
 
-            # student 推理动作 (用于环境执行, DAgger)
-            proprio_np = np.array(proprio_jax)
-            history_np = history_buffer.copy()
-            with torch.no_grad():
-                student_action = student(
-                    torch.from_numpy(proprio_np).float().cuda(),
-                    torch.from_numpy(history_np).float().cuda(),
-                )
-            action_np = student_action.cpu().numpy()
+        # 时序对齐: 推理动作前先更新 history
+        current_base = proprio_torch[:, -35:]
+        history_buffer = torch.roll(history_buffer, shifts=-1, dims=1)
+        history_buffer[:, -1, :] = current_base
 
-            # 环境步进
-            jax_action = jp.array(action_np)
-            state = step_fn(state, jax_action)
-
-            # auto-reset done 环境 (与 train.py 一致)
-            done_jax = state.done
-            if bool(jax.device_get(done_jax.any())):
-                reset_state = reset_fn(jax.random.split(jax.random.PRNGKey(it * 1000 + collected), num_envs))
-                done_mask = done_jax.astype(jax.numpy.bool_)
-                state = jax.tree_util.tree_map(
-                    lambda cur, new: jax.numpy.where(
-                        done_mask.reshape((-1,) + (1,) * (cur.ndim - 1)), new, cur),
-                    state, reset_state)
-                # 同步清零 done 环境的 history_buffer (避免跨 episode 污染)
-                done_np = np.array(done_mask)
-                history_buffer[done_np] = 0.0
-
-            # 更新历史缓冲 (从 140 维 obs 取最后 35 维作为当前步 base_obs)
-            current_base = proprio_np[:, -35:]
-            history_buffer = np.roll(history_buffer, -1, axis=1)
-            history_buffer[:, -1, :] = current_base
-
-            # 采集
-            proprio_list.append(proprio_np)
-            history_list.append(history_np)
-            collected += num_envs
-
-        # 2. Teacher 给参考动作 (teacher 只吃 proprio 140 维, 不吃特权)
-        proprio_batch = np.concatenate(proprio_list, axis=0)[:batch_size]
-        history_batch = np.concatenate(history_list, axis=0)[:batch_size]
-
+        # student 推理动作 (在 eval 模式下只返回 action)
+        student.eval()
         with torch.no_grad():
-            teacher_action = teacher(
-                torch.from_numpy(proprio_batch).float().cuda())
+            student_action = student(proprio_torch, history_buffer)
 
-        # 3. Student 训练 (DAgger: 拟合 teacher 动作)
-        student_action = student(
-            torch.from_numpy(proprio_batch).float().cuda(),
-            torch.from_numpy(history_batch).float().cuda(),
-        )
-        loss = mse_loss(student_action, teacher_action)
+        # 环境物理步进
+        jax_action = to_jax(student_action)
+        state = step_fn(state, jax_action)
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        # 检查 done 环境并进行 Selective Auto-Reset (与 train.py 一致)
+        done_jax = state.done
+        done_any = bool(jax.device_get(done_jax.any()))
+        if done_any:
+            reset_state = reset_fn(jax.random.split(jax.random.PRNGKey(it * 1000), num_envs))
+            done_mask = done_jax.astype(jp.bool_)
+            state = jax.tree_util.tree_map(
+                lambda cur, new: jp.where(
+                    done_mask.reshape((-1,) + (1,) * (cur.ndim - 1)), new, cur),
+                state, reset_state)
+
+            # 同步重置 done 环境的 history_buffer (避免跨 episode 污染)
+            done_mask_torch = to_torch(done_jax).bool()
+            history_buffer[done_mask_torch] = 0.0
+
+        # 2. Teacher 给参考动作 (Teacher 吃 149 维 combined_obs)
+        combined_obs = torch.cat([proprio_torch, privileged_torch], dim=-1)
+        with torch.no_grad():
+            teacher_action = teacher(combined_obs)
+
+        # 3. Student 训练 (将 1024 样本乱序切分为大小为 256 的 mini-batches)
+        student.train()
+
+        indices = np.arange(num_envs)
+        np.random.shuffle(indices)
+
+        mini_batch_size = 256
+        action_loss_sum = 0.0
+        z_loss_sum = 0.0
+
+        for start_idx in range(0, num_envs, mini_batch_size):
+            end_idx = start_idx + mini_batch_size
+            batch_idx = indices[start_idx:end_idx]
+
+            p_b = proprio_torch[batch_idx]
+            h_b = history_buffer[batch_idx]
+            priv_b = privileged_torch[batch_idx]
+            t_act_b = teacher_action[batch_idx]
+
+            # Forward (返回 action, z)
+            pred_action, pred_z = student(p_b, h_b)
+
+            # Multi-task Loss (Action MSE + Latent MSE)
+            loss_action = mse_loss(pred_action, t_act_b)
+            loss_z = mse_loss(pred_z, priv_b)
+            loss = loss_action + 5.0 * loss_z
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            action_loss_sum += loss_action.item()
+            z_loss_sum += loss_z.item()
 
         if it % 50 == 0 or it == n_iter - 1:
-            print(f"  iter {it:4d}/{n_iter}: action_loss={loss.item():.6f}")
+            n_batches = num_envs / mini_batch_size
+            print(f"  iter {it:4d}/{n_iter}: action_loss={action_loss_sum/n_batches:.6f}, "
+                  f"z_loss={z_loss_sum/n_batches:.6f}")
 
     elapsed = time.time() - t0
     print(f"\n✅ 蒸馏完成: {elapsed:.1f}s")

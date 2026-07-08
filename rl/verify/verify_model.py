@@ -127,7 +127,8 @@ def main():
         # root qpos: [x,y,z, qw,qx,qy,qz], pitch=绕Y -> qy=qpos[5]
         # root qvel: [vx,vy,vz, wx,wy,wz], pitch角速度=绕Y -> wy=qvel[4]
         x = d4.qpos[0]
-        theta = 2*np.arctan2(d4.qpos[5], d4.qpos[3])  # 从四元数取 pitch (qy/qw)
+        qw, qy = d4.qpos[3], d4.qpos[5]
+        theta = np.arcsin(np.clip(2 * qw * qy, -0.999999, 0.999999))
         xdot = d4.qvel[0]
         thetadot = d4.qvel[4]                          # pitch 角速度 (wy)
         F = -(K @ np.array([x, theta, xdot, thetadot]))

@@ -19,7 +19,7 @@ import time
 PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJ_ROOT)
 
-os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.80")
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 import jax
 
@@ -91,7 +91,7 @@ def main():
             self.env = env
             self.num_envs = num_envs
             self.num_actions = env.action_size
-            self.num_obs = OBS_DIM
+            self.num_obs = OBS_DIM + (PRIVILEGED_DIM if env._teacher else 0)
             self.num_privileged_obs = PRIVILEGED_DIM if env._teacher else None
             self.device = device
             self.cfg = {"env_name": "kuafu", "num_envs": num_envs}
@@ -117,7 +117,10 @@ def main():
             state_obs = self._to_torch(obs["state"]) if isinstance(obs, dict) else self._to_torch(obs)
             extras = {"observations": {}}
             if isinstance(obs, dict) and "privileged_state" in obs:
-                extras["observations"]["critic"] = self._to_torch(obs["privileged_state"])
+                priv_obs = self._to_torch(obs["privileged_state"])
+                extras["observations"]["critic"] = priv_obs
+                combined_obs = torch.cat([state_obs, priv_obs], dim=-1)
+                return combined_obs, extras
             return state_obs, extras
 
         def reset(self):
@@ -148,22 +151,19 @@ def main():
                     self._state, reset_state)
 
             # done 帧返回 reset 后的初始观测 (PPO 新 episode 首步用初始 obs)
-            obs = self._state.obs
-            state_obs = self._to_torch(obs["state"]) if isinstance(obs, dict) else self._to_torch(obs)
+            state_obs, extras = self.get_observations()
             reward = self._to_torch(reward_jax)
             done = self._to_torch(done_jax)
-
+ 
             self.episode_length_buf += 1
             self.episode_length_buf = torch.where(
                 done > 0, torch.zeros_like(self.episode_length_buf), self.episode_length_buf)
-
+ 
             # time_outs: 仅 timeout(非倒下) 时为 True, 用于 value bootstrap
             # 倒下 (fallen) 的 episode 不做 bootstrap (终止态 value=0)
             fallen = self._to_torch(fallen_jax)
             time_outs = (done > 0) & (fallen < 0.5)  # done 但未倒下 = 超时
-            info = {"time_outs": time_outs.float(), "observations": {}, "log": {}}
-            if isinstance(obs, dict) and "privileged_state" in obs:
-                info["observations"]["critic"] = self._to_torch(obs["privileged_state"])
+            info = {"time_outs": time_outs.float(), "observations": extras.get("observations", {}), "log": {}}
             return state_obs, reward, done, info
 
         @property

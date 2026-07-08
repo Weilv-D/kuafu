@@ -12,7 +12,7 @@ jax[cuda13]>=0.4
 mujoco-mjx>=3.1
 flax>=0.8                    # struct.dataclass (EnvState) + JAX 兼容
 ml_collections              # MjxEnv config_dict
-playground>=0.0.3            # MuJoCo Playground: MjxEnv 基类 + wrapper_torch.RSLRLBraxWrapper
+mujoco-playground>=0.0.3     # MuJoCo Playground: MjxEnv 基类 + wrapper_torch.RSLRLBraxWrapper
 rsl-rl-lib>=2.0              # RSL-RL PPO + OnPolicyRunner (PyTorch, legged_gym 事实标准)
 torch>=2.11                  # CUDA 13 稳定 wheel (PyTorch 2.11+, 2026.3+)
 

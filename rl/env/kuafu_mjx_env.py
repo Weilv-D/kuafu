@@ -120,6 +120,18 @@ DR = {
 }
 
 
+def rotate_vector_by_quaternion_conj(q: jax.Array, v: jax.Array) -> jax.Array:
+    """Rotate vector v by conjugate of quaternion q.
+
+    q: (qw, qx, qy, qz), v: (3,)
+    """
+    w, x, y, z = q[0], q[1], q[2], q[3]
+    q_xyz = jp.stack([-x, -y, -z])
+    uv = jp.cross(q_xyz, v)
+    uuv = jp.cross(q_xyz, uv)
+    return v + 2 * (w * uv + uuv)
+
+
 @struct.dataclass
 class EnvState:
     """环境内部状态 (不随 obs 暴露给 policy)."""
@@ -281,16 +293,25 @@ class KuafuMjxEnv(MjxEnv):
     def _lqr_balance(self, data: mjx.Data) -> jax.Array:
         """LQR 轮式倒立摆平衡: 输出每轮力矩.
 
-        状态 [x, θ, ẋ, θ̇], pitch 从完整四元数提取,
-        角速度从 qvel[4] 提取 (wy)。输入地面力 F, τ_wheel = F·R/2。
+        使用本体感受投影：
+        - xdot: 本体坐标系前向速度 (vx_local)
+        - theta: 本体坐标系 Pitch 角 (解耦后的 arcsin)
+        - thetadot: 本体坐标系 Pitch 角速度 (wy_local)
         """
-        # LQR 状态 [x, θ, ẋ, θ̇]; 残差 RL 模式下 x 用速度积分的漂移估计
-        # (绝对位置 qpos[0] 无限累积, 与速度跟踪冲突; 残差 RL 不需要回中)
-        # 简化: x 项置 0, 只用 [0, θ, ẋ, θ̇] 做 pitch 阻尼平衡
         qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
-        theta = jp.arctan2(2 * (qw * qy - qx * qz), 1 - 2 * (qy**2 + qz**2))
-        xdot = data.qvel[QVEL_X]
-        thetadot = data.qvel[QVEL_PITCH_ANG]
+        q = jp.stack([qw, qx, qy, qz])
+
+        # 本体系线速度
+        lin_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
+        xdot = lin_vel_local[0]
+
+        # 本体系角速度
+        ang_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
+        thetadot = ang_vel_local[1]  # wy
+
+        # 本体系 Pitch (解耦)
+        theta = jp.arcsin(jp.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
+
         state = jp.stack([0.0, theta, xdot, thetadot])
         F = -(LQR_K @ state)
         tau = F * WHEEL_R / 2.0
@@ -306,15 +327,16 @@ class KuafuMjxEnv(MjxEnv):
     # ---- 观测 ----
     def _base_observation(self, data: mjx.Data, env_state: EnvState) -> jax.Array:
         """35 维本体感受观测."""
-        # 机身姿态 (3): roll/pitch/yaw from quaternion
+        # 机身姿态 (3): roll/pitch/yaw from quaternion (Pitch 采用 arcsin)
         qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
         roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
-        pitch = jp.arctan2(2 * (qw * qy - qx * qz), 1 - 2 * (qy**2 + qz**2))
+        pitch = jp.arcsin(jp.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
         yaw = jp.arctan2(2 * (qw * qz + qx * qy), 1 - 2 * (qz**2 + qy**2))
         attitude = jp.stack([roll, pitch, yaw])
 
-        # 角速度 (3): wx/wy/wz
-        ang_vel = data.qvel[3:6]
+        # 角速度 (3): 本体系下的 wx/wy/wz
+        q = jp.stack([qw, qx, qy, qz])
+        ang_vel = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
 
         # 轮状态 (4): 左右轮位置+速度
         wheel_pos = jp.stack([data.qpos[QPOS_WHEEL_L], data.qpos[QPOS_WHEEL_R]])
@@ -394,30 +416,30 @@ class KuafuMjxEnv(MjxEnv):
         """task + style + safety reward."""
         qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
         roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
-        pitch = jp.arctan2(2 * (qw * qy - qx * qz), 1 - 2 * (qy**2 + qz**2))
+        pitch = jp.arcsin(jp.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
 
         # --- task ---
         # upright: exp(-pitch²) + exp(-roll²)
         upright = jp.exp(-pitch**2 / 0.25) + jp.exp(-roll**2 / 0.25)
 
-        # lin_vel_tracking: 跟踪 v_cmd (轮平均速度 → 轮缘速度)
-        wheel_avg_vel = (data.qvel[QVEL_WHEEL_L] + data.qvel[QVEL_WHEEL_R]) / 2.0
-        lin_vel = wheel_avg_vel * WHEEL_R  # 轮缘线速度
-        lin_vel_error = (lin_vel - env_state.v_cmd) ** 2
+        # lin_vel_tracking: 跟踪 v_cmd (本体系前向速度 xdot)
+        q = jp.stack([qw, qx, qy, qz])
+        lin_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
+        xdot = lin_vel_local[0]
+        lin_vel_error = (xdot - env_state.v_cmd) ** 2
         lin_vel_tracking = jp.exp(-lin_vel_error / 0.25)
 
-        # ang_vel_tracking: 跟踪 w_cmd (yaw 角速度)
-        yaw_rate = data.qvel[5]  # wz
+        # ang_vel_tracking: 跟踪 w_cmd (yaw 角速度, 本体系 wz)
+        ang_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
+        yaw_rate = ang_vel_local[2]  # wz
         ang_vel_error = (yaw_rate - env_state.w_cmd) ** 2
         ang_vel_tracking = jp.exp(-ang_vel_error / 0.25)
 
-        # leg_height: 跟踪 d0_cmd (用曲柄差值, 因五杆两曲柄对称反向旋转, 均值恒常数)
-        # hip_A - hip_B 随 D0 变化: 驻留 D0=58 → diff≈0, 伸展 D0=207 → diff≈1.52rad
-        # 归一化目标: (d0_cmd - 58) / (207 - 58) × 1.52
+        # leg_height: 修正高度差符号与缩放 (A 变负, B 变正, 故用 B - A)
         d0_norm = (env_state.d0_cmd - P.D0_MIN) / (P.D0_MAX - P.D0_MIN)
         hip_diff_target = d0_norm * 1.52
-        hip_diff_l = 0.5 * (data.qpos[QPOS_HIP_A_L] - data.qpos[QPOS_HIP_B_L])
-        hip_diff_r = 0.5 * (data.qpos[QPOS_HIP_A_R] - data.qpos[QPOS_HIP_B_R])
+        hip_diff_l = data.qpos[QPOS_HIP_B_L] - data.qpos[QPOS_HIP_A_L]
+        hip_diff_r = data.qpos[QPOS_HIP_B_R] - data.qpos[QPOS_HIP_A_R]
         hip_diff = (hip_diff_l + hip_diff_r) / 2.0
         leg_height = jp.exp(-((hip_diff - hip_diff_target) ** 2) / 0.1)
 
@@ -459,7 +481,7 @@ class KuafuMjxEnv(MjxEnv):
         """倒下或超时终止."""
         qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
         roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
-        pitch = jp.arctan2(2 * (qw * qy - qx * qz), 1 - 2 * (qy**2 + qz**2))
+        pitch = jp.arcsin(jp.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
         fallen = (jp.abs(pitch) > PITCH_THRESH) | (jp.abs(roll) > ROLL_THRESH)
         timeout = env_state.step_count >= self._episode_length
         return fallen | timeout
@@ -539,14 +561,14 @@ class KuafuMjxEnv(MjxEnv):
         model = state.info["model"]
 
         # ---- 执行器延迟: 从 action_buffer 取延迟前的动作 ----
-        # action_buffer shape: (DELAY_BUFFER_LEN, ACTION_DIM), [0]=最旧, [-1]=最新
-        # delay_steps=0 → 用当前 action; delay_steps=1 → 用上一步; delay_steps=2 → 用上上步
+        # action_buffer shape: (DELAY_BUFFER_LEN, ACTION_DIM), [0]=最旧(3步前), [1]=2步前, [2]=1步前
+        # delay_steps=0 → 用当前 action; delay_steps=1 → 用 1步前; delay_steps=2 → 用 2步前
         delayed_action = jp.where(
             env_state.delay_steps >= 2,
-            env_state.action_buffer[0],  # 2 步前
+            env_state.action_buffer[1],  # 2 步前
             jp.where(
                 env_state.delay_steps >= 1,
-                env_state.action_buffer[1],  # 1 步前
+                env_state.action_buffer[2],  # 1 步前
                 action,                      # 当前
             )
         )
@@ -628,15 +650,16 @@ class KuafuMjxEnv(MjxEnv):
 
         # 倒下惩罚 (pitch 或 roll 超阈值)
         qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
-        pitch = jp.arctan2(2 * (qw * qy - qx * qz), 1 - 2 * (qy**2 + qz**2))
+        pitch = jp.arcsin(jp.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
         roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
         fallen = (jp.abs(pitch) > PITCH_THRESH) | (jp.abs(roll) > ROLL_THRESH)
         reward = jp.where(fallen, -50.0, reward)
 
         # lin_vel_tracking 实际值 (供 metric 记录)
-        wheel_avg_vel = (data.qvel[QVEL_WHEEL_L] + data.qvel[QVEL_WHEEL_R]) / 2.0
-        lin_vel = wheel_avg_vel * WHEEL_R
-        lin_vel_track_val = jp.exp(-((lin_vel - v_cmd) ** 2) / 0.25)
+        q = jp.stack([qw, qx, qy, qz])
+        lin_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
+        xdot = lin_vel_local[0]
+        lin_vel_track_val = jp.exp(-((xdot - v_cmd) ** 2) / 0.25)
 
         obs = self._observation(data, env_state)
         metrics = {

@@ -72,11 +72,17 @@ class StudentPolicy(nn.Module):
         history_obs_dim: int = 35,
         history_len: int = 50,
         action_dim: int = 6,
-        latent_dim: int = 5,
+        latent_dim: int = 9,
         hidden_dims: Tuple[int, ...] = (512, 512, 512),
     ):
         super().__init__()
         self.adapter = RMAAdapter(history_obs_dim, history_len, latent_dim, (32, 64, 32))
+
+        # 注册 Normalizer Buffers (从 Teacher Checkpoint 载入)
+        self.register_buffer("obs_mean", torch.zeros(1, proprio_dim))
+        self.register_buffer("obs_std", torch.ones(1, proprio_dim))
+        self.register_buffer("priv_mean", torch.zeros(1, latent_dim))
+        self.register_buffer("priv_std", torch.ones(1, latent_dim))
 
         act_fn = nn.ELU
         layers = []
@@ -88,11 +94,19 @@ class StudentPolicy(nn.Module):
         self.trunk = nn.Sequential(*layers)
         self.actor_mean = nn.Linear(in_dim, action_dim)
 
-    def forward(self, proprio: torch.Tensor, history: torch.Tensor) -> torch.Tensor:
+    def forward(self, proprio: torch.Tensor, history: torch.Tensor):
         z = self.adapter(history)
-        x = torch.cat([proprio, z], dim=-1)
+
+        # 观测值正规化 (Normalizer)
+        proprio_norm = (proprio - self.obs_mean) / (self.obs_std + 1e-8)
+        z_norm = (z - self.priv_mean) / (self.priv_std + 1e-8)
+
+        x = torch.cat([proprio_norm, z_norm], dim=-1)
         h = self.trunk(x)
         action = torch.tanh(self.actor_mean(h))
+
+        if self.training:
+            return action, z
         return action
 
 

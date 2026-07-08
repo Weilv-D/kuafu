@@ -27,14 +27,27 @@ CTRL_DT = 0.02   # 50 Hz
 N_SUBSTEPS = 10  # 500 Hz 物理
 
 
+def rotate_vector_by_quaternion_conj(q, v):
+    """Rotate vector v by conjugate of quaternion q (numpy version)."""
+    w, x, y, z = q[0], q[1], q[2], q[3]
+    q_xyz = np.array([-x, -y, -z])
+    uv = np.cross(q_xyz, v)
+    uuv = np.cross(q_xyz, uv)
+    return v + 2 * (w * uv + uuv)
+
+
 def _build_obs(data, obs_history, last_action):
     """构造 35 维 base obs (从 MuJoCo data 提取)."""
     qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
     roll = np.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
-    pitch = np.arctan2(2 * (qw * qy - qx * qz), 1 - 2 * (qy**2 + qz**2))
+    pitch = np.arcsin(np.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
     yaw = np.arctan2(2 * (qw * qz + qx * qy), 1 - 2 * (qz**2 + qy**2))
     attitude = np.array([roll, pitch, yaw])
-    ang_vel = data.qvel[3:6]
+
+    # 角速度转为本体坐标系
+    q = np.array([qw, qx, qy, qz])
+    ang_vel = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
+
     wheel_state = np.array([data.qpos[9], data.qpos[14], data.qvel[8], data.qvel[13]])
     hip_state = np.array([data.qpos[7], data.qpos[10], data.qpos[12], data.qpos[15],
                           data.qvel[6], data.qvel[9], data.qvel[11], data.qvel[14]])
@@ -50,9 +63,19 @@ def _build_obs(data, obs_history, last_action):
 def _apply_action(data, action):
     """LQR 底层 + RL 残差叠加 → ctrl."""
     qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
-    pitch = np.arctan2(2 * (qw * qy - qx * qz), 1 - 2 * (qy**2 + qz**2))
-    # LQR: x 项置 0 (残差模式, 与训练一致)
-    F = -(P.LQR_K @ np.array([0.0, pitch, data.qvel[0], data.qvel[4]]))
+    q = np.array([qw, qx, qy, qz])
+
+    # LQR 状态量转投影至本体坐标系
+    lin_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
+    xdot = lin_vel_local[0]
+
+    ang_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
+    thetadot = ang_vel_local[1]
+
+    pitch = np.arcsin(np.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
+
+    # LQR: x 项置 0 (与环境一致)
+    F = -(P.LQR_K @ np.array([0.0, pitch, xdot, thetadot]))
     tau_lqr = F * P.R / 2.0
     data.ctrl[0] = np.clip(tau_lqr + action[0] * P.TAU_WHEEL_RATED, -1.1, 1.1)
     data.ctrl[1] = np.clip(tau_lqr + action[1] * P.TAU_WHEEL_RATED, -1.1, 1.1)
