@@ -20,10 +20,18 @@ dist/
 # ---- 分析中间数据(可由 run_all.py 重新生成)----
 analysis/output/*.npz
 
+# ---- RL 训练产物(大文件, 不进库)----
+rl/checkpoints/
+rl/wandb/
+rl/runs/
+*.onnx
+*.pt
+*.ckpt
+
 # ---- 环境 / 编辑器 ----
 .venv/
 venv/
-env/
+/env/
 .vscode/
 .idea/
 *.swp
@@ -39,3 +47,4 @@ desktop.ini
 ~$*.SLDASM
 ~$*.SLDPRT
 ~$*.SLDDRW
+MUJOCO_LOG.TXT

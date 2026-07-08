@@ -1,0 +1,233 @@
+<!--
+  KUAFU 桌面双轮腿机器人 — MuJoCo MJCF 仿真模型
+
+  单一数值真源: kuafu_physics.py（项目顶层），几何 mm→m 换算。
+  设计依据: docs/KUAFU.md（机构/硬件/整机参数）, docs/plans/...-design.md §三（仿真建模）。
+
+  坐标系: 原点在髋面中心（两髋点 A-B 中点），+X 前向, +Y 左向, +Z 上向。
+          驻留态轮恒接地，机身底 Z = D0 + r。
+
+  机构: 对称并联五杆髋关节。每腿两根串联肘链（髋A→曲柄 a→P1→连杆 b→Q，
+        髋B→曲柄 a→P2→连杆 b→Q），Q 点用 equality connect 焊死形成闭链。
+        两台舵机独立驱动两根曲柄 → 每腿 2-DOF。
+
+  用途: 同一 .xml 兼容 MJX（GPU 训练）与原生 MuJoCo（CPU 可视化/sim-to-real 对拍）。
+        验证: python rl/verify/verify_model.py / launch_viewer.py
+
+  数值出处标注: KUAFU §x 表示 docs/KUAFU.md 第 x 节; design §x 表示 design.md。
+-->
+<mujoco model="kuafu">
+
+  <!-- ============================================================
+       编译器 / 求解器选项
+       design §3.1: timestep=0.002 (500Hz 物理子步, RL 50Hz 控制每步 10 子步);
+                    Newton solver iterations=50 (闭链需多迭代防约束漂移)
+       ============================================================ -->
+  <compiler angle="radian" coordinate="local" autolimits="true"/>
+  <option timestep="0.002" solver="Newton" iterations="50" cone="elliptic"/>
+
+  <!-- ============================================================
+       默认参数
+       design §3.2: 闭链关节 armature/frictionloss 抑制数值振荡
+       KUAFU §5.3.3: 被动铰链干摩擦 μ≈0.3 (初版) / 0.001 (升级轴承)
+       ============================================================ -->
+  <default>
+    <joint armature="0.01" damping="0.05" frictionloss="0.005" limited="true"/>
+    <geom condim="3" friction="0.8 0.02 0.001" rgba="0.6 0.6 0.7 1"/>
+    <position kp="80" kv="2" forcerange="-1 1"/>   <!-- design §3.3: ST3215 位置环初值, forcerange=连续安全±1Nm -->
+    <motor ctrlrange="-1.1 1.1"/>        <!-- design §3.3: DDSM315 堵转 ±1.1 Nm -->
+  </default>
+
+  <!-- ============================================================
+       视觉 / 地形
+       ============================================================ -->
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="120" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.5 0.6 0.7" rgb2="0 0 0" width="256" height="256"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" width="512" height="512"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" diffuse="0.8 0.8 0.8"/>
+    <geom name="floor" type="plane" size="0 0 0.05" material="groundplane" friction="0.8 0.02 0.001"/>
+
+    <!-- ============================================================
+         机架 (floating base) — 机身盒体 + 电子件质量点
+         KUAFU §4.1: 机身 240×196×50 mm; §5.4: COM 表回填压低到 71.1mm
+         髋面 (A-B 中点) 为机身坐标系原点，Z=0 在髋面
+         ============================================================ -->
+    <body name="chassis" pos="0 0 0.097">  <!-- Z=0.097: 机身底=D0+r=58+39=97mm (KUAFU §4.1), 髋面=机身坐标系原点 -->
+      <freejoint name="root"/>
+      <inertial pos="0 0 0.003" mass="0.220" diaginertia="0.0006 0.0008 0.0010"/>
+        <!-- 机架结构 (PLA 甲板+叉口 160g + 线材 60g), 电子件由下方质量点承担 -->
+      <geom name="body_box" type="box" size="0.120 0.098 0.025" pos="0 0 0.025"
+            rgba="0.5 0.5 0.6 1" mass="0"/>  <!-- KUAFU §4.1: 240×196×50, 质量由 inertial 承担 -->
+      <!-- 电子件质量点 (KUAFU §5.4 COM 表), inertial pos 在 body 局部为原点 -->
+      <body name="battery" pos="0 0 -0.018"><inertial pos="0 0 0" mass="0.285" diaginertia="1e-5 1e-5 1e-5"/></body>
+      <body name="buck"    pos="0 0 -0.016"><inertial pos="0 0 0" mass="0.140" diaginertia="1e-5 1e-5 1e-5"/></body>
+      <body name="pi5"     pos="0 0  0.056"><inertial pos="0 0 0" mass="0.085" diaginertia="1e-5 1e-5 1e-5"/></body>
+      <body name="d435i"   pos="0.060 0 0.056"><inertial pos="0 0 0" mass="0.070" diaginertia="1e-5 1e-5 1e-5"/></body>
+      <body name="stm32"   pos="0 0 0.039"><inertial pos="0 0 0" mass="0.095" diaginertia="1e-5 1e-5 1e-5"/></body>
+      <body name="powerbus" pos="0 0 -0.013"><inertial pos="0 0 0" mass="0.022" diaginertia="1e-5 1e-5 1e-5"/></body>
+      <body name="chargepak" pos="0 0 0.056"><inertial pos="0 0 0" mass="0.150" diaginertia="1e-5 1e-5 1e-5"/></body>
+      <site name="imu" pos="0 0 0.025" size="0.005"/>   <!-- BMI088 位置 -->
+
+      <!-- 舵机固定质量点 (ST3215 ×4, KUAFU §3.1: ~60g/台, 安装在侧壁 Y=±0.098) -->
+      <body name="servo_LF" pos="-0.026 0.098 0"><inertial pos="0 0 0" mass="0.060" diaginertia="1e-5 1e-5 1e-5"/></body>
+      <body name="servo_LB" pos=" 0.026 0.098 0"><inertial pos="0 0 0" mass="0.060" diaginertia="1e-5 1e-5 1e-5"/></body>
+      <body name="servo_RF" pos="-0.026 -0.098 0"><inertial pos="0 0 0" mass="0.060" diaginertia="1e-5 1e-5 1e-5"/></body>
+      <body name="servo_RB" pos=" 0.026 -0.098 0"><inertial pos="0 0 0" mass="0.060" diaginertia="1e-5 1e-5 1e-5"/></body>
+
+      <!-- ============================================================
+           左腿 (Y=+0.098) 闭链五杆 — 几何经 IK 精确解算
+           驻留态 D0=58: P1=(-107,45.7) P2=(107,45.7) Q=(0,-58) mm
+           q=0 即驻留姿态 (geom fromto 按驻留态绘制)
+           ============================================================ -->
+      <!-- A 链: 髋A → 曲柄 a → P1 → 连杆 b → Q -->
+      <body name="crank_A_l" pos="-0.026 0.098 0">
+        <joint name="hip_A_l" type="hinge" axis="0 1 0" range="-2.0 2.0"/>
+        <geom type="capsule" fromto="0 0 0  -0.081 0 0.0457" size="0.006" mass="0.025"/>
+        <body name="link_A_l" pos="-0.081 0 0.0457">   <!-- P1 相对髋A -->
+          <joint name="knee_A_l" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
+          <geom type="capsule" fromto="0 0 0  0.107 0 -0.1037" size="0.006" mass="0.025"/>
+          <site name="Q_A_l" pos="0.107 0 -0.1037" size="0.003"/>   <!-- Q 相对 P1 -->
+        </body>
+      </body>
+
+      <!-- B 链: 髋B → 曲柄 a → P2 → 连杆 b → Q -->
+      <body name="crank_B_l" pos="0.026 0.098 0">
+        <joint name="hip_B_l" type="hinge" axis="0 1 0" range="-2.0 2.0"/>
+        <geom type="capsule" fromto="0 0 0  0.081 0 0.0457" size="0.006" mass="0.025"/>
+        <body name="link_B_l" pos="0.081 0 0.0457">   <!-- P2 相对髋B -->
+          <joint name="knee_B_l" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
+          <geom type="capsule" fromto="0 0 0  -0.107 0 -0.1037" size="0.006" mass="0.025"/>
+          <site name="Q_B_l" pos="-0.107 0 -0.1037" size="0.003"/>  <!-- Q 相对 P2 -->
+        </body>
+      </body>
+
+      <!-- 左轮 (Q 点处, 绕 Y 轴滚; Q=(0,-58) 相对髋面) -->
+      <body name="wheel_l" pos="0 0.098 -0.058">
+        <joint name="wheel_l" type="hinge" axis="0 1 0" frictionloss="0" damping="0" limited="false"/>
+        <geom type="cylinder" size="0.03908 0.0174" zaxis="0 1 0" mass="0.349"
+              friction="0.8 0.02 0.001" rgba="0.1 0.1 0.1 1"/>
+      </body>
+
+      <!-- ============================================================
+           右腿 (Y=-0.098) 闭链五杆 — 几何与左腿一致 (仅 Y 镜像)
+           ============================================================ -->
+      <body name="crank_A_r" pos="-0.026 -0.098 0">
+        <joint name="hip_A_r" type="hinge" axis="0 1 0" range="-2.0 2.0"/>
+        <geom type="capsule" fromto="0 0 0  -0.081 0 0.0457" size="0.006" mass="0.025"/>
+        <body name="link_A_r" pos="-0.081 0 0.0457">
+          <joint name="knee_A_r" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
+          <geom type="capsule" fromto="0 0 0  0.107 0 -0.1037" size="0.006" mass="0.025"/>
+          <site name="Q_A_r" pos="0.107 0 -0.1037" size="0.003"/>
+        </body>
+      </body>
+
+      <body name="crank_B_r" pos="0.026 -0.098 0">
+        <joint name="hip_B_r" type="hinge" axis="0 1 0" range="-2.0 2.0"/>
+        <geom type="capsule" fromto="0 0 0  0.081 0 0.0457" size="0.006" mass="0.025"/>
+        <body name="link_B_r" pos="0.081 0 0.0457">
+          <joint name="knee_B_r" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
+          <geom type="capsule" fromto="0 0 0  -0.107 0 -0.1037" size="0.006" mass="0.025"/>
+          <site name="Q_B_r" pos="-0.107 0 -0.1037" size="0.003"/>
+        </body>
+      </body>
+
+      <!-- 右轮 -->
+      <body name="wheel_r" pos="0 -0.098 -0.058">
+        <joint name="wheel_r" type="hinge" axis="0 1 0" frictionloss="0" damping="0" limited="false"/>
+        <geom type="cylinder" size="0.03908 0.0174" zaxis="0 1 0" mass="0.349"
+              friction="0.8 0.02 0.001" rgba="0.1 0.1 0.1 1"/>
+      </body>
+
+    </body>
+  </worldbody>
+
+  <!-- ============================================================
+       排除自碰撞 (design §3.1)
+       连杆间、连杆与机身间不计算碰撞，避免误触; 只保留轮-地接触
+       ============================================================ -->
+  <contact>
+    <exclude body1="chassis" body2="crank_A_l"/>
+    <exclude body1="chassis" body2="crank_B_l"/>
+    <exclude body1="chassis" body2="crank_A_r"/>
+    <exclude body1="chassis" body2="crank_B_r"/>
+    <exclude body1="link_A_l" body2="link_B_l"/>
+    <exclude body1="link_A_r" body2="link_B_r"/>
+  </contact>
+
+  <!-- ============================================================
+       闭链约束 (design §3.2)
+       每腿两链末端 Q 焊死 (connect equality), 硬约束 solref/solimp
+       Discussion #2662 经验值
+       ============================================================ -->
+  <equality>
+    <connect name="loop_l" body1="link_A_l" body2="link_B_l"
+              anchor="0.107 0 -0.1037"
+              solref="0.005 1" solimp="0.999 0.999 0.001"/>
+    <connect name="loop_r" body1="link_A_r" body2="link_B_r"
+              anchor="0.107 0 -0.1037"
+              solref="0.005 1" solimp="0.999 0.999 0.001"/>
+  </equality>
+
+  <!-- ============================================================
+       执行器 (design §3.3)
+       轮 = motor (力矩控制), 腿 = position (位置控制, 模拟 ST3215 PD)
+       ============================================================ -->
+  <actuator>
+    <!-- 轮: τ = ctrl × gear = ctrl (Nm), ctrlrange ±1.1 堵转 -->
+    <motor name="tau_l" joint="wheel_l" gear="1"/>
+    <motor name="tau_r" joint="wheel_r" gear="1"/>
+
+    <!-- 腿: position actuator, forcerange=±1Nm 连续安全 (design §3.3, 由 default 继承) -->
+    <position name="q_hip_A_l" joint="hip_A_l"/>
+    <position name="q_hip_B_l" joint="hip_B_l"/>
+    <position name="q_hip_A_r" joint="hip_A_r"/>
+    <position name="q_hip_B_r" joint="hip_B_r"/>
+  </actuator>
+
+  <!-- ============================================================
+       传感器 (design §3.1)
+       IMU / 编码器 / 力矩回传 / base 特权 (teacher 用)
+       ============================================================ -->
+  <sensor>
+    <accelerometer site="imu"/>
+    <gyro site="imu"/>
+    <framequat objtype="site" objname="imu"/>
+    <framelinvel objtype="site" objname="imu"/>   <!-- 特权: teacher 用, student 不用 -->
+
+    <jointpos joint="wheel_l"/><jointpos joint="wheel_r"/>
+    <jointpos joint="hip_A_l"/><jointpos joint="hip_B_l"/>
+    <jointpos joint="hip_A_r"/><jointpos joint="hip_B_r"/>
+    <jointvel joint="wheel_l"/><jointvel joint="wheel_r"/>
+    <jointvel joint="hip_A_l"/><jointvel joint="hip_B_l"/>
+    <jointvel joint="hip_A_r"/><jointvel joint="hip_B_r"/>
+
+    <actuatorfrc actuator="tau_l"/><actuatorfrc actuator="tau_r"/>
+    <actuatorfrc actuator="q_hip_A_l"/><actuatorfrc actuator="q_hip_B_l"/>
+    <actuatorfrc actuator="q_hip_A_r"/><actuatorfrc actuator="q_hip_B_r"/>
+  </sensor>
+
+  <!-- ============================================================
+       驻留态 keyframe (D0=58)
+       geom fromto 已按驻留姿态绘制, 故各关节 q≈0 即驻留态。
+       root Z=0.097 (机身底=D0+r=97mm, KUAFU §4.1)。
+       ============================================================ -->
+  <keyframe>
+    <key name="dwell" qpos="
+      0 0 0.097 1 0 0 0
+      0 0
+      0 0 0 0
+      0 0 0 0"/>
+      <!-- root(7) + wheels(2) + hips(4) + knees(4) = 17 -->
+  </keyframe>
+
+</mujoco>

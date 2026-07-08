@@ -7,30 +7,21 @@
 ```
 KuaFu/
 ├── README.md
+├── kuafu_physics.py                ← 物理常量真源（analysis + rl 共用）
 ├── mechanism.html                  ← 3D 交互可视化
 ├── docs/                           ← 设计文档
 │   ├── KUAFU.md                    ← 单一真源（总览/硬件/结构/分析/装机/符号）
 │   └── plans/                      ← 设计过程文档
-└── analysis/                       ← 分析代码
-    ├── kuafu/                      ← 共享包 (机构解算 + 统一样式)
-    │   ├── mechanism.py            ←   运动学/静力学/动力学/力椭球 (纯 numpy)
-    │   └── styling.py              ←   色盲安全色板 + 出版级排版
-    ├── plot/                       ← 绘图脚本
-    │   ├── plot_dynamics.py
-    │   ├── plot_force_ellipsoid.py
-    │   ├── plot_workspace.py
-    │   └── plot_lqr.py
-    ├── optimize/                   ← 蒙特卡洛参数优化
-    │   ├── analyze_params.py
-    │   ├── monte_carlo.py
-    │   ├── dirichlet_weights.py
-    │   └── plot_optimization.py
-    ├── test/                       ← 单元测试
-    │   └── test_kinematics.py
-    ├── output/                     ← 生成图表
-    ├── run_all.py                  ← 一键运行
-    ├── pyproject.toml              ← 包定义 (pip install -e .)
-    └── requirements.txt
+├── analysis/                       ← 机构分析代码（运动学/静力学/动力学）
+│   ├── kuafu/                      ← 共享包 (机构解算 + 统一样式)
+│   ├── plot/  optimize/  test/
+│   └── run_all.py
+└── rl/                             ← 强化学习模块（仿真 + 训练管线）
+    ├── kuafu.xml                   ← MJCF 仿真模型（五杆闭链 + 混合执行器）
+    ├── verify/                     ← 物理验证 + 可视化 viewer
+    ├── env/                        ← RL 环境（obs/act/reward/域随机化）
+    ├── train/                      ← PPO 训练配置 + 课程
+    └── export/                     ← ONNX 导出（PyTorch → 部署）
 ```
 
 ## 快速开始
@@ -48,4 +39,4 @@ python run_all.py        # 生成图表 + 运行测试
 
 ---
 
-v2.3 / 2026-07-08
+v2.4 / 2026-07-08

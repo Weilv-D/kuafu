@@ -1,0 +1,16 @@
+# KUAFU RL 依赖（分两组）
+# 安装: pip install -r rl/requirements.txt
+
+# ---- 验证必需（CPU 即可，物理验证 + viewer）----
+mujoco>=3.1
+numpy>=1.24
+scipy>=1.10
+
+# ---- 训练必需（GPU + MJX，验证物理后装）----
+jax[cuda13]>=0.4
+mujoco-mjx>=3.1
+flax>=0.8
+optax>=0.2
+# rsl-rl          # MuJoCo Playground 训练栈，从源码装: pip install git+https://github.com/erikwijmans/rsl_rl
+# torch>=2.2      # ONNX 导出用，导出时装
+# onnxruntime>=1.17  # 推理验证用

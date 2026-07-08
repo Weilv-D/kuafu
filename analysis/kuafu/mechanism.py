@@ -3,31 +3,26 @@
 KUAFU 机构解算 — 运动学 / 静力学 / 动力学 / 力椭球几何
   纯数值模块, 仅依赖 numpy. 坐标系: 原点在两髋点中点, +X 前向, +Z 向上.
   机构: 对称并联五杆髋关节, 两髋点 A/B, 曲柄 a(大腿), 连杆 b(小腿), 输出点 Q.
+
+物理常量真源在项目顶层 kuafu_physics.py（analysis 与 rl 共用，保证零漂移）。
 """
+import os, sys
 import numpy as np
 
-# ============================================================
-# 物理常量
-# ============================================================
-G = 9.81
-MM = 1e-3            # mm -> m
+# 把项目根（本文件的上上两级目录）加入 path，使 kuafu_physics 可导入
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 # ============================================================
-# 机构参数 (单值真源, 见 docs/KUAFU.md 附录A)
+# 物理常量（真源在 kuafu_physics.py，此处 re-export 保持向后兼容）
 # ============================================================
-AX, BX = -26.0, 26.0
-A = np.array([AX, 0.0])
-B = np.array([BX, 0.0])
-A_LEN = 93.0            # 曲柄 (大腿)
-B_LEN = 149.0           # 连杆 (小腿)
-XQ = 0.0                # 默认对称步态 Q.x = 0（常量，勿修改）
-R_WHEEL = 39.08
-M_TOT = 2.205
-F_GRAV = M_TOT * G / 2.0      # ~10.81 N/腿
-F_DES = 30.0                 # 设计载荷 (3x 冲击)
-TAU_STALL = 2.94
-TAU_CONT = 1.0
-W_SERVO = 4.7
+from kuafu_physics import (  # noqa: F401
+    G, MM,
+    AX, BX, A, B, A_LEN, B_LEN, XQ, R_WHEEL, D0_MIN, D0_MAX,
+    TAU_WHEEL_RATED, TAU_WHEEL_STALL, RPM_WHEEL_RATED, RPM_WHEEL_NOLOAD,
+    TAU_STALL, TAU_CONT, W_SERVO, SERVO_KP, SERVO_KV,
+    M_TOT, F_GRAV, F_DES, M_CRANK, M_LINK, M_WHEEL,
+    MC, MP, LP, R, LQR_K, OMEGA_N,
+)
 
 # ============================================================
 # 运动学
@@ -113,11 +108,8 @@ def ik_full(Q):
     return r1[0], r2[0]
 
 # ============================================================
-# 动力学 (拉格朗日, 集中质量模型)
+# 动力学 (拉格朗日, 集中质量模型) — 质量常量见 kuafu_physics
 # ============================================================
-M_CRANK = 0.030
-M_LINK  = 0.040
-M_WHEEL = 0.349
 
 def leg_points(t1, t2):
     P1 = A + A_LEN*np.array([np.cos(t1), np.sin(t1)])
