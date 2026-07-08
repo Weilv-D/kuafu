@@ -46,8 +46,8 @@ def make_train_cfg() -> dict:
         "policy": {
             "class_name": "ActorCritic",
             "init_noise_std": 1.0,
-            "actor_hidden_dims": [256, 256, 256],
-            "critic_hidden_dims": [256, 256, 256],
+            "actor_hidden_dims": [512, 512, 512],
+            "critic_hidden_dims": [512, 512, 512],
             "activation": "elu",
         },
         "num_steps_per_env": 24,

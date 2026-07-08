@@ -33,7 +33,7 @@ import numpy as np
 def distill(
     teacher_ckpt: str,
     num_envs: int = 1024,
-    iterations: int = 500,
+    iterations: int = 1000,
     log_dir: str = "rl/checkpoints",
     smoke_test: bool = False,
 ):
@@ -69,7 +69,7 @@ def distill(
         history_len=50,
         action_dim=ACTION_DIM,
         latent_dim=5,
-        hidden_dims=(256, 256, 256),
+        hidden_dims=(512, 512, 512),
     ).cuda()
     print(f"  Student 参数: {count_parameters(student):,}")
 

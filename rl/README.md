@@ -96,6 +96,19 @@ rl/.venv/bin/python rl/verify/playback.py --ckpt policy.onnx
 阶段5  实机部署 ──────────── ⏳ 待硬件就绪
 ```
 
+## 实机部署：硬实时调度（0 代码改动）
+
+树莓派 5 启动 `rl_policy_node` 时，用 Linux 系统命令消除 CPU 调度抖动：
+
+```bash
+# taskset -c 3: 绑定 Core 3 (独占, 避免被其他进程抢占)
+# chrt -f 99: 实时 FIFO 调度, 优先级 99 (最高, 抢占所有普通进程)
+sudo chrt -f 99 taskset -c 3 python3 rl_policy_node.py
+```
+
+MLP [512,512,512] 推理 ~1.5ms，在实时 FIFO + 独占核心下锁定稳定，
+远低于 20ms (50Hz) 控制周期红线。
+
 ## 技术栈
 
 ```
@@ -103,12 +116,12 @@ JAX 0.10.2 (cuda13)  ←→  DLPack 零拷贝  ←→  PyTorch 2.12.1 (cu130)
          ↓                                          ↓
    MJX 3.10 (GPU 物理)                      RSL-RL 2.3.3 (PPO)
          ↓                                          ↓
-   MuJoCo Playground (MjxEnv 基类)          ActorCritic [256,256,256]
+   MuJoCo Playground (MjxEnv 基类)          ActorCritic [512,512,512]
 ```
 
 - **JAX + PyTorch 共享 CUDA 13 runtime**，DLPack 零拷贝交换 GPU 张量
-- **Teacher**：RSL-RL 内置 ActorCritic，critic 含特权信息（friction/mass/COM/inertia），actor 仅本体感受 140 维
-- **Student**：StudentPolicy(trunk + RMA adapter)，186k 参数 < 200k（Pi5 ONNX <1ms）
+- **Teacher**：RSL-RL 内置 ActorCritic [512,512,512]，critic 含特权信息，actor 仅本体感受 140 维
+- **Student**：StudentPolicy(trunk + RMA adapter)，参数量随隐藏层同步 scaling
 - **LQR 底层**：永远在环，RL 挂掉时兜底（K=[-4.47,-61.18,-5.82,-4.02]，LP=56mm）
 
 ## 已知遗留

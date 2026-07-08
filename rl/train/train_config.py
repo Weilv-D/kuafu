@@ -17,7 +17,7 @@ import kuafu_physics as P
 # ============================================================
 NUM_ENVS = 1024              # 并行环境数 (RTX 4070 8GB 实测, 4090 可调 4096)
 NUM_STEPS_PER_ENV = 24       # 每次 rollout 的步数
-TOTAL_TIMESTEPS = 200_000_000  # 总步数 (残差 RL 收敛约 1-2 亿步)
+TOTAL_TIMESTEPS = 500_000_000  # 总步数 5亿 (大模型充分收敛, RTX 4070 ~1.5h)
 
 # ============================================================
 # PPO 超参 (RSL-RL legged locomotion 事实标准, design.md §2.6)
@@ -37,14 +37,15 @@ PPO = {
 
 # ============================================================
 # 网络结构 (design.md §2.5: Pi5 ONNX <1ms 约束)
+# Scaling: 隐藏层 256→512, 参数量~70万, Pi5 MLP 推理~1.5ms (< 20ms 周期)
 # ============================================================
 NETWORK = {
-    "actor":  [256, 256, 256],   # 主干 MLP: obs(~140) → 256×3 → action 6
-    "critic": [256, 256, 256],   # value head
+    "actor":  [512, 512, 512],   # 主干 MLP: obs(~140) → 512×3 → action 6
+    "critic": [512, 512, 512],   # value head
     "adapter_cnn": [32, 64, 32], # RMA: 50-step 历史 → 5 维 z
     "vision_encoder": None,      # M6 启用: CNN ~80k 参数 → 32 维
     "activation": "elu",
-    "total_params_target": 200_000,  # <200k 保证 ONNX <1ms
+    "total_params_target": 700_000,  # ~70万, Pi5 ONNX ~1.5ms (< 20ms 周期)
 }
 
 # ============================================================

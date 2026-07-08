@@ -73,7 +73,7 @@ class StudentPolicy(nn.Module):
         history_len: int = 50,
         action_dim: int = 6,
         latent_dim: int = 5,
-        hidden_dims: Tuple[int, ...] = (256, 256, 256),
+        hidden_dims: Tuple[int, ...] = (512, 512, 512),
     ):
         super().__init__()
         self.adapter = RMAAdapter(history_obs_dim, history_len, latent_dim, (32, 64, 32))
