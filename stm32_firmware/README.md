@@ -21,22 +21,28 @@
 
 ## 目录结构
 
-*   `Config/`
-    *   [pin_config.h](Config/pin_config.h): 硬件引脚映射、LQR 控制增益、并联机构几何参数与安全阈值。
-*   `Comm/`
-    *   [crc8.h](Comm/crc8.h) / [crc8.c](Comm/crc8.c): 用于 DDSM315 电机通信校验的 CRC-8/MAXIM 查表计算器。
-    *   [pi_link.h](Comm/pi_link.h) / [pi_link.c](Comm/pi_link.c): 树莓派 5 串口通信桥接协议，包含遥控指令解析与高频数据遥测上传。
-*   `Drivers/`
-    *   [bmi088.h](Drivers/bmi088.h) / [bmi088.c](Drivers/bmi088.c): BMI088 惯性传感器 I2C 驱动，启用陀螺仪数据就绪中断。
-    *   [ddsm315.h](Drivers/ddsm315.h) / [ddsm315.c](Drivers/ddsm315.c): DDSM315 轮毂电机驱动，支持模式切换、使能控制、力矩下发与状态解析。
-    *   [st3215.h](Drivers/st3215.h) / [st3215.c](Drivers/st3215.c): ST3215 菊花链总线舵机驱动，支持多路同步写入与单路状态反馈读取。
-*   `Control/`
-    *   [mahony.h](Control/mahony.h) / [mahony.c](Control/mahony.c): 姿态估算滤波器，融合加速度计与陀螺仪数据。
-    *   [kinematics.h](Control/kinematics.h) / [kinematics.c](Control/kinematics.c): 五杆并联腿部逆运动学解算器，建立足端虚拟高度与髋关节角度的映射。
-    *   [lqr_controller.h](Control/lqr_controller.h) / [lqr_controller.c](Control/lqr_controller.c): 双轮倒立摆平衡控制器，负责合成自平衡力矩与树莓派残差输入。
 *   `Core/`
-    *   [safety_state.h](Core/safety_state.h) / [safety_state.c](Core/safety_state.c): 系统运行状态机与安全阀限监测保护。
-    *   [main.c](Core/main.c): 时钟配置、外设初始化入口、中断控制以及分时任务调度。
+    *   `Inc/`: 存放所有头文件，包含引脚定义、控制算法、通信协议以及状态机的声明：
+        *   [pin_config.h](Core/Inc/pin_config.h): 硬件引脚映射、LQR 控制增益、并联机构几何参数与安全阈值。
+        *   [crc8.h](Core/Inc/crc8.h): DDSM 电机通信校验的 CRC-8/MAXIM 声明。
+        *   [pi_link.h](Core/Inc/pi_link.h): 树莓派桥接串口协议声明。
+        *   [bmi088.h](Core/Inc/bmi088.h): BMI088 六轴惯性传感器驱动声明。
+        *   [ddsm315.h](Core/Inc/ddsm315.h): DDSM315 电机控制驱动声明。
+        *   [st3215.h](Core/Inc/st3215.h): ST3215 菊花链总线舵机驱动声明。
+        *   [mahony.h](Core/Inc/mahony.h): Mahony 滤波姿态解算声明。
+        *   [kinematics.h](Core/Inc/kinematics.h): 五杆并联逆运动学解算声明。
+        *   [lqr_controller.h](Core/Inc/lqr_controller.h): 平衡控制器声明。
+        *   [safety_state.h](Core/Inc/safety_state.h): 安全保护状态机声明。
+    *   `Src/`: 存放所有源文件，包含上述各个模块的业务逻辑实现：
+        *   [main.c](Core/Src/main.c): 主程序入口，分时任务调度及中断计数。
+        *   [safety_state.c](Core/Src/safety_state.c): 系统运行状态机与安全阀限监测保护。
+        *   [crc8.c](Core/Src/crc8.c) / [pi_link.c](Core/Src/pi_link.c) / [bmi088.c](Core/Src/bmi088.c) / [ddsm315.c](Core/Src/ddsm315.c) / [st3215.c](Core/Src/st3215.c): 底层设备驱动与协议实现。
+        *   [mahony.c](Core/Src/mahony.c) / [kinematics.c](Core/Src/kinematics.c) / [lqr_controller.c](Core/Src/lqr_controller.c): 控制算法与几何学逆运动学解算。
+        *   [system_stm32f4xx.c](Core/Src/system_stm32f4xx.c) / [stm32f4xx_hal_msp.c](Core/Src/stm32f4xx_hal_msp.c) / [stm32f4xx_it.c](Core/Src/stm32f4xx_it.c): 系统底层、中断处理及硬件接口驱动。
+*   `Drivers/`
+    *   `CMSIS/` / `STM32F4xx_HAL_Driver/`: ST 官方 HAL 标准库底层驱动。
+*   `MDK-ARM/`
+    *   [F407ZG.uvprojx](MDK-ARM/F407ZG.uvprojx): Keil MDK5 核心工程项目文件。
 
 ---
 
