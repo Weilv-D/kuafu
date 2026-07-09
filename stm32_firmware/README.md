@@ -4,6 +4,20 @@
 
 ---
 
+## 核心板硬件规格与复核 (LXB407ZG-P1)
+
+经复核 `STM32F407ZG-P1核心板原理图`，板载核心引脚与外设定义如下：
+1.  **USB 接口**：板载 Type-C 接口直接连至 STM32 的 **PA11/PA12 (USB_DM/DP)**，**板载无 USB 转串口芯片**。因此进行串口下载或调试时，必须将外部 CH340 模块连接至板载的 **USART1 调试排针**（标有 TXD/RXD）。
+2.  **按键配置**：
+    *   **SW2 (RST)**：复位按键（低电平复位）。
+    *   **SW3 (BOOT0)**：BOOT0 控制按键（按下时 BOOT0 拉高至 3.3V，松开时默认通过 10kΩ 电阻拉低至 GND）。
+    *   **SW1 (KEY)**：用户自定义按键，连接至 **PA15**（低电平有效）。
+3.  **LED 配置**：
+    *   **LED1 (红光)**：3.3V 电源指示灯（上电常亮）。
+    *   **LED2 (绿光)**：用户可控 LED，连接至 **PC13**（低电平点亮）。
+
+---
+
 ## 目录结构
 
 *   `Config/`
@@ -21,7 +35,7 @@
     *   [lqr_controller.h](Control/lqr_controller.h) / [lqr_controller.c](Control/lqr_controller.c): 双轮倒立摆 LQR 平衡控制器，并融合上层输出的残差扭矩。
 *   `Core/`
     *   [safety_state.h](Core/safety_state.h) / [safety_state.c](Core/safety_state.c): 状态机（INIT、STAND、ACTIVE、CLIMB、FAULT）与多重安全保护逻辑。
-    *   [main.c](Core/main.c): 主程序入口。配置系统时钟（168 MHz），实现 1 kHz 中断同步计数器及主循环 Slot 分时调度器。
+    *   [main.c](Core/main.c): 主程序入口。配置系统时钟（168 MHz），实现 1.0ms EXTI1 同步滴答，大循环中执行读取、滤波和 4ms 分时槽控制。
 
 ---
 
@@ -46,7 +60,7 @@
 
 ## 全系统针脚连接方案
 
-> 主控芯片：STM32F407ZGT6（实物丝印省略 "P"，如 PB8 标为 B8）
+> 主控芯片丝印省略 "P"，如 PB8 标为 B8
 
 ### 1. 串口资源分配总览
 
@@ -73,10 +87,10 @@
 | rst | ✗ | 悬空不接 | — | 悬空 |
 
 **⚠️ 串口下载步骤：**
-1. **进入 Bootloader 模式**：按住板载 **BOOT 按键**，按一下 **RST 复位键**，随后松开 **BOOT 按键**（若下载线支持 DTR/RTS 自动流控，则无需此手动操作）。
+1. **进入 Bootloader 模式**：按住核心板上的 **BOOT0 按键 (SW3)**，按一下 **RST 按键 (SW2)**，随后松开 **BOOT0 按键**。
 2. 在 FlyMcu/STM32CubeProgrammer 选择对应 COM 端口，载入 `.hex` 固件。
 3. 启动烧录下载。
-4. 烧录完成后，按一下 **RST 复位键** 即可正常运行。
+4. 烧录完成后，按一下 **RST 按键 (SW2)** 即可正常运行。
 
 #### B. 树莓派 5 ↔ STM32 (主控桥接通信)
 
