@@ -393,25 +393,120 @@
         <Group>
           <GroupName>Application/User/Core</GroupName>
           <Files>
-            <File><FileName>main.c</FileName><FileType>1</FileType><FilePath>..\Core\Src\main.c</FilePath></File><File><FileName>stm32f4xx_it.c</FileName><FileType>1</FileType><FilePath>..\Core\Src\stm32f4xx_it.c</FilePath></File><File><FileName>stm32f4xx_hal_msp.c</FileName><FileType>1</FileType><FilePath>..\Core\Src\stm32f4xx_hal_msp.c</FilePath></File><File><FileName>system_stm32f4xx.c</FileName><FileType>1</FileType><FilePath>..\Core\Src\system_stm32f4xx.c</FilePath></File><File><FileName>safety_state.c</FileName><FileType>1</FileType><FilePath>..\Core\Src\safety_state.c</FilePath></File><File><FileName>safety_state.h</FileName><FileType>5</FileType><FilePath>..\Core\Inc\safety_state.h</FilePath></File><File><FileName>pin_config.h</FileName><FileType>5</FileType><FilePath>..\Core\Inc\pin_config.h</FilePath></File><File><FileName>crc8.c</FileName><FileType>1</FileType><FilePath>..\Core\Src\crc8.c</FilePath></File><File><FileName>crc8.h</FileName><FileType>5</FileType><FilePath>..\Core\Inc\crc8.h</FilePath></File><File><FileName>pi_link.c</FileName><FileType>1</FileType><FilePath>..\Core\Src\pi_link.c</FilePath></File><File><FileName>pi_link.h</FileName><FileType>5</FileType><FilePath>..\Core\Inc\pi_link.h</FilePath></File><File><FileName>bmi088.c</FileName><FileType>1</FileType><FilePath>..\Core\Src\bmi088.c</FilePath></File><File><FileName>bmi088.h</FileName><FileType>5</FileType><FilePath>..\Core\Inc\bmi088.h</FilePath></File><File><FileName>ddsm315.c</FileName><FileType>1</FileType><FilePath>..\Core\Src\ddsm315.c</FilePath></File><File><FileName>ddsm315.h</FileName><FileType>5</FileType><FilePath>..\Core\Inc\ddsm315.h</FilePath></File><File><FileName>st3215.c</FileName><FileType>1</FileType><FilePath>..\Core\Src\st3215.c</FilePath></File><File><FileName>st3215.h</FileName><FileType>5</FileType><FilePath>..\Core\Inc\st3215.h</FilePath></File><File><FileName>mahony.c</FileName><FileType>1</FileType><FilePath>..\Core\Src\mahony.c</FilePath></File><File><FileName>mahony.h</FileName><FileType>5</FileType><FilePath>..\Core\Inc\mahony.h</FilePath></File><File><FileName>kinematics.c</FileName><FileType>1</FileType><FilePath>..\Core\Src\kinematics.c</FilePath></File><File><FileName>kinematics.h</FileName><FileType>5</FileType><FilePath>..\Core\Inc\kinematics.h</FilePath></File><File><FileName>lqr_controller.c</FileName><FileType>1</FileType><FilePath>..\Core\Src\lqr_controller.c</FilePath></File><File><FileName>lqr_controller.h</FileName><FileType>5</FileType><FilePath>..\Core\Inc\lqr_controller.h</FilePath></File></Files>
-        </Group>
-        <Group>
-          <GroupName>Drivers/User</GroupName>
-          <Files>
             <File>
-              <FileName>led.c</FileName>
+              <FileName>main.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\Drivers\User\Src\led.c</FilePath>
+              <FilePath>..\Core\Src\main.c</FilePath>
             </File>
             <File>
-              <FileName>key.c</FileName>
+              <FileName>stm32f4xx_it.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\Drivers\User\Src\key.c</FilePath>
+              <FilePath>..\Core\Src\stm32f4xx_it.c</FilePath>
             </File>
             <File>
-              <FileName>usart.c</FileName>
+              <FileName>stm32f4xx_hal_msp.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\Drivers\User\Src\usart.c</FilePath>
+              <FilePath>..\Core\Src\stm32f4xx_hal_msp.c</FilePath>
+            </File>
+            <File>
+              <FileName>system_stm32f4xx.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\system_stm32f4xx.c</FilePath>
+            </File>
+            <File>
+              <FileName>safety_state.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\safety_state.c</FilePath>
+            </File>
+            <File>
+              <FileName>safety_state.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\safety_state.h</FilePath>
+            </File>
+            <File>
+              <FileName>pin_config.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\pin_config.h</FilePath>
+            </File>
+            <File>
+              <FileName>crc8.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\crc8.c</FilePath>
+            </File>
+            <File>
+              <FileName>crc8.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\crc8.h</FilePath>
+            </File>
+            <File>
+              <FileName>pi_link.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\pi_link.c</FilePath>
+            </File>
+            <File>
+              <FileName>pi_link.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\pi_link.h</FilePath>
+            </File>
+            <File>
+              <FileName>bmi088.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\bmi088.c</FilePath>
+            </File>
+            <File>
+              <FileName>bmi088.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\bmi088.h</FilePath>
+            </File>
+            <File>
+              <FileName>ddsm315.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\ddsm315.c</FilePath>
+            </File>
+            <File>
+              <FileName>ddsm315.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\ddsm315.h</FilePath>
+            </File>
+            <File>
+              <FileName>st3215.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\st3215.c</FilePath>
+            </File>
+            <File>
+              <FileName>st3215.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\st3215.h</FilePath>
+            </File>
+            <File>
+              <FileName>mahony.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\mahony.c</FilePath>
+            </File>
+            <File>
+              <FileName>mahony.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\mahony.h</FilePath>
+            </File>
+            <File>
+              <FileName>kinematics.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\kinematics.c</FilePath>
+            </File>
+            <File>
+              <FileName>kinematics.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\kinematics.h</FilePath>
+            </File>
+            <File>
+              <FileName>lqr_controller.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\lqr_controller.c</FilePath>
+            </File>
+            <File>
+              <FileName>lqr_controller.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\lqr_controller.h</FilePath>
             </File>
           </Files>
         </Group>
@@ -509,9 +604,6 @@
               <FilePath>../Core/Src/system_stm32f4xx.c</FilePath>
             </File>
           </Files>
-        </Group>
-        <Group>
-          <GroupName>::CMSIS</GroupName>
         </Group>
       </Groups>
     </Target>

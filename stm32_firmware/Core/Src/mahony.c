@@ -1,4 +1,8 @@
 #include "mahony.h"
+#include <math.h>
+
+/* Helper function declaration to prevent implicit declaration error */
+float asinff(float val);
 
 void mahony_init(MahonyFilter_t *filter, float Kp, float Ki) {
     filter->Kp = Kp;

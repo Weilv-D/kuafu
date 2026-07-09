@@ -2,6 +2,7 @@
 #include "pi_link.h"
 #include "pin_config.h"
 #include <string.h>
+#include <math.h>
 
 SafetyState_t g_safety_state;
 

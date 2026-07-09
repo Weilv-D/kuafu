@@ -1,5 +1,6 @@
 #include "lqr_controller.h"
 #include "pin_config.h"
+#include <math.h>
 
 #define WHEEL_RADIUS_M  0.03908f /* Wheel radius in meters (39.08mm) */
 
