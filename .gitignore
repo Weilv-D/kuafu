@@ -55,6 +55,10 @@ logs/
 stm32_firmware/**/Listings/
 stm32_firmware/**/Objects/
 stm32_firmware/**/RTE/
+stm32_firmware/**/DebugConfig/
+stm32_firmware/**/F407ZG/
+stm32_firmware/**/stm32_firmware/
+!stm32_firmware/**/*.sct
 stm32_firmware/**/*.uvguix.*
 stm32_firmware/**/*.uv2.local
 stm32_firmware/**/*.dep
