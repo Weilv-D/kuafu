@@ -131,7 +131,7 @@ def run_teleop(model, data, policy, ptype, arbiter, viewer, duration, hint):
             mujoco.mj_step(model, data)
 
         # --- 更新 obs history(训练 step 顺序: step 后 append) ---
-        base_obs = _build_obs(data, obs_history, last_action, command)
+        base_obs = _build_obs(data, last_action, command, step)
         obs_history = np.roll(obs_history, -1, axis=0)
         obs_history[-1] = base_obs
         if ptype == "student":

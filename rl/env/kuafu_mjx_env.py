@@ -89,7 +89,7 @@ HIP_STROKE = 1.52    # 曲柄半行程 rad
 OBS_DIM_BASE = 35    # 全观测 4 舵机 (hip_A + hip_B 各左右): 3+3+4+8+2+4+6+3+2
 HISTORY_STEPS = 4
 OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS  # 140
-PRIVILEGED_DIM = 9    # friction(1)+mass_scale(1)+com_bias(3)+inertia_scale(1)+torque_scale(1)+delay(2)
+PRIVILEGED_DIM = 12    # friction(1)+mass_scale(1)+com_bias(3)+inertia_scale(1)+torque_scale(1)+deadband(1)+delay_steps(1)+active_push(3)
 ACTION_DIM = 6        # [dtau_L, dtau_R, hip_A_l, hip_A_r, hip_B_l, hip_B_r]
 DELAY_BUFFER_LEN = 3   # 最大延迟缓冲 (3步×20ms=60ms, 覆盖 DR_DELAY_ACT=30ms + DR_DELAY_SENSE=20ms)
 
@@ -174,6 +174,8 @@ class EnvState:
     difficulty: jax.Array
     # 外部推力扰动向量 (3,)
     push_force: jax.Array
+    # 实际施加的推力向量 (3,)
+    active_push: jax.Array
 
 
 class KuafuMjxEnv(MjxEnv):
@@ -208,6 +210,8 @@ class KuafuMjxEnv(MjxEnv):
 
         # 获取机身 body ID 供 xfrc_applied 注入
         self._chassis_body_id = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_BODY, "chassis")
+        self._wheel_l_geom_id = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_GEOM, "wheel_l_geom")
+        self._wheel_r_geom_id = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_GEOM, "wheel_r_geom")
 
         # keyframe 0 (dwell) 的 qpos
         self._keyframe_qpos = self._mj_model.qpos0.copy()
@@ -267,8 +271,8 @@ class KuafuMjxEnv(MjxEnv):
         com_bias_raw = jax.random.uniform(
             com_rng, (3,), minval=P.DR_COM[0], maxval=P.DR_COM[1])
         com_bias = com_bias_raw * difficulty
-        # chassis 是 body 1, 修改其 inertial pos
-        new_ipos = model.body_ipos.at[1].set(model.body_ipos[1] + com_bias)
+        # chassis, 修改其 inertial pos
+        new_ipos = model.body_ipos.at[self._chassis_body_id].set(model.body_ipos[self._chassis_body_id] + com_bias)
         model = model.replace(body_ipos=new_ipos)
 
         # wheel_radius ±1mm (修改轮 geom size[0], 与 difficulty 缩放)
@@ -276,10 +280,10 @@ class KuafuMjxEnv(MjxEnv):
         wheel_r_delta_raw = jax.random.uniform(
             wr_rng, minval=P.DR_WHEEL_R[0], maxval=P.DR_WHEEL_R[1])
         wheel_r_delta = wheel_r_delta_raw * difficulty
-        # 轮 geom 是 wheel_l(idx 4) 和 wheel_r(idx 9), size[0]=半径
+        # 轮 geom
         geom_size = model.geom_size
-        geom_size = geom_size.at[4, 0].set(geom_size[4, 0] + wheel_r_delta)
-        geom_size = geom_size.at[9, 0].set(geom_size[9, 0] + wheel_r_delta)
+        geom_size = geom_size.at[self._wheel_l_geom_id, 0].set(geom_size[self._wheel_l_geom_id, 0] + wheel_r_delta)
+        geom_size = geom_size.at[self._wheel_r_geom_id, 0].set(geom_size[self._wheel_r_geom_id, 0] + wheel_r_delta)
         model = model.replace(geom_size=geom_size)
 
         # servo_pd ±30% (修改 position actuator 的 gainprm[0]=kp, biasprm[1]=-kp*d, biasprm[2]=-kv, 与 difficulty 缩放)
@@ -412,7 +416,7 @@ class KuafuMjxEnv(MjxEnv):
         ])                    # = 35
 
     def _privileged_observation(self, env_state: EnvState) -> jax.Array:
-        """9 维特权观测 (teacher only)."""
+        """12 维特权观测 (teacher only)."""
         return jp.concatenate([
             env_state.friction[jp.newaxis],      # 1
             env_state.mass_scale[jp.newaxis],     # 1
@@ -421,6 +425,7 @@ class KuafuMjxEnv(MjxEnv):
             env_state.torque_scale[jp.newaxis],   # 1
             env_state.deadband[jp.newaxis],       # 1 死区真值
             env_state.delay_steps.astype(jp.float32)[jp.newaxis],  # 1 延迟步数真值
+            env_state.active_push,                # 3 实际施加的扰动力真值
         ])
 
     def _observation(self, data: mjx.Data, env_state: EnvState):
@@ -472,10 +477,12 @@ class KuafuMjxEnv(MjxEnv):
         d0_norm = (env_state.d0_cmd - P.D0_MIN) / (P.D0_MAX - P.D0_MIN)
         hip_A_target = -d0_norm * HIP_STROKE       # A 链目标 (伸展为负)
         hip_B_target = d0_norm * HIP_STROKE        # B 链镜像 (对称构型 Q 在 X=0)
-        hip_A_actual = (data.qpos[QPOS_HIP_A_L] + data.qpos[QPOS_HIP_A_R]) / 2.0
-        hip_B_actual = (data.qpos[QPOS_HIP_B_L] + data.qpos[QPOS_HIP_B_R]) / 2.0
-        pose_err = ((hip_A_actual - hip_A_target) ** 2
-                    + (hip_B_actual - hip_B_target) ** 2)
+        pose_err = (
+            (data.qpos[QPOS_HIP_A_L] - hip_A_target) ** 2
+            + (data.qpos[QPOS_HIP_A_R] - hip_A_target) ** 2
+            + (data.qpos[QPOS_HIP_B_L] - hip_B_target) ** 2
+            + (data.qpos[QPOS_HIP_B_R] - hip_B_target) ** 2
+        ) / 2.0
         default_pose = jp.exp(-pose_err / 0.1)
 
         # alive: 存活奖励, 对抗训练初期"一碰就死"的局部最优 (T1 轮式用 0.25, KUAFU 有
@@ -612,6 +619,7 @@ class KuafuMjxEnv(MjxEnv):
             fall_count=jp.int32(0),
             difficulty=difficulty,
             push_force=jp.zeros(3),
+            active_push=jp.zeros(3),
         )
 
         obs = self._observation(data, env_state)
@@ -666,11 +674,18 @@ class KuafuMjxEnv(MjxEnv):
             data.qvel[QVEL_WHEEL_R])
 
         # 腿: 位置目标 (q=0 = 驻留态, delayed_action±1 → ±HIP_STROKE rad)
-        # 2-DOF 五杆: action[2:4]=hip_A_l/r 目标, action[4:6]=hip_B_l/r 目标 (4 舵机独立)
+        # 2-DOF 五杆: action[2:6] 分别为 4 舵机目标 (q_hip_A_l/r, q_hip_B_l/r)
         hip_goal = delayed_action[2:6] * HIP_STROKE
 
-        # 舵机死区: |hip_goal| < deadband 时输出 0 (齿轮间隙)
-        hip_goal = jp.where(jp.abs(hip_goal) < env_state.deadband, 0.0, hip_goal)
+        # 舵机死区: 当目标与当前实际位置偏差小于 deadband 时，设置目标等于当前位置，输出 0 驱动力矩
+        actual_hips = jp.stack([
+            data.qpos[QPOS_HIP_A_L],
+            data.qpos[QPOS_HIP_A_R],
+            data.qpos[QPOS_HIP_B_L],
+            data.qpos[QPOS_HIP_B_R]
+        ])
+        hip_error = hip_goal - actual_hips
+        hip_goal = jp.where(jp.abs(hip_error) < env_state.deadband, actual_hips, hip_goal)
 
         # 组装 ctrl (用随机化后的 model; nu=6: tau_l, tau_r, q_hip_A_l/r, q_hip_B_l/r)
         ctrl = jp.zeros(model.nu)
@@ -745,6 +760,7 @@ class KuafuMjxEnv(MjxEnv):
             action_buffer=new_action_buffer,
             fall_count=new_fall_count,
             push_force=push_force,
+            active_push=active_push,
         )
 
         # 更新 obs history (append 当前帧, 丢弃最老帧)

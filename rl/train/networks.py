@@ -32,7 +32,7 @@ class RMAAdapter(nn.Module):
         self,
         obs_dim: int = 35,
         history_len: int = 50,
-        latent_dim: int = 9,
+        latent_dim: int = 12,
         hidden_dims: Tuple[int, ...] = (32, 64, 32),
     ):
         super().__init__()
@@ -73,7 +73,7 @@ class StudentPolicy(nn.Module):
         history_obs_dim: int = 35,
         history_len: int = 50,
         action_dim: int = 6,
-        latent_dim: int = 9,
+        latent_dim: int = 12,
         hidden_dims: Tuple[int, ...] = (512, 512, 512),
     ):
         super().__init__()

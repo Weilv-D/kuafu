@@ -92,7 +92,7 @@ def main():
             self.num_envs = num_envs
             self.num_actions = env.action_size
             self.num_obs = OBS_DIM                                    # actor 只吃 proprio (无特权泄漏)
-            self.num_privileged_obs = PRIVILEGED_DIM if env._teacher else None
+            self.num_privileged_obs = (OBS_DIM + PRIVILEGED_DIM) if env._teacher else None
             self.device = device
             self.cfg = {"env_name": "kuafu", "num_envs": num_envs}
             self.max_episode_length = env._episode_length
@@ -120,9 +120,9 @@ def main():
             state_obs = self._to_torch(obs["state"]) if isinstance(obs, dict) else self._to_torch(obs)
             extras = {"observations": {}}
             if isinstance(obs, dict) and "privileged_state" in obs:
-                # critic 独立吃特权 (friction/mass/COM/inertia), actor 只吃 proprio
-                # RSL-RL on_policy_runner: alg.act(obs, privileged_obs) → actor=obs, critic=privileged_obs
-                extras["observations"]["critic"] = self._to_torch(obs["privileged_state"])
+                # critic 吃 proprio (140) + privileged (12) = 152
+                priv_obs = self._to_torch(obs["privileged_state"])
+                extras["observations"]["critic"] = torch.cat([state_obs, priv_obs], dim=-1)
             return state_obs, extras
 
         def reset(self):

@@ -23,82 +23,20 @@ import mujoco.viewer
 import kuafu_physics as P
 
 # 观测/动作维度 (与训练环境单一真源一致)
-from rl.env.kuafu_env import OBS_DIM_BASE, OBS_DIM, ACTION_DIM  # 31 / 124 / 6
+from rl.env.kuafu_env import OBS_DIM_BASE, OBS_DIM, ACTION_DIM  # 35 / 140 / 6
+
+# 从 eval_policy.py 导入统一的物理工具函数和 obs 构造器
+from rl.verify.eval_policy import (
+    _build_obs,
+    _apply_action,
+    rotate_vector_by_quaternion_conj,
+    _limit_wheel_torque
+)
 
 # 控制频率 (与训练环境一致)
 CTRL_DT = 0.02   # 50 Hz
 N_SUBSTEPS = 10  # 500 Hz 物理
 OMEGA_NOLOAD = P.RPM_WHEEL_NOLOAD * 2 * np.pi / 60  # DDSM315 空载角速度 rad/s
-
-
-def _limit_wheel_torque(tau, omega):
-    """DDSM back-EMF 限幅: τ_avail = τ_stall × (1 - |ω|/ω_noload). 与训练环境一致."""
-    tau_avail = P.TAU_WHEEL_STALL * (1.0 - np.abs(omega) / OMEGA_NOLOAD)
-    tau_avail = np.clip(tau_avail, 0.0, P.TAU_WHEEL_STALL)
-    return np.clip(tau, -tau_avail, tau_avail)
-
-
-def rotate_vector_by_quaternion_conj(q, v):
-    """Rotate vector v by conjugate of quaternion q (numpy version)."""
-    w, x, y, z = q[0], q[1], q[2], q[3]
-    q_xyz = np.array([-x, -y, -z])
-    uv = np.cross(q_xyz, v)
-    uuv = np.cross(q_xyz, uv)
-    return v + 2 * (w * uv + uuv)
-
-
-def _build_obs(data, obs_history, last_action):
-    """构造 31 维 base obs (从 MuJoCo data 提取; 2-DOF 五杆全观测 4 舵机)."""
-    qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
-    roll = np.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
-    pitch = np.arcsin(np.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
-    yaw = np.arctan2(2 * (qw * qz + qx * qy), 1 - 2 * (qz**2 + qy**2))
-    attitude = np.array([roll, pitch, yaw])
-
-    # 角速度转为本体坐标系
-    q = np.array([qw, qx, qy, qz])
-    ang_vel = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
-
-    wheel_state = np.array([data.qpos[9], data.qpos[14], data.qvel[8], data.qvel[13]])
-    # 4 舵机 hip_A_l/r (qpos 7,12; qvel 6,11) + hip_B_l/r (qpos 10,15; qvel 9,14)
-    hip_state = np.array([
-        data.qpos[7], data.qpos[12], data.qpos[10], data.qpos[15],
-        data.qvel[6], data.qvel[11], data.qvel[9], data.qvel[14]])
-    wheel_torque = np.array([data.actuator_force[0], data.actuator_force[1]])
-    # 4 舵机力矩: tau_l,tau_r,q_hip_A_l,q_hip_A_r,q_hip_B_l,q_hip_B_r
-    hip_torque = np.array([
-        data.actuator_force[2], data.actuator_force[3],
-        data.actuator_force[4], data.actuator_force[5]])
-    command = np.array([0.0, 0.0, P.D0_MIN])  # 静止 + 驻留
-    phase_clock = np.array([0.0, 1.0])
-    return np.concatenate([attitude, ang_vel, wheel_state, hip_state,
-                           wheel_torque, hip_torque, last_action, command, phase_clock])
-
-
-def _apply_action(data, action):
-    """LQR 底层 + RL 残差叠加 → ctrl (2-DOF: action[2:6] 驱动 4 舵机)."""
-    qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
-    q = np.array([qw, qx, qy, qz])
-
-    # LQR 状态量转投影至本体坐标系
-    lin_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
-    xdot = lin_vel_local[0]
-
-    ang_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
-    thetadot = ang_vel_local[1]
-
-    pitch = np.arcsin(np.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
-
-    # LQR: x 项置 0 (与环境一致)
-    F = -(P.LQR_K @ np.array([0.0, pitch, xdot, thetadot]))
-    tau_lqr = F * P.R / 2.0
-    # DDSM back-EMF 限幅 (与训练 _limit_wheel_torque 一致)
-    data.ctrl[0] = _limit_wheel_torque(
-        tau_lqr + action[0] * P.TAU_WHEEL_RATED, data.qvel[8])
-    data.ctrl[1] = _limit_wheel_torque(
-        tau_lqr + action[1] * P.TAU_WHEEL_RATED, data.qvel[13])
-    # 腿: action[2:6] × HIP_STROKE → q_hip_A_l/r, q_hip_B_l/r (4 舵机独立)
-    data.ctrl[2:6] = action[2:6] * P.HIP_STROKE
 
 
 def playback_teacher(ckpt_path: str, xml_path: str, duration: float = 10.0):
@@ -140,7 +78,8 @@ def playback_teacher(ckpt_path: str, xml_path: str, duration: float = 10.0):
                 mujoco.mj_step(model, data)
 
             # 推理后才更新 history (与训练 step() 顺序一致)
-            base_obs = _build_obs(data, obs_history, last_action)
+            command = np.array([0.0, 0.0, P.D0_MIN])
+            base_obs = _build_obs(data, last_action, command, step)
             obs_history = np.roll(obs_history, -1, axis=0)
             obs_history[-1] = base_obs
             viewer.sync()
@@ -181,7 +120,7 @@ def playback_student(ckpt_path: str, xml_path: str, duration: float = 10.0):
     print(f"启动 Student 回放: {duration:.0f}s")
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
-        for _ in range(n_ctrl_steps):
+        for step in range(n_ctrl_steps):
             if not viewer.is_running():
                 break
 
@@ -200,7 +139,8 @@ def playback_student(ckpt_path: str, xml_path: str, duration: float = 10.0):
                 mujoco.mj_step(model, data)
 
             # 推理后才更新 history (与训练 step() 顺序一致)
-            base_obs = _build_obs(data, obs_history, last_action)
+            command = np.array([0.0, 0.0, P.D0_MIN])
+            base_obs = _build_obs(data, last_action, command, step)
             obs_history = np.roll(obs_history, -1, axis=0)
             obs_history[-1] = base_obs
             rma_history = np.roll(rma_history, -1, axis=1)

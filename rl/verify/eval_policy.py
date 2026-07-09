@@ -27,7 +27,7 @@ import numpy as np
 import mujoco
 
 import kuafu_physics as P
-from rl.env.kuafu_env import OBS_DIM_BASE, OBS_DIM, ACTION_DIM  # 31 / 124 / 6
+from rl.env.kuafu_env import OBS_DIM_BASE, OBS_DIM, ACTION_DIM  # 35 / 140 / 6
 
 CTRL_DT = 0.02    # 50 Hz
 N_SUBSTEPS = 10   # 500 Hz 物理
@@ -52,8 +52,8 @@ def rotate_vector_by_quaternion_conj(q, v):
     return v + 2 * (w * uv + uuv)
 
 
-def _build_obs(data, obs_history, last_action, command):
-    """31 维 base obs. command=[v_cmd, w_cmd, d0_cmd] 可注入."""
+def _build_obs(data, last_action, command, step):
+    """35 维 base obs. command=[v_cmd, w_cmd, d0_cmd] 可注入."""
     qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
     roll = np.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
     pitch = np.arcsin(np.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
@@ -69,7 +69,8 @@ def _build_obs(data, obs_history, last_action, command):
     hip_torque = np.array([
         data.actuator_force[2], data.actuator_force[3],
         data.actuator_force[4], data.actuator_force[5]])
-    phase_clock = np.array([0.0, 1.0])
+    phase = step / 1000.0  # 对应 EPISODE_LENGTH = 1000
+    phase_clock = np.array([np.sin(2 * np.pi * phase), np.cos(2 * np.pi * phase)])
     return np.concatenate([attitude, ang_vel, wheel_state, hip_state,
                            wheel_torque, hip_torque, last_action, command, phase_clock])
 
@@ -148,7 +149,7 @@ def run_episode(model, data, teacher, command, max_steps, rng=None, dr=False):
             mujoco.mj_step(model, data)
 
         # 推理后才更新 history (与训练 step() 顺序一致: step 后 append base_obs)
-        base_obs = _build_obs(data, obs_history, last_action, command)
+        base_obs = _build_obs(data, last_action, command, step)
         obs_history = np.roll(obs_history, -1, axis=0)
         obs_history[-1] = base_obs
 
