@@ -73,10 +73,10 @@
 | rst | ✗ | 悬空不接 | — | 悬空 |
 
 **⚠️ 串口下载步骤：**
-1. 将板子上 BOOT0 拨码/跳线拨到 **1 (接 3.3V)**；
-2. 在 FlyMcu 选择对应 COM 口并载入 `.hex` 固件；
-3. 手动按板载 **RST 复位键** 即可自动开始烧录；
-4. 烧录完成后将 BOOT0 拨回 **0 (接 GND)**，按复位键即可正常运行。
+1. **进入 Bootloader 模式**：按住板载 **BOOT 按键**，按一下 **RST 复位键**，随后松开 **BOOT 按键**（若下载线支持 DTR/RTS 自动流控，则无需此手动操作）。
+2. 在 FlyMcu/STM32CubeProgrammer 选择对应 COM 端口，载入 `.hex` 固件。
+3. 启动烧录下载。
+4. 烧录完成后，按一下 **RST 复位键** 即可正常运行。
 
 #### B. 树莓派 5 ↔ STM32 (主控桥接通信)
 
@@ -98,7 +98,7 @@
 | GND | ─── | GND | **GND** | 信号共地 |
 
 - 通信：1 Mbps，半双工 TTL 模式；
-- 控制板逻辑端采用自供电，**切勿接入 STM32 的 3.3V**。动力电源单独接 12V Buck 降压输出。
+- 舵机控制板逻辑端自供电，**切勿接入 STM32 的 3.3V**。动力电源单独接 12V Buck 降压输出。
 
 #### D. RS485 模块 ↔ STM32 (DDSM315 电机)
 
@@ -126,7 +126,22 @@
 
 ## 硬件布线规范
 
-1.  **强弱电隔离**：电池动力线（18.5V）、舵机供电线（12V）需与 I2C、UART 信号线物理隔离至少 2 cm，严禁平行走线，防大电流电磁干扰导致通信丢包。
-2.  **IMU 排线线长**：I2C 信号线极易受分布电容影响，连接线必须控制在 **15 cm 以内**（推荐小于 10 cm）。SCL/SDA 必须有 4.7kΩ 左右的上拉电阻（通常模块板上已自带）。
-3.  **单点共地 (Star Grounding)**：STM32、树莓派、RS485模块、舵机控制板的地线均需通过粗线汇集到电池主分电板的 GND 焊盘上，防止地回流影响控制精度。
+1.  **强弱电隔离**：电池动力线（18.5V）、舵机供电线（12V）需与 I2C、UART 信号线物理隔离至少 2 cm，防大电流电磁干扰导致通信丢包。
+2.  **IMU 排线线长**：I2C 信号排线控制在 **15 cm 以内**（推荐小于 10 cm）。SCL/SDA 必须有 4.7kΩ 左右的上拉电阻（通常模块板上已自带）。
+3.  **单点共地 (Star Grounding)**：STM32、树莓派、RS485模块、舵机控制板的地线均需通过粗线汇集到电池主分电板的 GND 焊盘上，防止地电位差影响通信与传感器精度。
 4.  **禁止双路供电**：CH340 的 3.3V 仅在无电池时作调测调试用。系统接入动力电池时，**严禁**连接 CH340 的 3.3V 针脚。
+
+---
+
+## 协议与文档参考来源
+
+1.  **DDSM315 电机协议**：
+    *   微雪电子 DDSM315 产品 Wiki：[https://www.waveshare.net/wiki/DDSM315](https://www.waveshare.net/wiki/DDSM315)
+    *   微雪官方驱动例程仓库：[https://github.com/waveshareteam/ddsm_example](https://github.com/waveshareteam/ddsm_example)
+2.  **ST3215 舵机协议**：
+    *   微雪电子 ST3215 舵机 Wiki：[https://www.waveshare.net/wiki/ST3215_Servo](https://www.waveshare.net/wiki/ST3215_Servo)
+    *   飞特（Feetech）STS 系列总线舵机 SDK：[https://github.com/waveshareteam/ServoDriverST](https://github.com/waveshareteam/ServoDriverST)
+3.  **BMI088 传感器寄存器**：
+    *   Bosch Sensortec BMI088 数据手册：[https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bmi088-ds001.pdf](https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bmi088-ds001.pdf)
+4.  **树莓派桥接串口协议 (Pi Link)**：
+    *   参考本仓库设计文档：[docs/plans/2026-07-08-软件架构与RL技术路线-design.md](../docs/plans/2026-07-08-%E8%BD%AF%E4%BB%B6%E6%9E%B6%E6%9E%84%E4%B8%8ERL%E6%8A%80%E6%9C%AF%E8%B7%AF%E7%BA%BF-design.md)
