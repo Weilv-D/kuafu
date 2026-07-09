@@ -42,7 +42,7 @@
 *   `Drivers/`
     *   `CMSIS/` / `STM32F4xx_HAL_Driver/`: ST 官方 HAL 标准库底层驱动。
 *   `MDK-ARM/`
-    *   [F407ZG.uvprojx](MDK-ARM/F407ZG.uvprojx): Keil MDK5 核心工程项目文件。
+    *   [stm32_firmware.uvprojx](MDK-ARM/stm32_firmware.uvprojx): Keil MDK5 核心工程项目文件。
 
 ---
 

@@ -7,7 +7,7 @@
 
   <Targets>
     <Target>
-      <TargetName>F407ZG</TargetName>
+      <TargetName>stm32_firmware</TargetName>
       <ToolsetNumber>0x4</ToolsetNumber>
       <ToolsetName>ARM-ADS</ToolsetName>
       <pCCUsed>5060422::V5.06 update 4 (build 422)::ARMCC</pCCUsed>
@@ -48,8 +48,8 @@
             <NotGenerated>0</NotGenerated>
             <InvalidFlash>1</InvalidFlash>
           </TargetStatus>
-          <OutputDirectory>F407ZG\</OutputDirectory>
-          <OutputName>F407ZG</OutputName>
+          <OutputDirectory>stm32_firmware\</OutputDirectory>
+          <OutputName>stm32_firmware</OutputName>
           <CreateExecutable>1</CreateExecutable>
           <CreateLib>0</CreateLib>
           <CreateHexFile>1</CreateHexFile>

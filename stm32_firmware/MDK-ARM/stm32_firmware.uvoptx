@@ -22,7 +22,7 @@
   </DaveTm>
 
   <Target>
-    <TargetName>F407ZG</TargetName>
+    <TargetName>stm32_firmware</TargetName>
     <ToolsetNumber>0x4</ToolsetNumber>
     <ToolsetName>ARM-ADS</ToolsetName>
     <TargetOption>
