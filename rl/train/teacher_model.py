@@ -2,7 +2,7 @@
 """
 KUAFU Teacher 推理模型 — 匹配 RSL-RL 2.x checkpoint 的真实结构
 
-checkpoint 实际键名 (从 model_0.pt 实读, 对称步态降 DOF 后):
+checkpoint 实际键名 (从 model_0.pt 实读, 2-DOF 五杆 6 维动作):
   model_state_dict:
     std:               (ACTION_DIM,)   动作标准差 (6)
     actor.0.weight:    (H, OBS_DIM)    actor 输入=OBS_DIM (仅 proprio, 140)

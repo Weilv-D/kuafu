@@ -33,6 +33,14 @@ CTRL_DT = 0.02    # 50 Hz
 N_SUBSTEPS = 10   # 500 Hz 物理
 PITCH_THRESH = np.radians(30)   # 与训练 _is_fallen 一致
 ROLL_THRESH = np.radians(30)
+OMEGA_NOLOAD = P.RPM_WHEEL_NOLOAD * 2 * np.pi / 60  # DDSM315 空载角速度 rad/s
+
+
+def _limit_wheel_torque(tau, omega):
+    """DDSM back-EMF 限幅: τ_avail = τ_stall × (1 - |ω|/ω_noload). 与训练环境一致."""
+    tau_avail = P.TAU_WHEEL_STALL * (1.0 - np.abs(omega) / OMEGA_NOLOAD)
+    tau_avail = np.clip(tau_avail, 0.0, P.TAU_WHEEL_STALL)
+    return np.clip(tau, -tau_avail, tau_avail)
 
 
 # ---- obs / action: 与 playback.py / 训练 _base_observation 逐维对齐 ----
@@ -77,8 +85,11 @@ def _apply_action(data, action):
     pitch = np.arcsin(np.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
     F = -(P.LQR_K @ np.array([0.0, pitch, xdot, thetadot]))
     tau_lqr = F * P.R / 2.0
-    data.ctrl[0] = np.clip(tau_lqr + action[0] * P.TAU_WHEEL_RATED, -1.1, 1.1)
-    data.ctrl[1] = np.clip(tau_lqr + action[1] * P.TAU_WHEEL_RATED, -1.1, 1.1)
+    # DDSM back-EMF 限幅 (与训练 _limit_wheel_torque 一致)
+    data.ctrl[0] = _limit_wheel_torque(
+        tau_lqr + action[0] * P.TAU_WHEEL_RATED, data.qvel[8])
+    data.ctrl[1] = _limit_wheel_torque(
+        tau_lqr + action[1] * P.TAU_WHEEL_RATED, data.qvel[13])
     data.ctrl[2:6] = action[2:6] * P.HIP_STROKE
 
 
@@ -126,9 +137,7 @@ def run_episode(model, data, teacher, command, max_steps, rng=None, dr=False):
     for step in range(max_steps):
         if _is_fallen(data):
             break
-        base_obs = _build_obs(data, obs_history, last_action, command)
-        obs_history = np.roll(obs_history, -1, axis=0)
-        obs_history[-1] = base_obs
+        # 推理: 用当前 obs_history (第一步全 0, 与训练 reset 一致)
         obs_flat = obs_history.flatten()
         with torch.no_grad():
             action = teacher(torch.from_numpy(obs_flat).float().unsqueeze(0)).numpy()[0]
@@ -137,6 +146,11 @@ def run_episode(model, data, teacher, command, max_steps, rng=None, dr=False):
         last_action = action
         for _ in range(N_SUBSTEPS):
             mujoco.mj_step(model, data)
+
+        # 推理后才更新 history (与训练 step() 顺序一致: step 后 append base_obs)
+        base_obs = _build_obs(data, obs_history, last_action, command)
+        obs_history = np.roll(obs_history, -1, axis=0)
+        obs_history[-1] = base_obs
 
         pitch, roll = _get_pitch_roll(data)
         pitches.append(pitch); rolls.append(roll)

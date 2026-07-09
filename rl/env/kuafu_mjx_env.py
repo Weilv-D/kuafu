@@ -17,7 +17,7 @@ design.md 对应章节:
 """
 import os
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jp
@@ -85,7 +85,7 @@ ACT_HIP_B_R = 5
 HIP_STROKE = 1.52    # 曲柄半行程 rad
 
 # 观测维度
-# 训练用 4 步堆叠 → 124 维 proprio (RSL-RL ActorCritic 直接消费)
+# 训练用 4 步堆叠 → 140 维 proprio (RSL-RL ActorCritic 直接消费)
 OBS_DIM_BASE = 35    # 全观测 4 舵机 (hip_A + hip_B 各左右): 3+3+4+8+2+4+6+3+2
 HISTORY_STEPS = 4
 OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS  # 140
@@ -170,6 +170,10 @@ class EnvState:
     action_buffer: jax.Array
     # 软终止: 连续倒下步数计数 (≥FALL_GRACE_STEPS 才真正终止)
     fall_count: jax.Array
+    # 课程系统参数 (per-env)
+    difficulty: jax.Array
+    # 外部推力扰动向量 (3,)
+    push_force: jax.Array
 
 
 class KuafuMjxEnv(MjxEnv):
@@ -177,7 +181,7 @@ class KuafuMjxEnv(MjxEnv):
 
     teacher=True 时 obs 返回 dict {"state": ..., "privileged_state": ...},
     供 RSLRLBraxWrapper 自动拆分为 actor/critic 输入。
-    teacher=False 时 obs 返回扁平数组 (student / 部署模式)。
+    teacher=False 时 obs 返回阻马/动作历史 (student / 部署模式)。
     """
 
     def __init__(
@@ -201,6 +205,9 @@ class KuafuMjxEnv(MjxEnv):
         # 加载模型
         self._mj_model = mujoco.MjModel.from_xml_path(XML_PATH)
         self._mjx_model = mjx.put_model(self._mj_model)
+
+        # 获取机身 body ID 供 xfrc_applied 注入
+        self._chassis_body_id = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_BODY, "chassis")
 
         # keyframe 0 (dwell) 的 qpos
         self._keyframe_qpos = self._mj_model.qpos0.copy()
@@ -227,73 +234,81 @@ class KuafuMjxEnv(MjxEnv):
         return self._num_envs
 
     # ---- 域随机化 ----
-    def _randomize_model(self, model: mjx.Model, rng: jax.Array) -> mjx.Model:
-        """对 mjx.Model 注入域随机化 (per-env).
+    def _randomize_model(self, model: mjx.Model, rng: jax.Array, difficulty: jax.Array) -> Tuple[mjx.Model, jax.Array, jax.Array, jax.Array, jax.Array]:
+        """对 mjx.Model 注入域随机化 (per-env), 随机化范围随 difficulty 缩放.
 
         在 reset 时调用, 对 mass/friction/inertia/COM/wheel_radius/servo_pd 注入随机扰动。
         """
-        # mass ±15%
-        mass_scale = jax.random.uniform(
+        # mass ±15% (与 difficulty 缩放)
+        mass_scale_raw = jax.random.uniform(
             rng, minval=DR["mass"][0], maxval=DR["mass"][1])
+        mass_scale = 1.0 + difficulty * (mass_scale_raw - 1.0)
         model = model.replace(body_mass=model.body_mass * mass_scale)
 
-        # friction [0.3, 1.2]
+        # friction [0.3, 1.2] (与 difficulty 缩放)
         rng, friction_rng = jax.random.split(rng)
-        friction = jax.random.uniform(
+        friction_raw = jax.random.uniform(
             friction_rng, minval=DR["friction"][0], maxval=DR["friction"][1])
+        friction_multiplier = 1.0 + difficulty * (friction_raw - 1.0)
         geom_friction = model.geom_friction.at[:, 0].set(
-            model.geom_friction[:, 0] * friction)
+            model.geom_friction[:, 0] * friction_multiplier)
         model = model.replace(geom_friction=geom_friction)
 
-        # inertia ×[0.5, 2.0]
+        # inertia ×[0.5, 2.0] (与 difficulty 缩放)
         rng, inertia_rng = jax.random.split(rng)
-        inertia_scale = jax.random.uniform(
+        inertia_scale_raw = jax.random.uniform(
             inertia_rng, minval=DR["inertia"][0], maxval=DR["inertia"][1])
+        inertia_scale = 1.0 + difficulty * (inertia_scale_raw - 1.0)
         diaginertia = model.body_inertia * inertia_scale
         model = model.replace(body_inertia=diaginertia)
 
-        # COM 偏移 ±20mm (注入到 chassis body_ipos)
+        # COM 偏移 ±20mm (注入到 chassis body_ipos, 与 difficulty 缩放)
         rng, com_rng = jax.random.split(rng)
-        com_bias = jax.random.uniform(
+        com_bias_raw = jax.random.uniform(
             com_rng, (3,), minval=P.DR_COM[0], maxval=P.DR_COM[1])
+        com_bias = com_bias_raw * difficulty
         # chassis 是 body 1, 修改其 inertial pos
         new_ipos = model.body_ipos.at[1].set(model.body_ipos[1] + com_bias)
         model = model.replace(body_ipos=new_ipos)
 
-        # wheel_radius ±1mm (修改轮 geom size[0])
+        # wheel_radius ±1mm (修改轮 geom size[0], 与 difficulty 缩放)
         rng, wr_rng = jax.random.split(rng)
-        wheel_r_delta = jax.random.uniform(
+        wheel_r_delta_raw = jax.random.uniform(
             wr_rng, minval=P.DR_WHEEL_R[0], maxval=P.DR_WHEEL_R[1])
+        wheel_r_delta = wheel_r_delta_raw * difficulty
         # 轮 geom 是 wheel_l(idx 4) 和 wheel_r(idx 9), size[0]=半径
         geom_size = model.geom_size
         geom_size = geom_size.at[4, 0].set(geom_size[4, 0] + wheel_r_delta)
         geom_size = geom_size.at[9, 0].set(geom_size[9, 0] + wheel_r_delta)
         model = model.replace(geom_size=geom_size)
 
-        # servo_pd ±30% (修改 position actuator 的 gainprm[0]=kp, biasprm[1]=-kp*d, biasprm[2]=-kv)
+        # servo_pd ±30% (修改 position actuator 的 gainprm[0]=kp, biasprm[1]=-kp*d, biasprm[2]=-kv, 与 difficulty 缩放)
         rng, pd_rng = jax.random.split(rng)
-        pd_scale = jax.random.uniform(
+        pd_scale_raw = jax.random.uniform(
             pd_rng, minval=P.DR_SERVO_PD[0], maxval=P.DR_SERVO_PD[1])
-        # position actuator idx: 2,3 (q_hip_A_l, q_hip_A_r; hip_B 由 equality 镜像, 无 actuator)
+        pd_scale = 1.0 + difficulty * (pd_scale_raw - 1.0)
+        # position actuator idx: 2,3,4,5 (q_hip_A_l/r, q_hip_B_l/r; 4 舵机全部独立驱动)
         # gainprm[0] = kp, biasprm[2] = -kv (MuJoCo position actuator: gain=fixed kp, bias=affine -kp*q0 -kv*vel)
         gainprm = model.actuator_gainprm
         biasprm = model.actuator_biasprm
-        for i in [ACT_HIP_A_L, ACT_HIP_A_R]:
+        for i in [ACT_HIP_A_L, ACT_HIP_A_R, ACT_HIP_B_L, ACT_HIP_B_R]:
             gainprm = gainprm.at[i, 0].set(gainprm[i, 0] * pd_scale)
             biasprm = biasprm.at[i, 0].set(biasprm[i, 0] * pd_scale)  # -kp*q0
             biasprm = biasprm.at[i, 2].set(biasprm[i, 2] * pd_scale)  # -kv
         model = model.replace(actuator_gainprm=gainprm, actuator_biasprm=biasprm)
 
-        return model, friction, mass_scale, inertia_scale, com_bias
+        return model, friction_multiplier, mass_scale, inertia_scale, com_bias
 
     # ---- 命令采样 ----
-    def _sample_command(self, rng: jax.Array):
-        """随机采样速度/角速度/D0 命令."""
+    def _sample_command(self, rng: jax.Array, difficulty: jax.Array):
+        """随机采样速度/角速度/D0 命令, 范围随 difficulty 缩放."""
         rng, k1, k2, k3 = jax.random.split(rng, 4)
-        v_cmd = jax.random.uniform(k1, minval=V_CMD_RANGE[0], maxval=V_CMD_RANGE[1])
-        w_cmd = jax.random.uniform(k2, minval=W_CMD_RANGE[0], maxval=W_CMD_RANGE[1])
+        v_limit = 0.05 + 0.45 * difficulty
+        w_limit = 0.1 + 0.9 * difficulty
+        v_cmd = jax.random.uniform(k1, minval=-v_limit, maxval=v_limit)
+        w_cmd = jax.random.uniform(k2, minval=-w_limit, maxval=w_limit)
         d0_cmd = jax.random.uniform(k3, minval=D0_CMD_RANGE[0], maxval=D0_CMD_RANGE[1])
-        # 10% 概率零命令 (静止平衡)
+        # 10% 概率零命令 (静支平衡)
         rng, k_zero = jax.random.split(rng)
         is_zero = jax.random.bernoulli(k_zero, p=0.1)
         v_cmd = jp.where(is_zero, 0.0, v_cmd)
@@ -337,7 +352,7 @@ class KuafuMjxEnv(MjxEnv):
 
     # ---- 观测 ----
     def _base_observation(self, data: mjx.Data, env_state: EnvState) -> jax.Array:
-        """31 维本体感受观测 (2-DOF 五杆: 全观测 4 舵机 hip_A + hip_B 各左右)."""
+        """35 维本体感受观测 (2-DOF 五杆: 全观测 4 舵机 hip_A + hip_B 各左右)."""
         # 机身姿态 (3): roll/pitch/yaw from quaternion (Pitch 采用 arcsin)
         qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
         roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
@@ -394,7 +409,7 @@ class KuafuMjxEnv(MjxEnv):
             last_action,     # 6
             command,         # 3
             phase_clock,     # 2
-        ])                    # = 31
+        ])                    # = 35
 
     def _privileged_observation(self, env_state: EnvState) -> jax.Array:
         """9 维特权观测 (teacher only)."""
@@ -537,27 +552,32 @@ class KuafuMjxEnv(MjxEnv):
     # ============================================================
     # MjxEnv 接口实现
     # ============================================================
-    def reset(self, rng: jax.Array) -> State:
+    def reset(self, rng: jax.Array, difficulty: jax.Array = jp.float32(0.0)) -> State:
         """重置环境到驻留态 + 域随机化 + 命令采样."""
         rng, cmd_rng, dr_rng, torque_rng, db_rng, delay_rng = jax.random.split(rng, 6)
 
-        # 域随机化 (mass/friction/inertia/COM/wheel_r/servo_pd 注入物理)
+        # 域随机化 (mass/friction/inertia/COM/wheel_r/servo_pd 注入物理, 与 difficulty 缩放)
         model, friction, mass_scale, inertia_scale, com_bias = self._randomize_model(
-            self._mjx_model, dr_rng)
-        torque_scale = jax.random.uniform(
+            self._mjx_model, dr_rng, difficulty)
+        
+        # DDSM 力矩常数 DR (与 difficulty 缩放)
+        torque_scale_raw = jax.random.uniform(
             torque_rng, minval=DR["torque_const"][0], maxval=DR["torque_const"][1])
+        torque_scale = 1.0 + difficulty * (torque_scale_raw - 1.0)
 
-        # deadband [0, 2°] (舵机齿轮间隙)
-        deadband = jax.random.uniform(
+        # deadband [0, 2°] (舵机齿轮间隙, 与 difficulty 缩放)
+        deadband_raw = jax.random.uniform(
             db_rng, minval=P.DR_DEADBAND[0], maxval=P.DR_DEADBAND[1])
+        deadband = deadband_raw * difficulty
 
-        # delay [0, 30ms] → 步数 (1步=20ms, 最大 1-2 步)
-        delay_s = jax.random.uniform(
+        # delay [0, 30ms] → 步数 (1步=20ms, 最大 1-2 步, 与 difficulty 缩放)
+        delay_s_raw = jax.random.uniform(
             delay_rng, minval=P.DR_DELAY_ACT[0], maxval=P.DR_DELAY_ACT[1])
+        delay_s = delay_s_raw * difficulty
         delay_steps = jp.round(delay_s / CTRL_DT).astype(jp.int32)
 
-        # 命令
-        cmd_rng, v_cmd, w_cmd, d0_cmd = self._sample_command(cmd_rng)
+        # 命令 (范围与 difficulty 缩放)
+        cmd_rng, v_cmd, w_cmd, d0_cmd = self._sample_command(cmd_rng, difficulty)
 
         # 初始 data (keyframe dwell + 小扰动)
         data = mjx.make_data(model)
@@ -590,6 +610,8 @@ class KuafuMjxEnv(MjxEnv):
             delay_steps=delay_steps,
             action_buffer=jp.zeros((DELAY_BUFFER_LEN, ACTION_DIM)),
             fall_count=jp.int32(0),
+            difficulty=difficulty,
+            push_force=jp.zeros(3),
         )
 
         obs = self._observation(data, env_state)
@@ -601,6 +623,7 @@ class KuafuMjxEnv(MjxEnv):
             "orientation": jp.float32(0.0),
             "lin_vel_tracking": jp.float32(0.0),
             "fallen": jp.float32(0.0),
+            "difficulty": difficulty,
         }
         info = {"env_state": env_state, "model": model}
         return State(data, obs, reward, done, metrics, info)
@@ -659,20 +682,40 @@ class KuafuMjxEnv(MjxEnv):
         ctrl = ctrl.at[ACT_HIP_B_R].set(hip_goal[3])
         data = data.replace(ctrl=ctrl)
 
+        # ---- 瞬时推力扰动 (velocity kick) 注入 ----
+        # 每 200 步 (4 秒) 重采样一个推力方向与强度 (最大 15N)
+        rng, push_rng = jax.random.split(env_state.rng)
+        is_push_resample = (env_state.step_count % 200 == 0)
+        k_force, k_dir = jax.random.split(push_rng)
+        push_mag = jax.random.uniform(k_force, minval=0.0, maxval=15.0)
+        push_angle = jax.random.uniform(k_dir, minval=0.0, maxval=2.0 * jp.pi)
+        new_push_force = jp.stack([
+            push_mag * jp.cos(push_angle),
+            push_mag * jp.sin(push_angle),
+            jp.float32(0.0)
+        ])
+        push_force = jp.where(is_push_resample, new_push_force, env_state.push_force)
+
+        # 仅在每个 4s 周期的前 5 步（100ms）施加推力，且在刚 reset 的前几步不施加
+        is_push_active = ((env_state.step_count % 200) < 5) & (env_state.step_count > 5)
+        active_push = jp.where(is_push_active, push_force * env_state.difficulty, 0.0)
+
+        # 注入推力到 chassis 质心 (xfrc_applied)
+        xfrc_applied = data.xfrc_applied
+        xfrc_applied = xfrc_applied.at[self._chassis_body_id, :3].set(active_push)
+        data = data.replace(xfrc_applied=xfrc_applied)
+
         # ---- 物理步进 (10 子步) ----
         # 2-DOF 五杆: 闭链靠 <connect site1/site2> 物理铰接维持 (硬 solver),
-        # 无需 follower forcing — 训练/eval/真机三者一致。
+        # 训练/eval/真机三者一致。
         for _ in range(N_SUBSTEPS):
             data = mjx.step(model, data)
 
         # ---- 更新状态 ----
-        rng, resample_rng = jax.random.split(env_state.rng)
-        # 每 100 步重采样命令 (2s @ 50Hz)
+        rng, resample_rng = jax.random.split(rng)
+        # 每 100 步重采样命令 (2s @ 50Hz, 范围与 difficulty 缩放)
         need_resample = (env_state.step_count % 100 == 0) & (env_state.step_count > 0)
-        rng, k1, k2, k3 = jax.random.split(resample_rng, 4)
-        new_v = jax.random.uniform(k1, minval=V_CMD_RANGE[0], maxval=V_CMD_RANGE[1])
-        new_w = jax.random.uniform(k2, minval=W_CMD_RANGE[0], maxval=W_CMD_RANGE[1])
-        new_d0 = jax.random.uniform(k3, minval=D0_CMD_RANGE[0], maxval=D0_CMD_RANGE[1])
+        _, new_v, new_w, new_d0 = self._sample_command(resample_rng, env_state.difficulty)
         v_cmd = jp.where(need_resample, new_v, env_state.v_cmd)
         w_cmd = jp.where(need_resample, new_w, env_state.w_cmd)
         d0_cmd = jp.where(need_resample, new_d0, env_state.d0_cmd)
@@ -701,6 +744,7 @@ class KuafuMjxEnv(MjxEnv):
             step_count=env_state.step_count + 1,
             action_buffer=new_action_buffer,
             fall_count=new_fall_count,
+            push_force=push_force,
         )
 
         # 更新 obs history (append 当前帧, 丢弃最老帧)
@@ -726,6 +770,7 @@ class KuafuMjxEnv(MjxEnv):
             "orientation": orient_val,
             "lin_vel_tracking": lin_vel_track_val,
             "fallen": terminated_by_fall,  # done 帧的终止原因 (1=摔倒终止, 0=超时)
+            "difficulty": env_state.difficulty,
         }
         info = {"env_state": env_state, "model": model}
         return state.replace(

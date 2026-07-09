@@ -19,3 +19,7 @@ torch>=2.11                  # CUDA 13 稳定 wheel (PyTorch 2.11+, 2026.3+)
 # ---- 导出 + 日志 ----
 onnxruntime>=1.17            # ONNX 推理验证 (Pi5 aarch64 部署用)
 wandb                        # 训练日志
+
+# ---- 遥控(teleop) ----
+# 手柄/键盘输入(仿真与 Pi5 手柄共用); 无头环境装 pygame 仍可 import, 仅 poll 时报错
+pygame>=2.5                  # teleop: GamepadSource / KeyboardSource

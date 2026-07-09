@@ -98,11 +98,14 @@ def main():
             self.max_episode_length = env._episode_length
             self.episode_length_buf = torch.zeros(num_envs, device=device, dtype=torch.long)
 
-            self._reset_vmapped = jax.jit(jax.vmap(env.reset))
+            # difficulty 课程数组管理 (每一个 env 独立阶梯)
+            self._difficulty = jax.numpy.zeros(num_envs, dtype=jax.numpy.float32)
+
+            self._reset_vmapped = jax.jit(jax.vmap(env.reset, in_axes=(0, 0)))
             self._step_vmapped = jax.jit(jax.vmap(env.step))
 
             self._rng = jax.random.PRNGKey(seed)
-            self._state = self._reset_vmapped(jax.random.split(self._rng, num_envs))
+            self._state = self._reset_vmapped(jax.random.split(self._rng, num_envs), self._difficulty)
 
         def _to_torch(self, x):
             """JAX DeviceArray → torch.Tensor (DLPack 零拷贝)."""
@@ -125,7 +128,8 @@ def main():
         def reset(self):
             """VecEnv 接口要求: 重置所有环境."""
             self._rng, reset_rng = jax.random.split(self._rng)
-            self._state = self._reset_vmapped(jax.random.split(reset_rng, self.num_envs))
+            # 使用当前的 self._difficulty 以便保存课程阶梯状态
+            self._state = self._reset_vmapped(jax.random.split(reset_rng, self.num_envs), self._difficulty)
             self.episode_length_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
             return self.get_observations()
 
@@ -133,16 +137,31 @@ def main():
             jax_action = self._to_jax(action)
             self._state = self._step_vmapped(self._state, jax_action)
 
-            # 在 auto-reset 前读取 done/reward/metrics/fallen (reset 后会清零)
+            # 在 auto-reset 前读取 done/reward/metrics (reset 后会清零)
             done_jax = self._state.done
             reward_jax = self._state.reward
-            fallen_jax = self._state.metrics.get("fallen", jax.numpy.zeros_like(done_jax))
+            metrics_jax = self._state.metrics
+            fallen_jax = metrics_jax.get("fallen", jax.numpy.zeros_like(done_jax))
 
             # auto-reset done 环境 (保持 JAX array 在 GPU 上)
             done_any = jax.device_get(done_jax.any())
             if done_any:
                 self._rng, reset_rng = jax.random.split(self._rng)
-                reset_state = self._reset_vmapped(jax.random.split(reset_rng, self.num_envs))
+                
+                # JAX 离散阶梯课程更新逻辑:
+                # 判定成功: 存活至最大步数且没有倒下 (timeout 且 fall_count 为 0)
+                cur_env_state = self._state.info["env_state"]
+                survived = (cur_env_state.step_count >= self.max_episode_length) & (cur_env_state.fall_count == 0)
+                old_diff = cur_env_state.difficulty
+                new_diff = jax.numpy.where(
+                    survived,
+                    jax.numpy.minimum(old_diff + 0.05, 1.0),
+                    jax.numpy.maximum(old_diff - 0.05, 0.0)
+                )
+                done_mask_jax = done_jax.astype(jax.numpy.bool_)
+                self._difficulty = jax.numpy.where(done_mask_jax, new_diff, self._difficulty)
+                
+                reset_state = self._reset_vmapped(jax.random.split(reset_rng, self.num_envs), self._difficulty)
                 done_mask = done_jax.astype(jax.numpy.bool_)
                 self._state = jax.tree_util.tree_map(
                     lambda cur, new: jax.numpy.where(
@@ -153,16 +172,34 @@ def main():
             state_obs, extras = self.get_observations()
             reward = self._to_torch(reward_jax)
             done = self._to_torch(done_jax)
- 
+
             self.episode_length_buf += 1
+
+            # 收集 episode 级指标到 info["log"] (RSL-RL 自动写入 TensorBoard)
+            # 仅在有环境 done 时才填充, 其余步留空 {} — RSL-RL 收集器遇空 dict 自动跳过,
+            # 避免中途帧的 0.0 被计入均值导致指标被稀释趋零
+            log = {}
+            if done_any:
+                done_mask = (done > 0)
+                n_done = done_mask.sum().clamp(min=1)
+                # episode_length 在清零前读取 (上面 +1 后, done 帧的值即该 episode 总长)
+                log["episode_length"] = (self.episode_length_buf * done_mask).sum().item() / n_done.item()
+                # 记录全局难度进展均值
+                log["difficulty"] = self._to_torch(self._difficulty).mean().item()
+                for key in ["orientation", "lin_vel_tracking"]:
+                    if key in metrics_jax:
+                        val = self._to_torch(metrics_jax[key])
+                        log[key] = (val * done_mask).sum().item() / n_done.item()
+
             self.episode_length_buf = torch.where(
                 done > 0, torch.zeros_like(self.episode_length_buf), self.episode_length_buf)
- 
+
             # time_outs: 仅 timeout(非倒下) 时为 True, 用于 value bootstrap
             # 倒下 (fallen) 的 episode 不做 bootstrap (终止态 value=0)
             fallen = self._to_torch(fallen_jax)
             time_outs = (done > 0) & (fallen < 0.5)  # done 但未倒下 = 超时
-            info = {"time_outs": time_outs.float(), "observations": extras.get("observations", {}), "log": {}}
+            info = {"time_outs": time_outs.float(),
+                    "observations": extras.get("observations", {}), "log": log}
             return state_obs, reward, done, info
 
         @property

@@ -30,7 +30,7 @@ class RMAAdapter(nn.Module):
 
     def __init__(
         self,
-        obs_dim: int = 27,
+        obs_dim: int = 35,
         history_len: int = 50,
         latent_dim: int = 9,
         hidden_dims: Tuple[int, ...] = (32, 64, 32),

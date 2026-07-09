@@ -28,6 +28,14 @@ from rl.env.kuafu_env import OBS_DIM_BASE, OBS_DIM, ACTION_DIM  # 31 / 124 / 6
 # 控制频率 (与训练环境一致)
 CTRL_DT = 0.02   # 50 Hz
 N_SUBSTEPS = 10  # 500 Hz 物理
+OMEGA_NOLOAD = P.RPM_WHEEL_NOLOAD * 2 * np.pi / 60  # DDSM315 空载角速度 rad/s
+
+
+def _limit_wheel_torque(tau, omega):
+    """DDSM back-EMF 限幅: τ_avail = τ_stall × (1 - |ω|/ω_noload). 与训练环境一致."""
+    tau_avail = P.TAU_WHEEL_STALL * (1.0 - np.abs(omega) / OMEGA_NOLOAD)
+    tau_avail = np.clip(tau_avail, 0.0, P.TAU_WHEEL_STALL)
+    return np.clip(tau, -tau_avail, tau_avail)
 
 
 def rotate_vector_by_quaternion_conj(q, v):
@@ -84,8 +92,11 @@ def _apply_action(data, action):
     # LQR: x 项置 0 (与环境一致)
     F = -(P.LQR_K @ np.array([0.0, pitch, xdot, thetadot]))
     tau_lqr = F * P.R / 2.0
-    data.ctrl[0] = np.clip(tau_lqr + action[0] * P.TAU_WHEEL_RATED, -1.1, 1.1)
-    data.ctrl[1] = np.clip(tau_lqr + action[1] * P.TAU_WHEEL_RATED, -1.1, 1.1)
+    # DDSM back-EMF 限幅 (与训练 _limit_wheel_torque 一致)
+    data.ctrl[0] = _limit_wheel_torque(
+        tau_lqr + action[0] * P.TAU_WHEEL_RATED, data.qvel[8])
+    data.ctrl[1] = _limit_wheel_torque(
+        tau_lqr + action[1] * P.TAU_WHEEL_RATED, data.qvel[13])
     # 腿: action[2:6] × HIP_STROKE → q_hip_A_l/r, q_hip_B_l/r (4 舵机独立)
     data.ctrl[2:6] = action[2:6] * P.HIP_STROKE
 
@@ -115,22 +126,23 @@ def playback_teacher(ckpt_path: str, xml_path: str, duration: float = 10.0):
             if not viewer.is_running():
                 break
 
-            # 50Hz: 构造 obs → policy 推理
-            base_obs = _build_obs(data, obs_history, last_action)
-            obs_history = np.roll(obs_history, -1, axis=0)
-            obs_history[-1] = base_obs
+            # 50Hz: 推理 (用当前 history, 第一步全 0 与训练 reset 一致)
             obs_flat = obs_history.flatten()
-
             with torch.no_grad():
                 action = teacher(torch.from_numpy(obs_flat).float()).numpy()
-            last_action = action
 
             # 应用动作
             _apply_action(data, action)
+            last_action = action
 
             # 500Hz: 10 子步物理
             for _ in range(N_SUBSTEPS):
                 mujoco.mj_step(model, data)
+
+            # 推理后才更新 history (与训练 step() 顺序一致)
+            base_obs = _build_obs(data, obs_history, last_action)
+            obs_history = np.roll(obs_history, -1, axis=0)
+            obs_history[-1] = base_obs
             viewer.sync()
 
 
@@ -173,28 +185,26 @@ def playback_student(ckpt_path: str, xml_path: str, duration: float = 10.0):
             if not viewer.is_running():
                 break
 
-            # 50Hz: 构造 obs
-            base_obs = _build_obs(data, obs_history, last_action)
-            obs_history = np.roll(obs_history, -1, axis=0)
-            obs_history[-1] = base_obs
+            # 50Hz: 推理 (用当前 history, 第一步全 0 与训练 reset 一致)
             obs_flat = obs_history.flatten()
-
-            # 更新 RMA 50 步历史
-            rma_history = np.roll(rma_history, -1, axis=1)
-            rma_history[0, -1, :] = base_obs
-
-            # Student 推理
             with torch.no_grad():
                 action = student(
                     torch.from_numpy(obs_flat).float().unsqueeze(0),
                     torch.from_numpy(rma_history).float(),
                 ).numpy()[0]
-            last_action = action
 
             _apply_action(data, action)
+            last_action = action
 
             for _ in range(N_SUBSTEPS):
                 mujoco.mj_step(model, data)
+
+            # 推理后才更新 history (与训练 step() 顺序一致)
+            base_obs = _build_obs(data, obs_history, last_action)
+            obs_history = np.roll(obs_history, -1, axis=0)
+            obs_history[-1] = base_obs
+            rma_history = np.roll(rma_history, -1, axis=1)
+            rma_history[0, -1, :] = base_obs
             viewer.sync()
 
 
