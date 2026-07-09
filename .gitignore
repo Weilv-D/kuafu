@@ -25,6 +25,7 @@ rl/checkpoints/
 rl/wandb/
 rl/runs/
 *.onnx
+*.onnx.data
 *.pt
 *.ckpt
 
