@@ -1,161 +1,158 @@
-# 夸父 KuaFu — STM32F407ZGT6 固件说明书 (Cerebellum Firmware)
+# 夸父 KuaFu — STM32F407ZGT6 固件说明书
 
-本文件夹包含了夸父（KuaFu）桌面双轮足平衡机器人的 **STM32F407ZGT6 主控固件代码**。固件基于 STM32 HAL 库编写，负责处理机器人底层的硬实时任务：IMU 姿态解算（1 kHz）、双轮 LQR 自平衡算法（250 Hz）、髋关节舵机同步控制（50 Hz）以及与上层树莓派 5 的桥接通信。
+本目录为夸父平衡机器人底层的 STM32F407ZGT6 主控固件，基于 STM32 HAL 库实现硬实时控制，涵盖 1 kHz IMU 姿态解算、250 Hz 双轮 LQR 自平衡、50 Hz 髋关节舵机同步控制，以及与上层树莓派 5 的串口桥接通信。
 
 ---
 
-## 核心板硬件规格与复核 (LXB407ZG-P1)
+## 核心板硬件规格
 
-经复核 `STM32F407ZG-P1核心板原理图`，板载核心引脚与外设定义如下：
-1.  **USB 接口**：板载 Type-C 接口直接连至 STM32 的 **PA11/PA12 (USB_DM/DP)**，**板载无 USB 转串口芯片**。因此进行串口下载或调试时，必须将外部 CH340 模块连接至板载的 **USART1 调试排针**（标有 TXD/RXD）。
-2.  **按键配置**：
-    *   **SW2 (RST)**：复位按键（低电平复位）。
-    *   **SW3 (BOOT0)**：BOOT0 控制按键（按下时 BOOT0 拉高至 3.3V，松开时默认通过 10kΩ 电阻拉低至 GND）。
-    *   **SW1 (KEY)**：用户自定义按键，连接至 **PA15**（低电平有效）。
-3.  **LED 配置**：
-    *   **LED1 (红光)**：3.3V 电源指示灯（上电常亮）。
-    *   **LED2 (绿光)**：用户可控 LED，连接至 **PC13**（低电平点亮）。
+主控板型号为 LXB407ZG-P1 核心板，外设引脚与功能定义如下：
+
+*   **USB 接口**：板载 Type-C 接口直接连接 STM32 的 PA11 和 PA12 引脚，不具备硬件 USB 转串口电路。烧录与调试时，必须将外部 CH340 串口模块连接至标有 TXD 和 RXD 的 USART1 排针。
+*   **按键配置**：
+    *   **SW2**：复位按键，低电平复位。
+    *   **SW3**：BOOT0 控制按键，按下时引脚输入高电平，松开时默认下拉至低电平。
+    *   **SW1**：用户按键，连接至 PA15 引脚，低电平有效。
+*   **LED 配置**：
+    *   **LED1**：电源指示灯，上电常亮。
+    *   **LED2**：用户指示灯，连接至 PC13 引脚，输入低电平点亮。
 
 ---
 
 ## 目录结构
 
 *   `Config/`
-    *   [pin_config.h](Config/pin_config.h): 统一的引脚映射、LQR 控制增益参数、机器人并联机构的物理参数和安全阈值定义。
+    *   [pin_config.h](Config/pin_config.h): 硬件引脚映射、LQR 控制增益、并联机构几何参数与安全阈值。
 *   `Comm/`
-    *   [crc8.h](Comm/crc8.h) / [crc8.c](Comm/crc8.c): 用于 DDSM315 电机校验的查表法 CRC-8/MAXIM 计算实现。
-    *   [pi_link.h](Comm/pi_link.h) / [pi_link.c](Comm/pi_link.c): 树莓派 5 自定义桥接串口协议（波特率 921600），包含遥控/动作帧解析与传感器遥测上传。
+    *   [crc8.h](Comm/crc8.h) / [crc8.c](Comm/crc8.c): 用于 DDSM315 电机通信校验的 CRC-8/MAXIM 查表计算器。
+    *   [pi_link.h](Comm/pi_link.h) / [pi_link.c](Comm/pi_link.c): 树莓派 5 串口通信桥接协议，包含遥控指令解析与高频数据遥测上传。
 *   `Drivers/`
-    *   [bmi088.h](Drivers/bmi088.h) / [bmi088.c](Drivers/bmi088.c): BMI088 六轴 IMU 的 I2C 驱动，支持陀螺仪 DRDY（INT3）中断同步。
-    *   [ddsm315.h](Drivers/ddsm315.h) / [ddsm315.c](Drivers/ddsm315.c): DDSM315 轮毂电机 RS485 半双工驱动（使能、模式设置、转矩/速度控制与反馈解析）。
-    *   [st3215.h](Drivers/st3215.h) / [st3215.c](Drivers/st3215.c): ST3215 菊花链总线舵机 1 Mbps 串口驱动，支持多舵机同步位置下发 `SyncWrite`。
+    *   [bmi088.h](Drivers/bmi088.h) / [bmi088.c](Drivers/bmi088.c): BMI088 惯性传感器 I2C 驱动，启用陀螺仪数据就绪中断。
+    *   [ddsm315.h](Drivers/ddsm315.h) / [ddsm315.c](Drivers/ddsm315.c): DDSM315 轮毂电机驱动，支持模式切换、使能控制、力矩下发与状态解析。
+    *   [st3215.h](Drivers/st3215.h) / [st3215.c](Drivers/st3215.c): ST3215 菊花链总线舵机驱动，支持多路同步写入与单路状态反馈读取。
 *   `Control/`
-    *   [mahony.h](Control/mahony.h) / [mahony.c](Control/mahony.c): Mahony 互补滤波姿态估计算法。
-    *   [kinematics.h](Control/kinematics.h) / [kinematics.c](Control/kinematics.c): 并联五杆机构逆运动学（IK）解算器，将腿长映射为舵机目标角度。
-    *   [lqr_controller.h](Control/lqr_controller.h) / [lqr_controller.c](Control/lqr_controller.c): 双轮倒立摆 LQR 平衡控制器，并融合上层输出的残差扭矩。
+    *   [mahony.h](Control/mahony.h) / [mahony.c](Control/mahony.c): 姿态估算滤波器，融合加速度计与陀螺仪数据。
+    *   [kinematics.h](Control/kinematics.h) / [kinematics.c](Control/kinematics.c): 五杆并联腿部逆运动学解算器，建立足端虚拟高度与髋关节角度的映射。
+    *   [lqr_controller.h](Control/lqr_controller.h) / [lqr_controller.c](Control/lqr_controller.c): 双轮倒立摆平衡控制器，负责合成自平衡力矩与树莓派残差输入。
 *   `Core/`
-    *   [safety_state.h](Core/safety_state.h) / [safety_state.c](Core/safety_state.c): 状态机（INIT、STAND、ACTIVE、CLIMB、FAULT）与多重安全保护逻辑。
-    *   [main.c](Core/main.c): 主程序入口。配置系统时钟（168 MHz），实现 1.0ms EXTI1 同步滴答，大循环中执行读取、滤波和 4ms 分时槽控制。
+    *   [safety_state.h](Core/safety_state.h) / [safety_state.c](Core/safety_state.c): 系统运行状态机与安全阀限监测保护。
+    *   [main.c](Core/main.c): 时钟配置、外设初始化入口、中断控制以及分时任务调度。
 
 ---
 
 ## 实时时序设计
 
-为防止低速半双工通信（如 115200 bps 的 RS485）阻塞高频姿态解算，系统采用了**前后台分时异步时序**：
+系统采用前后台异步分时时序，避免 RS485 半双工总线通信阻塞高频姿态解算：
 
-1.  **1 kHz 传感器脉冲 (前台中断)**：
-    *   IMU 陀螺仪的 Data Ready (INT3 引脚) 连接至 STM32 的 **PB1**，触发 EXTI1 中断。
-    *   中断服务函数仅累加全局滴答计数器 `g_system_ticks`，将所有阻塞操作移出中断。
-2.  **主循环分时调度器 (后台 ticks 触发)**：
-    *   主循环检测到系统滴答计数器更新时，首先高频执行 I2C 读取 BMI088 与 Mahony 姿态滤波。
-    *   随后将 4 ms（250 Hz）的电机控制周期划分为 **4 个 1 ms Slot（时间槽）**：
-        *   **Slot 0** (0-1ms): 下发左轮扭矩指令 ──► 阻塞式读取左轮 DDSM 反馈数据（限时 1.5ms）。
-        *   **Slot 1** (1-2ms): 下发右轮扭矩指令 ──► 阻塞式读取右轮 DDSM 反馈数据（限时 1.5ms）。
-        *   **Slot 2** (2-3ms): 通过 USART6 将当前 IMU 姿态与关节状态打包上传至树莓派。
-        *   **Slot 3** (3-4ms): 计算 LQR 自平衡输出，叠加树莓派下发的残差，并进行系统级安全诊断。
-3.  **50 Hz 髋关节舵机环**：
-    *   在大循环中每 20ms 定时执行。通过 1 Mbps 串口 `SyncWrite` 四腿髋关节角度，并轮询单台舵机状态。
+1.  **1 kHz 传感器脉冲**：
+    *   陀螺仪数据就绪引脚连接至 PB1，触发 EXTI1 中断。
+    *   中断服务函数仅累加滴答计数器 `g_system_ticks` 即可退出，不执行任何阻塞操作。
+2.  **主循环任务调度**：
+    *   后台主循环检测到滴答更新后，立即执行 I2C 寄存器读取和姿态解算。
+    *   将 4 ms 的控制周期划分为 4 个分时时间槽：
+        *   **Slot 0**：发送左轮控制指令，并阻塞等待接收反馈数据，超时上限 1.5 ms。
+        *   **Slot 1**：发送右轮控制指令，并阻塞等待接收反馈数据，超时上限 1.5 ms。
+        *   **Slot 2**：通过 USART6 接口向树莓派发送姿态与关节状态数据包。
+        *   **Slot 3**：运行 LQR 平衡控制计算、叠加控制残差并执行系统级安全诊断。
+3.  **50 Hz 髋关节舵机控制**：
+    *   主循环每 20 ms 触发一次，通过 1 Mbps 串口广播下发同步控制角度，并轮询读取单台舵机状态。
 
 ---
 
-## 全系统针脚连接方案
+## 引脚连接与串口分配
 
-> 主控芯片丝印省略 "P"，如 PB8 标为 B8
+### 1. 串口外设总览
 
-### 1. 串口资源分配总览
-
-| 串口外设 | 功能用途 | STM32 引脚 (丝印) | 波特率 |
+| 串口外设 | 物理用途 | STM32 硬件引脚 | 默认波特率 |
 | :--- | :--- | :--- | :--- |
-| **USART1** | CH340 串口下载 / PC 调试打印 | PA9 (TXD) / PA10 (RXD) | 115200 bps |
-| **USART2** | RS485 模块 → DDSM315 电机总线 | A2 (TX) / A3 (RX) | 115200 bps |
-| **USART3** | 舵机控制板 → ST3215 总线 | B10 (TX) / B11 (RX) | 1000000 bps |
-| **USART6** | 树莓派 5 主控桥接串口 | C6 (TX) / C7 (RX) | 921600 bps |
-| **I2C1** | BMI088 IMU 姿态传感器 | B8 (SCL) / B9 (SDA) | 400 kHz |
+| **USART1** | CH340 烧录与调试接口 | PA9 (TXD) / PA10 (RXD) | 115200 bps |
+| **USART2** | RS485 模块与 DDSM 电机总线 | PA2 / PA3 | 115200 bps |
+| **USART3** | 舵机控制板与 ST3215 舵机总线 | PB10 / PB11 | 1000000 bps |
+| **USART6** | 树莓派 5 桥接通信接口 | PC6 / PC7 | 921600 bps |
+| **I2C1** | BMI088 IMU 传感器总线 | PB8 / PB9 | 400 kHz |
 
----
+### 2. 详细接口连线
 
-### 2. 全系统针脚连接表
+#### A. CH340 串口下载器
 
-#### A. CH340 串口下载器 (程序烧录 + 调试)
-
-| CH340 模块引脚 | 信号方向 | STM32 引脚 | 实物丝印 | 说明 |
+| 模块侧引脚 | 信号方向 | MCU 侧引脚 | 实物丝印 | 备注 |
 | :--- | :---: | :--- | :---: | :--- |
-| 3.3V | ──► | 3.3V 供电 | **3V3** | 仅调测供电；若已接电池则**不接此线** |
-| TXD | ──► | PA10 (USART1_RX) | **RXD** | 电脑发送 → 单片机接收 |
-| RXD | ◄── | PA9 (USART1_TX) | **TXD** | 单片机发送 → 电脑接收 |
-| GND | ─── | GND | **GND** | 必须共地 |
-| rst | ✗ | 悬空不接 | — | 悬空 |
+| 3.3V | ──► | 3.3V 供电 | 3V3 | 调测供电，接入动力电池时切勿连接 |
+| TXD | ──► | PA10 | RXD | 下载器发送端连接 MCU 接收端 |
+| RXD | ◄── | PA9 | TXD | 下载器接收端连接 MCU 发送端 |
+| GND | ─── | GND | GND | 信号共地 |
+| rst | ✗ | 悬空 | — | 悬空不接 |
 
-**⚠️ 串口下载步骤：**
-1. **进入 Bootloader 模式**：按住核心板上的 **BOOT0 按键 (SW3)**，按一下 **RST 按键 (SW2)**，随后松开 **BOOT0 按键**。
-2. 在 FlyMcu/STM32CubeProgrammer 选择对应 COM 端口，载入 `.hex` 固件。
-3. 启动烧录下载。
-4. 烧录完成后，按一下 **RST 按键 (SW2)** 即可正常运行。
+**串口烧录步骤：**
+1. 按住核心板上的 BOOT0 按键（SW3），按下并释放 RST 按键（SW2），最后松开 BOOT0 按键进入 Bootloader 模式。
+2. 在烧录软件中选择 COM 端口并载入固件。
+3. 启动下载直至完成。
+4. 按下 RST 按键（SW2）运行程序。
 
-#### B. 树莓派 5 ↔ STM32 (主控桥接通信)
+#### B. 树莓派 5 通信接口
 
-| 树莓派 5 专用 UART 口 (JST-SH 1.0mm) | 信号方向 | STM32 引脚 | 实物丝印 | 说明 |
+| 树莓派侧引脚 | 信号方向 | MCU 侧引脚 | 实物丝印 | 备注 |
 | :--- | :---: | :--- | :---: | :--- |
-| Pin 1 (TX) | ──► | PC7 (USART6_RX) | **C7** | 树莓派发送 → STM32 接收 |
-| Pin 2 (GND) | ─── | GND | **GND** | 信号共地 |
-| Pin 3 (RX) | ◄── | PC6 (USART6_TX) | **C6** | STM32 发送 → 树莓派接收 |
+| Pin 1 (TX) | ──► | PC7 | C7 | 接收来自树莓派的数据 |
+| Pin 2 (GND) | ─── | GND | GND | 信号共地 |
+| Pin 3 (RX) | ◄── | PC6 | C6 | 向树莓派发送遥测数据 |
 
-- 电平：3.3V TTL 直连；
-- 树莓派端串口节点：`/dev/ttyAMA0`（需通过 `raspi-config` 关闭控制台占用）。
+- 电平标准：3.3V TTL 电平直连。
+- 树莓派串口节点：`/dev/ttyAMA0`，需配置系统关闭串口控制台占用。
 
-#### C. 舵机控制板 ↔ STM32 (ST3215 髋关节舵机)
+#### C. ST3215 舵机总线
 
-| 舵机控制板引脚 | 信号方向 | STM32 引脚 | 实物丝印 | 说明 |
+| 舵机控制板引脚 | 信号方向 | MCU 侧引脚 | 实物丝印 | 备注 |
 | :--- | :---: | :--- | :---: | :--- |
-| RXD | ──► | PB10 (USART3_TX) | **B10** | STM32 发送 → 控制板接收 |
-| TXD | ◄── | PB11 (USART3_RX) | **B11** | 控制板发送 → STM32 接收 |
-| GND | ─── | GND | **GND** | 信号共地 |
+| RXD | ──► | PB10 | B10 | 信号输出端 |
+| TXD | ◄── | PB11 | B11 | 信号输入端 |
+| GND | ─── | GND | GND | 信号共地 |
 
-- 通信：1 Mbps，半双工 TTL 模式；
-- 舵机控制板逻辑端自供电，**切勿接入 STM32 的 3.3V**。动力电源单独接 12V Buck 降压输出。
+- 通信模式：1 Mbps 半双工 TTL 串联。
+- 控制板逻辑端使用板载自供电，切勿连接 MCU 的 3.3V 供电线。舵机 12V 动力电源单独由降压模块提供。
 
-#### D. RS485 模块 ↔ STM32 (DDSM315 电机)
+#### D. RS485 电机总线
 
-| RS485 模块引脚 | 信号方向 | STM32 引脚 | 实物丝印 | 说明 |
+| 转换模块引脚 | 信号方向 | MCU 侧引脚 | 实物丝印 | 备注 |
 | :--- | :---: | :--- | :---: | :--- |
-| RX | ──► | PA2 (USART2_TX) | **A2** | STM32 发送 → 模块接收 |
-| TX | ◄── | PA3 (USART2_RX) | **A3** | 模块发送 → STM32 接收 |
-| V (VCC) | ──► | 3.3V | **3V3** | 模块逻辑供电 |
-| GND | ─── | GND | **GND** | 信号共地 |
+| RX | ──► | PA2 | A2 | 信号输出端 |
+| TX | ◄── | PA3 | A3 | 信号输入端 |
+| VCC | ──► | 3.3V | 3V3 | 模块逻辑供电 |
+| GND | ─── | GND | GND | 信号共地 |
 
-- RS485 转换模块必须为**带自动收发流控**的版本（无需方向控制引脚）；
-- 485 差分总线侧（A、B 线）并联两台 DDSM315 电机（左轮 ID=1，右轮 ID=2）。
+- 硬件要求：RS485 转换模块需具备自动收发流控功能。
+- 总线并联配置：左轮电机 ID 为 1，右轮电机 ID 为 2。
 
-#### E. BMI088 IMU ↔ STM32 (I2C 模式)
+#### E. BMI088 传感器
 
-| BMI088 模块引脚 | 信号方向 | STM32 引脚 | 实物丝印 | 说明 |
+| 传感器引脚 | 信号方向 | MCU 侧引脚 | 实物丝印 | 备注 |
 | :--- | :---: | :--- | :---: | :--- |
-| VCC | ──► | 3.3V | **3V3** | IMU 供电 |
-| GND | ─── | GND | **GND** | 信号共地 |
-| SCL | ──► | PB8 (I2C1_SCL) | **B8** | I2C 时钟线 |
-| SDA | ◄──► | PB9 (I2C1_SDA) | **B9** | I2C 数据线 |
-| INT3 | ◄── | PB1 (EXTI1) | **B1** | 陀螺仪就绪中断，输入给单片机计数 |
+| VCC | ──► | 3.3V | 3V3 | 传感器供电 |
+| GND | ─── | GND | GND | 信号共地 |
+| SCL | ──► | PB8 | B8 | I2C 时钟线 |
+| SDA | ◄──► | PB9 | B9 | I2C 数据线 |
+| INT3 | ◄── | PB1 | B1 | 陀螺仪就绪中断输出 |
 
 ---
 
 ## 硬件布线规范
 
-1.  **强弱电隔离**：电池动力线（18.5V）、舵机供电线（12V）需与 I2C、UART 信号线物理隔离至少 2 cm，防大电流电磁干扰导致通信丢包。
-2.  **IMU 排线线长**：I2C 信号排线控制在 **15 cm 以内**（推荐小于 10 cm）。SCL/SDA 必须有 4.7kΩ 左右的上拉电阻（通常模块板上已自带）。
-3.  **单点共地 (Star Grounding)**：STM32、树莓派、RS485模块、舵机控制板的地线均需通过粗线汇集到电池主分电板的 GND 焊盘上，防止地电位差影响通信与传感器精度。
-4.  **禁止双路供电**：CH340 的 3.3V 仅在无电池时作调测调试用。系统接入动力电池时，**严禁**连接 CH340 的 3.3V 针脚。
+1.  **强弱电隔离**：动力供电主线需与 I2C、UART 信号线物理隔离至少 2 cm，禁止平行走线，防大电流电磁干扰。
+2.  **IMU 排线限制**：I2C 信号排线长度需控制在 15 cm 以内。SCL 和 SDA 信号线必须拉高至 3.3V（通常 BMI088 模块已集成 4.7kΩ 上拉电阻）。
+3.  **单点共地**：MCU、树莓派、RS485模块、舵机控制板的地线需通过粗导线并联汇集至分电板的主 GND 焊盘。
+4.  **防电源冲突**：外部 CH340 模块的 3.3V 供电线仅用于无主电池时的调试。接入电池时严禁连接该供电线。
 
 ---
 
 ## 协议与文档参考来源
 
 1.  **DDSM315 电机协议**：
-    *   微雪电子 DDSM315 产品 Wiki：[https://www.waveshare.net/wiki/DDSM315](https://www.waveshare.net/wiki/DDSM315)
-    *   微雪官方驱动例程仓库：[https://github.com/waveshareteam/ddsm_example](https://github.com/waveshareteam/ddsm_example)
+    *   微雪电子 DDSM315 硬件产品 Wiki：[https://www.waveshare.net/wiki/DDSM315](https://www.waveshare.net/wiki/DDSM315)
+    *   微雪官方驱动开源仓库：[https://github.com/waveshareteam/ddsm_example](https://github.com/waveshareteam/ddsm_example)
 2.  **ST3215 舵机协议**：
-    *   微雪电子 ST3215 舵机 Wiki：[https://www.waveshare.net/wiki/ST3215_Servo](https://www.waveshare.net/wiki/ST3215_Servo)
-    *   飞特（Feetech）STS 系列总线舵机 SDK：[https://github.com/waveshareteam/ServoDriverST](https://github.com/waveshareteam/ServoDriverST)
-3.  **BMI088 传感器寄存器**：
+    *   微雪电子 ST3215 总线舵机 Wiki：[https://www.waveshare.net/wiki/ST3215_Servo](https://www.waveshare.net/wiki/ST3215_Servo)
+    *   飞特总线舵机 ESP32 控制例程仓库：[https://github.com/waveshareteam/ServoDriverST](https://github.com/waveshareteam/ServoDriverST)
+3.  **BMI088 传感器规格**：
     *   Bosch Sensortec BMI088 数据手册：[https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bmi088-ds001.pdf](https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bmi088-ds001.pdf)
-4.  **树莓派桥接串口协议 (Pi Link)**：
+4.  **主控通信协议**：
     *   参考本仓库设计文档：[docs/plans/2026-07-08-软件架构与RL技术路线-design.md](../docs/plans/2026-07-08-%E8%BD%AF%E4%BB%B6%E6%9E%B6%E6%9E%84%E4%B8%8ERL%E6%8A%80%E6%9C%AF%E8%B7%AF%E7%BA%BF-design.md)
