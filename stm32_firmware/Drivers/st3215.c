@@ -1,5 +1,5 @@
 #include "st3215.h"
-#include "../Config/pin_config.h"
+#include "pin_config.h"
 
 #define TICK_TO_RAD          ((2.0f * 3.14159265f) / 4096.0f)
 #define RADS_TO_TICK         (4096.0f / (2.0f * 3.14159265f))

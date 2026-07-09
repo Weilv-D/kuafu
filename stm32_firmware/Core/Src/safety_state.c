@@ -1,6 +1,6 @@
 #include "safety_state.h"
-#include "../Comm/pi_link.h"
-#include "../Config/pin_config.h"
+#include "pi_link.h"
+#include "pin_config.h"
 #include <string.h>
 
 SafetyState_t g_safety_state;

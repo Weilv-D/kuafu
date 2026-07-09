@@ -1,6 +1,6 @@
 #include "ddsm315.h"
-#include "../Comm/crc8.h"
-#include "../Config/pin_config.h"
+#include "crc8.h"
+#include "pin_config.h"
 
 #define RPM_TO_RADS         (2.0f * 3.14159265f / 60.0f)
 #define POS_TO_RAD          (2.0f * 3.14159265f / 32768.0f)
