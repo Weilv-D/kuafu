@@ -88,6 +88,29 @@ int main(void) {
         /* Soft real-time scheduler aligned to system ticks (1ms resolution) */
         if (g_system_ticks != last_tick) {
             last_tick = g_system_ticks;
+
+            /* 1. Read IMU sensors (safe to do here in the main loop background) */
+            bmi088_read_accel(&g_imu);
+            bmi088_read_gyro(&g_imu);
+
+            float gx = g_imu.gyro[0];
+            float gy = g_imu.gyro[1];
+            float gz = g_imu.gyro[2];
+
+            /* 2. Run sensor fusion update */
+            if (g_safety_state.is_gyro_calibrated) {
+                gx -= g_safety_state.gyro_calib_offset[0];
+                gy -= g_safety_state.gyro_calib_offset[1];
+                gz -= g_safety_state.gyro_calib_offset[2];
+
+                mahony_update(&g_mahony, 
+                              g_imu.accel[0], g_imu.accel[1], g_imu.accel[2], 
+                              gx, gy, gz, 0.001f);
+            } else {
+                safety_state_gyro_calib_update(gx, gy, gz);
+            }
+
+            /* 3. Run the Slot scheduler (250Hz DDSM Motor & Pi Link) */
             uint8_t slot = last_tick % 4;
 
             /* Safety state machine update (at 250 Hz, inside slot scheduler) */
@@ -294,29 +317,6 @@ static void System_Initial_Setup(void) {
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
     if (GPIO_Pin == IMU_INT_PIN) {
         g_system_ticks++;
-
-        /* Read Accel & Gyro */
-        bmi088_read_accel(&g_imu);
-        bmi088_read_gyro(&g_imu);
-
-        float gx = g_imu.gyro[0];
-        float gy = g_imu.gyro[1];
-        float gz = g_imu.gyro[2];
-
-        if (g_safety_state.is_gyro_calibrated) {
-            /* Subtract calibrated offsets */
-            gx -= g_safety_state.gyro_calib_offset[0];
-            gy -= g_safety_state.gyro_calib_offset[1];
-            gz -= g_safety_state.gyro_calib_offset[2];
-
-            /* Feed into Mahony Sensor Fusion (dt = 1ms = 0.001s) */
-            mahony_update(&g_mahony, 
-                          g_imu.accel[0], g_imu.accel[1], g_imu.accel[2], 
-                          gx, gy, gz, 0.001f);
-        } else {
-            /* Feed samples to calibration register */
-            safety_state_gyro_calib_update(gx, gy, gz);
-        }
     }
 }
 
