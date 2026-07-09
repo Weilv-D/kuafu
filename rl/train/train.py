@@ -63,6 +63,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
     parser.add_argument("--log_dir", type=str, default="rl/checkpoints", help="checkpoint 目录")
     parser.add_argument("--smoke_test", action="store_true", help="烟测模式 (5 iteration)")
+    parser.add_argument("--resume", type=str, default=None, help="从已有的 checkpoint 恢复训练")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -227,15 +228,24 @@ def main():
     runner = OnPolicyRunner(torch_env, train_cfg, log_dir=log_dir, device=device)
     print(f"  日志: {log_dir}")
 
+    # ---- 载入 Checkpoint 恢复训练 ----
+    if args.resume:
+        print(f"  载入 Checkpoint 恢复训练: {args.resume}")
+        runner.load(args.resume)
+
     # ---- 训练 ----
+    start_iter = runner.current_learning_iteration
     n_iter = 5 if args.smoke_test else args.iterations
+    run_iter = max(0, n_iter - start_iter)
+
     if args.smoke_test:
         print("🔥 烟测: 5 iteration")
+        run_iter = 5
 
-    total_steps = args.num_envs * 24 * n_iter
-    print(f"开始训练: {n_iter} iters × {args.num_envs} envs × 24 steps = {total_steps:,} steps")
+    total_steps = args.num_envs * 24 * run_iter
+    print(f"开始训练: 需进行 {run_iter} 轮迭代 (已完成 {start_iter} 轮, 目标 {n_iter} 轮) × {args.num_envs} envs × 24 steps = {total_steps:,} steps")
     t0 = time.time()
-    runner.learn(num_learning_iterations=n_iter, init_at_random_ep_len=True)
+    runner.learn(num_learning_iterations=run_iter, init_at_random_ep_len=True)
     elapsed = time.time() - t0
 
     print(f"\n✅ 训练完成: {elapsed:.1f}s, {total_steps:,} steps, {total_steps/elapsed:,.0f} steps/s")
