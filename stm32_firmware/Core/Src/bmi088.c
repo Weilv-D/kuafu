@@ -9,12 +9,12 @@
 
 /* Helper write register function */
 static HAL_StatusTypeDef bmi088_write_reg(I2C_HandleTypeDef *hi2c, uint8_t dev_addr, uint8_t reg_addr, uint8_t data) {
-    return HAL_I2C_Mem_Write(hi2c, dev_addr << 1, reg_addr, I2C_MEMSIZE_8BIT, &data, 1, 100);
+    return HAL_I2C_Mem_Write(hi2c, dev_addr << 1, reg_addr, I2C_MEMADD_SIZE_8BIT, &data, 1, 100);
 }
 
 /* Helper read register function */
 static HAL_StatusTypeDef bmi088_read_reg(I2C_HandleTypeDef *hi2c, uint8_t dev_addr, uint8_t reg_addr, uint8_t *data) {
-    return HAL_I2C_Mem_Read(hi2c, dev_addr << 1, reg_addr, I2C_MEMSIZE_8BIT, data, 1, 100);
+    return HAL_I2C_Mem_Read(hi2c, dev_addr << 1, reg_addr, I2C_MEMADD_SIZE_8BIT, data, 1, 100);
 }
 
 int bmi088_init(BMI088_t *imu, I2C_HandleTypeDef *hi2c) {
@@ -84,7 +84,7 @@ int bmi088_read_accel(BMI088_t *imu) {
     uint8_t buffer[6];
 
     /* Read 6 bytes of raw accelerometer data starting at BMI088_ACC_X_LSB (0x12) */
-    if (HAL_I2C_Mem_Read(imu->hi2c, BMI088_ACCEL_ADDR << 1, BMI088_ACC_X_LSB, I2C_MEMSIZE_8BIT, buffer, 6, 10) != HAL_OK) {
+    if (HAL_I2C_Mem_Read(imu->hi2c, BMI088_ACCEL_ADDR << 1, BMI088_ACC_X_LSB, I2C_MEMADD_SIZE_8BIT, buffer, 6, 10) != HAL_OK) {
         return -1;
     }
 
@@ -104,7 +104,7 @@ int bmi088_read_gyro(BMI088_t *imu) {
     uint8_t buffer[6];
 
     /* Read 6 bytes of raw gyroscope data starting at BMI088_GYRO_X_LSB (0x02) */
-    if (HAL_I2C_Mem_Read(imu->hi2c, BMI088_GYRO_ADDR << 1, BMI088_GYRO_X_LSB, I2C_MEMSIZE_8BIT, buffer, 6, 10) != HAL_OK) {
+    if (HAL_I2C_Mem_Read(imu->hi2c, BMI088_GYRO_ADDR << 1, BMI088_GYRO_X_LSB, I2C_MEMADD_SIZE_8BIT, buffer, 6, 10) != HAL_OK) {
         return -1;
     }
 
