@@ -50,3 +50,22 @@ desktop.ini
 MUJOCO_LOG.TXT
 logs/
 *.bak
+
+# ---- Keil MDK-ARM ----
+stm32_firmware/**/Listings/
+stm32_firmware/**/Objects/
+stm32_firmware/**/RTE/
+stm32_firmware/**/*.uvguix.*
+stm32_firmware/**/*.uv2.local
+stm32_firmware/**/*.dep
+stm32_firmware/**/*.crf
+stm32_firmware/**/*.d
+stm32_firmware/**/*.o
+stm32_firmware/**/*.axf
+stm32_firmware/**/*.hex
+stm32_firmware/**/*.bin
+stm32_firmware/**/*.lnp
+stm32_firmware/**/*.htm
+stm32_firmware/**/*.build_log.htm
+stm32_firmware/**/*.map
+stm32_firmware/**/*.lst
