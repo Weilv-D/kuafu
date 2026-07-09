@@ -70,6 +70,8 @@ int main(void) {
     g_ddsm_right.id = DDSM_RIGHT_ID;
     for (int i = 0; i < 4; i++) {
         g_servos[i].id = i + 1; /* IDs: 1, 2, 3, 4 */
+        g_servos[i].is_online = 1;
+        g_servos[i].consecutive_failures = 0;
     }
 
     /* Start Pi Link bridge USART6 reception via DMA */
@@ -272,8 +274,17 @@ int main(void) {
                 }
             }
 
-            /* Sequentially query feedback from one servo to monitor health (prevents blocking) */
-            st3215_read_state(&huart3, active_servo_query_idx + 1, &g_servos[active_servo_query_idx]);
+            /* Sequentially query feedback from one online servo to prevent blocking */
+            if (g_servos[active_servo_query_idx].is_online) {
+                if (st3215_read_state(&huart3, active_servo_query_idx + 1, &g_servos[active_servo_query_idx]) == 0) {
+                    g_servos[active_servo_query_idx].consecutive_failures = 0;
+                } else {
+                    g_servos[active_servo_query_idx].consecutive_failures++;
+                    if (g_servos[active_servo_query_idx].consecutive_failures >= 3) {
+                        g_servos[active_servo_query_idx].is_online = 0;
+                    }
+                }
+            }
             active_servo_query_idx = (active_servo_query_idx + 1) % 4;
         }
     }

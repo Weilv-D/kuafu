@@ -34,6 +34,8 @@ typedef struct {
     float temperature_c;     /* Present temperature in Celsius */
     float voltage;           /* Present voltage in Volts */
     float current_a;         /* Present current in Amperes */
+    uint8_t is_online;       /* 1 if online, 0 if offline */
+    uint8_t consecutive_failures;
 } ST3215_State_t;
 
 /**

@@ -91,7 +91,7 @@ int st3215_read_state(UART_HandleTypeDef *huart, uint8_t id, ST3215_State_t *sta
     }
 
     /* Receive response (21 bytes) */
-    if (HAL_UART_Receive(huart, rx_buf, 21, 10) != HAL_OK) {
+    if (HAL_UART_Receive(huart, rx_buf, 21, 2) != HAL_OK) {
         return -1; /* Timeout or RX error */
     }
 
