@@ -102,7 +102,7 @@ def distill(
     """Student 规范 DAgger 蒸馏.
 
     Student = trunk(proprio + z) + adapter(history→z) + policy_head(trunk+z→action)
-    Teacher 已训练好 (actor 吃 proprio+z=149), student 用历史推测特权 z, 拟合 teacher 动作。
+    Teacher 已训练好 (actor 吃 proprio+z=157), student 用历史推测特权 z, 拟合 teacher 动作。
     """
     from rl.env.kuafu_mjx_env import (
         KuafuMjxEnv, OBS_DIM, OBS_DIM_BASE, RMA_STATIC_DIM, ACTION_DIM, ACTOR_OBS_DIM)
@@ -123,7 +123,7 @@ def distill(
     # ---- DLPack 零拷贝契约守卫 (启动期一次) ----
     dlu.verify_dlpack_zero_copy(device)
 
-    # ---- 加载 Teacher (actor 吃 proprio+z = 149, 部署时 z 由 adapter 预测) ----
+    # ---- 加载 Teacher (actor 吃 proprio+z = 157, 部署时 z 由 adapter 预测) ----
     print(f"  加载 Teacher: {teacher_ckpt}")
     try:
         teacher = TeacherInferenceModel.from_checkpoint(
@@ -132,7 +132,7 @@ def distill(
         print(f"❌ Teacher checkpoint 加载失败: {e}")
         sys.exit(1)
     teacher.eval()
-    print(f"  Teacher 推理模型就绪 (actor {ACTOR_OBS_DIM}维 [proprio140+z9] + obs_normalizer)")
+    print(f"  Teacher 推理模型就绪 (actor {ACTOR_OBS_DIM}维 [proprio148+z9] + obs_normalizer)")
 
     # ---- 创建 Student 网络 (动态匹配 Teacher 隐藏层维度) ----
     teacher_hidden = [layer.out_features for layer in teacher.actor[:-1] if isinstance(layer, nn.Linear)]
@@ -183,13 +183,13 @@ def distill(
     for it in range(n_iter):
         # 1. 采集当前环境状态 (JAX GPU → PyTorch GPU 零拷贝)
         obs = state.obs
-        actor_obs_jax = obs["state"]             # (num_envs, 149) = proprio140 + static_z9
+        actor_obs_jax = obs["state"]             # (num_envs, 157) = proprio148 + static_z9
 
-        # student 吃原始 proprio(140), adapter 从历史预测 z(9); teacher 吃完整 149
-        proprio_torch = dlu.to_torch(actor_obs_jax[:, :OBS_DIM])    # (num_envs, 140)
+        # student 吃原始 proprio(148), adapter 从历史预测 z(9); teacher 吃完整 157
+        proprio_torch = dlu.to_torch(actor_obs_jax[:, :OBS_DIM])    # (num_envs, 148)
         static_z_torch = dlu.to_torch(actor_obs_jax[:, OBS_DIM:])  # (num_envs, 9) 真值 z
 
-        # 时序对齐: 推理动作前先更新滚动历史 (取 proprio 末 35 维 = 最近 base obs)
+        # 时序对齐: 推理动作前先更新滚动历史 (取 proprio 末 37 维 = 最近 base obs)
         current_base = proprio_torch[:, -OBS_DIM_BASE:]
         roll_history = torch.roll(roll_history, shifts=-1, dims=1)
         roll_history[:, -1, :] = current_base
@@ -222,7 +222,7 @@ def distill(
             done_mask_torch = dlu.to_torch(done_jax).bool()
             roll_history[done_mask_torch] = 0.0
 
-        # 2. Teacher 给参考动作 (Teacher actor 吃 proprio+z = 149)
+        # 2. Teacher 给参考动作 (Teacher actor 吃 proprio+z = 157)
         with torch.no_grad():
             teacher_action = teacher(dlu.to_torch(actor_obs_jax))
 

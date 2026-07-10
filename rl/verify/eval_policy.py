@@ -27,7 +27,7 @@ import numpy as np
 import mujoco
 
 import kuafu_physics as P
-from rl.env.kuafu_env import OBS_DIM_BASE, OBS_DIM, ACTION_DIM  # 35 / 140 / 6
+from rl.env.kuafu_env import OBS_DIM_BASE, OBS_DIM, ACTION_DIM  # 37 / 148 / 6
 
 CTRL_DT = 0.02    # 50 Hz
 N_SUBSTEPS = 10   # 500 Hz 物理
@@ -57,8 +57,12 @@ def rotate_vector_by_quaternion_conj(q, v):
     return v + 2 * (w * uv + uuv)
 
 
-def _build_obs(data, last_action, command, step):
-    """35 维 base obs. command=[v_cmd, w_cmd, d0_cmd] 可注入."""
+def _build_obs(data, last_action, command, step, model=None):
+    """37 维 base obs (含接触标志). command=[v_cmd, w_cmd, d0_cmd] 可注入.
+
+    model: MjModel (原生 MuJoCo), 用于查 wheel geom id 算接触标志。
+    若 None 则接触标志取 1.0 (假设接地, 平地评估安全默认)。
+    """
     qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
     roll = np.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
     pitch = np.arcsin(np.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
@@ -76,27 +80,74 @@ def _build_obs(data, last_action, command, step):
         data.actuator_force[4], data.actuator_force[5]])
     phase = step / 1000.0  # 对应 EPISODE_LENGTH = 1000
     phase_clock = np.array([np.sin(2 * np.pi * phase), np.cos(2 * np.pi * phase)])
+
+    # 接触标志 (2): 左右轮是否接地
+    if model is not None:
+        wl = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "wheel_l_geom")
+        wr = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "wheel_r_geom")
+        cl = 0.0
+        cr = 0.0
+        for i in range(data.ncon):
+            g1, g2 = data.contact[i].geom1, data.contact[i].geom2
+            if g1 == wl or g2 == wl:
+                cl = 1.0
+            if g1 == wr or g2 == wr:
+                cr = 1.0
+        contact = np.array([cl, cr], dtype=np.float32)
+    else:
+        contact = np.array([1.0, 1.0], dtype=np.float32)  # 平地默认接地
+
     return np.concatenate([attitude, ang_vel, wheel_state, hip_state,
-                           wheel_torque, hip_torque, last_action, command, phase_clock])
+                           wheel_torque, hip_torque, last_action, command,
+                           phase_clock, contact])
 
 
-def _apply_action(data, action):
-    """LQR 底层 + RL 残差叠加 → ctrl (2-DOF: action[2:6] 驱动 4 舵机)."""
+def _apply_action(data, action, command=None):
+    """基层(pitch LQR + yaw 差速 + roll 调平 PD) + RL 残差 → ctrl.
+
+    与训练 kuafu_mjx_env.step 控制律一致:
+    - 轮: τ_L = τ_pitch + τ_diff + Δτ_L,  τ_R = τ_pitch - τ_diff + Δτ_R
+    - 腿: 基层 D0 对称 + roll PD 左右差 + RL 位置残差
+    command: [v_cmd, w_cmd, d0_cmd], 用于 yaw 跟踪 w_cmd + D0 目标。None→[0,0,dwell]。
+    """
     qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
     q = np.array([qw, qx, qy, qz])
     lin_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
     xdot = lin_vel_local[0]
     ang_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
     thetadot = ang_vel_local[1]
+    yaw_rate = ang_vel_local[2]
+    omega_x = ang_vel_local[0]
     pitch = np.arcsin(np.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
+    roll = np.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
+
+    # 基层 pitch LQR
     F = -(P.LQR_K @ np.array([0.0, pitch, xdot, thetadot]))
-    tau_lqr = F * P.R / 2.0
+    tau_pitch = F * P.R / 2.0
+
+    # 基层 yaw 条件阻尼 (大 ωz 关闭防 pitch 耦合; 命令跟踪交 RL)
+    if abs(yaw_rate) < P.YAW_DAMP_THRESH:
+        tau_diff = np.clip(-P.YAW_KD * yaw_rate, -P.TAU_WHEEL_RATED, P.TAU_WHEEL_RATED)
+    else:
+        tau_diff = 0.0
+
     # DDSM back-EMF 限幅 (与训练 _limit_wheel_torque 一致)
     data.ctrl[0] = _limit_wheel_torque(
-        tau_lqr + action[0] * P.TAU_WHEEL_RATED, data.qvel[8])
+        tau_pitch + tau_diff + action[0] * P.TAU_WHEEL_RATED, data.qvel[8])
     data.ctrl[1] = _limit_wheel_torque(
-        tau_lqr + action[1] * P.TAU_WHEEL_RATED, data.qvel[13])
-    data.ctrl[2:6] = action[2:6] * P.HIP_STROKE
+        tau_pitch - tau_diff + action[1] * P.TAU_WHEEL_RATED, data.qvel[13])
+
+    # 基层 D0 对称 + roll PD 左右差 + RL 残差
+    d0_cmd = command[2] if command is not None else P.D0_MIN
+    d0_norm = (d0_cmd - P.D0_MIN) / (P.D0_MAX - P.D0_MIN)
+    hip_A_base = -d0_norm * P.HIP_STROKE
+    hip_B_base = d0_norm * P.HIP_STROKE
+    d_d0_mm = -(P.ROLL_KP * roll + P.ROLL_KD * omega_x)
+    d_d0_rad = d_d0_mm / (P.D0_MAX - P.D0_MIN) * 2 * P.HIP_STROKE
+    data.ctrl[2] = hip_A_base + d_d0_rad / 2.0 + action[2] * P.HIP_STROKE
+    data.ctrl[3] = hip_A_base - d_d0_rad / 2.0 + action[3] * P.HIP_STROKE
+    data.ctrl[4] = hip_B_base + d_d0_rad / 2.0 + action[4] * P.HIP_STROKE
+    data.ctrl[5] = hip_B_base - d_d0_rad / 2.0 + action[5] * P.HIP_STROKE
 
 
 def _get_pitch_roll(data):
@@ -141,7 +192,7 @@ def run_episode(model, data, teacher, command, max_steps, rng=None, dr=False,
     obs_history = np.zeros((4, OBS_DIM_BASE), dtype=np.float32)
     last_action = np.zeros(ACTION_DIM, dtype=np.float32)
 
-    # 延迟缓冲 (复现训练侧 latency): 存历史 obs(140) 与 action(6)
+    # 延迟缓冲 (复现训练侧 latency): 存历史 obs(148) 与 action(6)
     cap = max(latency, 0) + 1
     obs_delay_buf = [obs_history.flatten().astype(np.float32).copy() for _ in range(cap)]
     act_delay_buf = [last_action.copy() for _ in range(cap)]
@@ -156,21 +207,21 @@ def run_episode(model, data, teacher, command, max_steps, rng=None, dr=False,
             break
         # 推理: 用延迟后的 obs_history。latency=0 为当前; latency=k 取 k 步前 = buf[-(k+1)]
         # (缓冲末尾为当前帧, 与训练 _delayed_obs 语义一致)
-        # teacher actor 条件于静态特权 z(9), 标称评估下补 nominal z → 149 维
-        inf_obs140 = obs_delay_buf[-(latency + 1)] if latency > 0 else obs_history.flatten()
-        inf_obs = np.concatenate([inf_obs140, NOMINAL_STATIC])
+        # teacher actor 条件于静态特权 z(9), 标称评估下补 nominal z → 157 维
+        inf_obs148 = obs_delay_buf[-(latency + 1)] if latency > 0 else obs_history.flatten()
+        inf_obs = np.concatenate([inf_obs148, NOMINAL_STATIC])
         with torch.no_grad():
             action = teacher(torch.from_numpy(inf_obs).float().unsqueeze(0)).numpy()[0]
         # 执行延迟后的动作 (latency=0 时为当前 action; latency=k 取 k 步前)
         applied = act_delay_buf[-(latency + 1)] if latency > 0 else action
         action_delta = action - last_action
-        _apply_action(data, applied)
+        _apply_action(data, applied, command)
         last_action = action  # 注意: obs 里的 last_action 用 policy 原始输出 (与 env 一致)
         for _ in range(N_SUBSTEPS):
             mujoco.mj_step(model, data)
 
         # 推理后才更新 history (与训练 step() 顺序一致: step 后 append base_obs)
-        base_obs = _build_obs(data, last_action, command, step)
+        base_obs = _build_obs(data, last_action, command, step, model)
         obs_history = np.roll(obs_history, -1, axis=0)
         obs_history[-1] = base_obs
 

@@ -40,10 +40,13 @@ class GamepadSource:
         self._btn_mode = 1     # B
         self._d0 = D0_CMD_RANGE[0]  # 初始姿态: 驻留态
         self._mode = Mode.MANUAL
+        self._last_poll = time.monotonic()
 
     def poll(self) -> Command | None:
         pump_events()
         now = time.monotonic()
+        dt = now - self._last_poll  # 实测 dt (周期抖动会累积误差, 不硬编码)
+        self._last_poll = now
 
         # --- 急停按钮 ---
         if self._joy.get_button(self._btn_estop):
@@ -69,8 +72,7 @@ class GamepadSource:
         lt_norm = (lt + 1) / 2
         rt_norm = (rt + 1) / 2
         rate = 40.0  # mm/s 调节速率
-        dt = 0.02    # 假定 50Hz poll
-        self._d0 += (rt_norm - lt_norm) * rate * dt
+        self._d0 += (rt_norm - lt_norm) * rate * dt  # 用实测 dt
         self._d0 = max(D0_CMD_RANGE[0], min(D0_CMD_RANGE[1], self._d0))
 
         return Command(v, omega, self._d0, Mode.MANUAL, now)

@@ -16,12 +16,20 @@ CommandArbiter - 多源命令仲裁 + 安全层
 """
 from __future__ import annotations
 
+import os
+import sys
 import time
 from dataclasses import dataclass
 
 from rl.teleop.command import (
     Command, Mode, CommandSource, ArbiterConfig, D0_CMD_RANGE,
 )
+
+# 物理真源 (D0 高速门控阈值)
+_PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _PROJ_ROOT not in sys.path:
+    sys.path.insert(0, _PROJ_ROOT)
+import kuafu_physics as _P
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -62,10 +70,19 @@ class CommandArbiter:
         now = time.monotonic()
         cfg = self.cfg
 
-        # 收集所有源的当前命令(过滤超时源)
-        manual_cmd = self._poll_source_of_mode(Mode.MANUAL, now)
-        auto_cmd = self._poll_source_of_mode(Mode.AUTONOMOUS, now)
-        estop = self._any_estop(now)
+        # 每周期对每个 source 仅 poll 一次并缓存。原因: poll() 可能有副作用
+        # (KeyboardSource/GamepadSource 的 poll() 会按 dt 积分 self._d0 并 pump_events),
+        # 若每源被调多次(原 _poll_source_of_mode×2 + _any_estop 各扫一遍 = 3 次),
+        # d0 会以 3× 速率变化、事件被 pump 3 次。缓存后只 poll 一次。
+        cached: list[Command] = []
+        for src in self.sources:
+            cmd = src.poll()
+            if cmd is not None and now - cmd.stamp <= cfg.stale_time:
+                cached.append(cmd)
+
+        manual_cmd = next((c for c in cached if c.mode == Mode.MANUAL), None)
+        auto_cmd = next((c for c in cached if c.mode == Mode.AUTONOMOUS), None)
+        estop = any(c.mode == Mode.ESTOP for c in cached)
 
         # --- 规则 1: 急停最高优先级 ---
         if estop:
@@ -117,31 +134,6 @@ class CommandArbiter:
         return out
 
     # ------------------------------------------------------------
-    # 源采集
-    # ------------------------------------------------------------
-    def _poll_source_of_mode(self, want: Mode, now: float) -> Command | None:
-        """取指定 mode 的最新有效(未超时)命令, 取第一个命中的源。"""
-        cfg = self.cfg
-        for src in self.sources:
-            cmd = src.poll()
-            if cmd is None:
-                continue
-            if now - cmd.stamp > cfg.stale_time:
-                continue  # 该源数据陈旧
-            if cmd.mode == want:
-                return cmd
-        return None
-
-    def _any_estop(self, now: float) -> bool:
-        cfg = self.cfg
-        for src in self.sources:
-            cmd = src.poll()
-            if cmd is not None and cmd.mode == Mode.ESTOP \
-                    and now - cmd.stamp <= cfg.stale_time:
-                return True
-        return False
-
-    # ------------------------------------------------------------
     # 状态切换 + ramp
     # ------------------------------------------------------------
     def _switch_mode(self, new_mode: Mode, now: float) -> None:
@@ -183,7 +175,11 @@ class CommandArbiter:
         cfg = self.cfg
         v = _clamp(cmd.v, cfg.v_limit[0], cfg.v_limit[1])
         w = _clamp(cmd.omega, cfg.w_limit[0], cfg.w_limit[1])
-        d0 = _clamp(cmd.d0, cfg.d0_limit[0], cfg.d0_limit[1])
+        # D0 高速门控: |v| 或 |ω| 超阈值时限制 D0_max (防高速伸腿抬 COM topple)
+        d0_max = cfg.d0_limit[1]
+        if abs(v) > _P.D0_GATE_V_THRESH or abs(w) > _P.D0_GATE_W_THRESH:
+            d0_max = _P.D0_GATE_MAX_HIGH
+        d0 = _clamp(cmd.d0, cfg.d0_limit[0], d0_max)
         return Command(v, w, d0, cmd.mode, cmd.stamp)
 
     # ------------------------------------------------------------

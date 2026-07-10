@@ -96,8 +96,8 @@ def main():
     print(f"  JAX 设备: {jax.devices()}")
 
     # ---- 创建环境 ----
-    # 当前: 平地训练 (difficulty=0)。课程地形 (terrain.py CurriculumController)
-    #       待平地 reward 收敛后在此处接入: 按 episode 成功率更新 difficulty。
+    # 课程: 全局成功率滑动窗口驱动 difficulty (Curriculum 类, 初始 0.1 即注入 DR+扰动),
+    # 地形(斜坡+台阶)由 KuafuMjxEnv._apply_terrain 按 difficulty 生成。
     from rl.env.kuafu_mjx_env import (
         KuafuMjxEnv, OBS_DIM, PRIVILEGED_DIM, RMA_STATIC_DIM, TRANSIENT_DIM,
         ACTOR_OBS_DIM, CRITIC_PRIV_DIM, CRITIC_OBS_DIM)
@@ -121,7 +121,7 @@ def main():
             self.env = env
             self.num_envs = num_envs
             self.num_actions = env.action_size
-            self.num_obs = ACTOR_OBS_DIM                             # actor = proprio(140) + z(9)
+            self.num_obs = ACTOR_OBS_DIM                             # actor = proprio(148) + z(9)
             self.num_privileged_obs = CRITIC_PRIV_DIM if env._teacher else None  # critic 额外瞬态(3)
             self.device = device
             self.cfg = {"env_name": "kuafu", "num_envs": num_envs}
@@ -154,7 +154,7 @@ def main():
             state_obs = self._to_torch(obs["state"]) if isinstance(obs, dict) else self._to_torch(obs)
             extras = {"observations": {}}
             if isinstance(obs, dict) and "privileged_state" in obs:
-                # critic 吃 actor obs (149) + 瞬态特权 (3) = 152
+                # critic 吃 actor obs (157) + 瞬态特权 (3) = 160
                 priv_obs = self._to_torch(obs["privileged_state"])
                 extras["observations"]["critic"] = torch.cat([state_obs, priv_obs], dim=-1)
             return state_obs, extras

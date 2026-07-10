@@ -7,16 +7,17 @@
 | 组件 | 状态 | 说明 |
 |------|------|------|
 | GPU 环境（CUDA 13 + RTX 4070 + JAX 0.10） | ✅ | torch 2.12+cu130, DLPack 零拷贝 (copy=False 守卫 + 启动校验) |
-| 仿真模型 `kuafu.xml` | ✅ | 闭链残差 0mm, 轮挂 Q 点, armature=0, 碰撞清理 |
-| 物理验证（阶段 0） | ✅ | 11/11, LQR 0.1s 恢复 5° |
-| MJX 环境 `kuafu_mjx_env.py` | ✅ | JAX 向量化 reset/step/reward/obs/DR, 烟测通过 |
-| Teacher PPO 训练 `train.py` | ✅ | RSL-RL 2.x + DLPack 桥接, 全 RNG 播种 + 版本溯源, 烟测 5 iters 通过 |
-| Student 蒸馏 `distill.py` | ✅ | 规范 DAgger (回放缓冲+DataLoader) + 梯度裁剪 + TensorBoard, 待 teacher 训练后跑 |
+| 仿真模型 `kuafu.xml` | ✅ | 闭链残差 0mm, 轮挂 Q 点, armature=0; 轮改 capsule 兼容 MJX 地形碰撞; 4 舵机独立 |
+| 物理验证（阶段 0） | ✅ | **13/13**, LQR pitch 0.1s 恢复 5° + yaw 条件阻尼 + roll PD 调平 0.1s 恢复 3° |
+| MJX 环境 `kuafu_mjx_env.py` | ✅ | 三轴基层(pitch LQR+yaw阻尼+roll PD) + RL残差; 接触obs; 地形(斜坡+台阶); 延迟DR; 烟测通过 |
+| Teacher PPO 训练 `train.py` | ✅ | RSL-RL 2.x + DLPack; actor 157(proprio148+z9), critic 160; 全局成功率课程; 烟测通过 |
+| Student 蒸馏 `distill.py` | ✅ | DAgger + z 回归 (MSE), teacher actor 157 维对齐, 待 teacher 训练后跑 |
 | ONNX 导出 `export_policy.py` | ✅ | teacher (含 normalizer) / student 两种模式 |
 | 显存测算 `probe_envs.py` | ✅ | RTX 4070: 2048 envs 可行, 推荐 1024 |
-| 原生 MuJoCo 回放 `playback.py` | ✅ | viewer 可视化 |
-| **课程地形 `terrain.py`** | ⏳ 未接入 | 平地 reward 收敛后在 train.py 外层接入 |
-| **正式训练** | ⏳ 待启动 | `rl/.venv/bin/python rl/train/train.py --num_envs 1024` |
+| 原生 MuJoCo 回放 `playback.py` | ✅ | viewer 可视化; 三轴基层+RL残差控制律与训练一致 |
+| 课程地形 `terrain.py` | ✅ 已接入 | 斜坡(倾斜平面)+台阶(step box) 由 `KuafuMjxEnv._apply_terrain` 按 difficulty 生成; `terrain.py` 留作课程参数参考 |
+| 遥控仲裁 `teleop/` | ✅ | 多源仲裁+急停+ramp+D0高速门控; poll 缓存(每周期1次) |
+| **正式训练** | ⏳ 待启动 | `rl/.venv/bin/python rl/train/train.py --run_name <代号> --num_envs 1024` |
 
 ## 目录结构
 
@@ -143,14 +144,16 @@ JAX 0.10.2 (cuda13)  ←→  DLPack 零拷贝  ←→  PyTorch 2.12.1 (cu130)
 - **JAX + PyTorch 共享 CUDA 13 runtime**，DLPack 零拷贝交换 GPU 张量
   - 零拷贝由 `dlpack_utils` 以 `from_dlpack(copy=False)` 契约化：设备不一致 / 非连续 / 版本不兼容会立即报错而非静默拷贝；启动期 `verify_dlpack_zero_copy()` 一次性守卫
   - 全 RNG 经 `seed_utils.seed_all(seed)` 统一播种（torch/numpy/random 与 JAX 显式 key 同源），checkpoint 与 `run.json` 写入 jax/torch/cuda 版本与 git 快照以便复现与归因
-- **Teacher**：RSL-RL 内置 ActorCritic [512,512,512]，critic 含特权信息 12 维（9 维静态环境外因 + 3 维瞬态推力），actor 仅本体感受 140 维
-- **Student**：StudentPolicy(trunk + RMA adapter)，参数量随隐藏层同步 scaling
+- **Teacher**：RSL-RL 内置 ActorCritic [512,512,512]，**actor 以本体感受 148(含接触标志) + 静态 latent z 9 = 157 维为条件**（RMA, Kumar 2021），critic 额外吃瞬态推力 3 维共 160 维
+- **Student**：StudentPolicy(主干 [512,512,512] + RMA adapter [32,64,32]→z 9)，部署时 adapter 从 50 步历史在线推断 z，参数量随隐藏层同步 scaling
+- **基层控制**：三轴兜底 — pitch LQR(K 已验证) + yaw 条件阻尼 + roll 腿 PD; RL 残差叠其上; RL 挂掉 → pitch+roll 安全 (见 design.md §5.4)
 - **LQR 底层**：永远在环，RL 挂掉时兜底（K=[-4.47,-61.18,-5.82,-4.02]，LP=56mm）
 
 ## 已知遗留
 
 | 项 | 状态 | 影响 | 计划 |
 |----|------|------|------|
-| `terrain.py` 课程/地形 | 参考规格 (设计文档化); 活跃课程逻辑在 `train.py` 内联 | 不影响平地训练 | 接入真实地形时应在 `KuafuMjxEnv.step` 调用, 或替换内联课程为 `CurriculumController` |
-| 延迟鲁棒性对拍 | `eval_policy.py` / `playback.py` 新增 `--latency` (观测+动作延迟), 可复现训练 latency DR | 落地前建议带延迟跑一遍确认 | 真机/带延迟 sim 对拍 |
-| history_len 4 vs 50 | 环境用 4 步堆叠(140 维), RMA 需 50 步 | 不影响训练（RSL-RL 吃 140 维），蒸馏时已处理 | distill.py 从 50 步序列取 base_obs(35) 喂给 adapter |
+| `terrain.py` 课程参数 | 参考规格; 活跃课程由 `train.py` 的 `Curriculum` 类(全局成功率滑动窗口)驱动, 地形由 `KuafuMjxEnv._apply_terrain` 生成 | 不影响训练 | 真实地形已接入(斜坡+台阶), `terrain.py` 保留作阶段参数参考 |
+| 轮 geom 改 capsule | 为兼容 MJX 地形碰撞(动态圆柱不与 box/heightfield 碰撞) | 接触模型与原 cylinder 略有差异(圆端) | 落地前复跑 `verify_model.py` 11/11 确认物理无回归 |
+| 延迟鲁棒性对拍 | `eval_policy.py` / `playback.py` `--latency` 复现训练 latency DR (索引已修正: delay=k 取 k 步前) | 落地前建议带延迟跑一遍 | 真机/带延迟 sim 对拍 |
+| history_len 4 vs 50 | 环境用 4 步堆叠(140 维), RMA adapter 需 50 步 | 不影响训练（actor 吃 149 维）, 蒸馏时已处理 | distill.py 从 50 步序列取 base_obs(35) 喂给 adapter |

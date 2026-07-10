@@ -5,12 +5,12 @@ KUAFU Teacher 推理模型 — 匹配 RSL-RL 2.x checkpoint 的真实结构
 checkpoint 实际键名 (从 model_0.pt 实读, 2-DOF 五杆 6 维动作):
   model_state_dict:
     std:               (ACTION_DIM,)   动作标准差 (6)
-    actor.0.weight:    (H, OBS_DIM)    actor 输入=OBS_DIM (仅 proprio, 140)
+    actor.0.weight:    (H, OBS_DIM)    actor 输入=OBS_DIM (proprio 148 + z 9 = 157)
     actor.0.bias:      (H,)
     actor.2.weight:    (H, H)
     actor.4.weight:    (H, H)
     actor.6.weight:    (ACTION_DIM, H) 最后一层 Linear 在 Sequential 内 (6)
-    critic.0.weight:   (H, OBS_DIM+PRIVILEGED_DIM)  critic 输入=152 (proprio 140 + 特权 12)
+    critic.0.weight:   (H, ACTOR_OBS_DIM+CRITIC_PRIV_DIM)  critic 输入=160 (actor obs 157 + 瞬态 3)
     critic.6.weight:   (1, H)
   obs_norm_state_dict:
     _mean: (1, OBS_DIM)    EmpiricalNormalization (actor 本体感受)
@@ -19,7 +19,7 @@ checkpoint 实际键名 (从 model_0.pt 实读, 2-DOF 五杆 6 维动作):
   privileged_obs_norm_state_dict:           # critic 特权归一化 (本模块不消费)
     _mean: (1, OBS_DIM+PRIVILEGED_DIM)
 
-  关键: actor 吃 proprio+z(OBS_DIM=140 + Z_DIM=9 = 149), critic 吃 actor obs+瞬态(152)。
+  关键: actor 吃 proprio+z(OBS_DIM=148 + Z_DIM=9 = 157), critic 吃 actor obs+瞬态(160)。
        actor 是 4 层 Linear 全在 Sequential 内 (含输出层), 不是 trunk+head 拆分。
        RMA: 训练时 actor 以静态特权 latent z(9) 为条件 (Kumar 2021), 部署时由
        student adapter 预测 z_hat 替代。obs_norm 键名是 _mean/_var/_std。
@@ -41,9 +41,9 @@ class TeacherInferenceModel(nn.Module):
       action = model(obs_tensor)  # obs: (B, OBS_DIM) → action: (B, ACTION_DIM)
     """
 
-    def __init__(self, obs_dim: int = 149, action_dim: int = 6, hidden: tuple = (512, 512, 512)):
+    def __init__(self, obs_dim: int = 157, action_dim: int = 6, hidden: tuple = (512, 512, 512)):
         super().__init__()
-        # actor: Linear(140,256) ELU Linear(256,256) ELU Linear(256,256) ELU Linear(256,6)
+        # actor: Linear(157,512) ELU Linear(512,512) ELU Linear(512,512) ELU Linear(512,6)
         # 键名: actor.0, actor.2, actor.4, actor.6 (Sequential 索引)
         layers = []
         in_d = obs_dim
@@ -64,7 +64,7 @@ class TeacherInferenceModel(nn.Module):
         return torch.tanh(self.actor(obs_norm))
 
     @classmethod
-    def from_checkpoint(cls, ckpt_path: str, obs_dim: int = 149, action_dim: int = 6) -> "TeacherInferenceModel":
+    def from_checkpoint(cls, ckpt_path: str, obs_dim: int = 157, action_dim: int = 6) -> "TeacherInferenceModel":
         """从 RSL-RL checkpoint 加载, 并断言权重全部命中.
 
         对文件缺失 / 损坏 / 结构不匹配分别给出可操作提示, 而非裸 assert。

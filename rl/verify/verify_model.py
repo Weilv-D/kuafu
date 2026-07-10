@@ -37,13 +37,22 @@ class Report:
         return npass == n
 
 
+def _rotate_vec_by_quat_conj(q, v):
+    """旋转向量 v 由四元数 q 的共轭 (世界→本体系)。与 env/eval_policy 一致。"""
+    w, x, y, z = q[0], q[1], q[2], q[3]
+    q_xyz = np.array([-x, -y, -z])
+    uv = np.cross(q_xyz, v)
+    uuv = np.cross(q_xyz, uv)
+    return v + 2 * (w * uv + uuv)
+
+
 def main():
     print("="*60)
     print("KUAFU 仿真模型物理验证 (design.md §2.6 阶段 0)")
     print("="*60)
 
     # ---- 1. 模型加载 ----
-    print("\n[1/6] 模型加载与自由度")
+    print("\n[1/8] 模型加载与自由度")
     r = Report()
     try:
         m = mujoco.MjModel.from_xml_path(XML)
@@ -63,13 +72,13 @@ def main():
     r.check("keyframe 数=1", m.nkey == 1, f"nkey={m.nkey}")
 
     # ---- 2. 总质量与 COM ----
-    print("\n[2/6] 总质量与质心")
+    print("\n[2/8] 总质量与质心")
     mass = m.body_mass.sum()
     r.check(f"总质量 ≈ {P.M_TOT}", abs(mass - P.M_TOT) < 0.01,
             f"{mass:.3f} kg (期望 {P.M_TOT})")
 
     # ---- 3. 驻留态 keyframe ----
-    print("\n[3/6] 驻留态 keyframe")
+    print("\n[3/8] 驻留态 keyframe")
     mujoco.mj_resetDataKeyframe(m, d, 0)
     mujoco.mj_forward(m, d)
     # 轮中心 Z (wheel_l body 世界坐标)
@@ -85,7 +94,7 @@ def main():
             f"chassis Z={chassis_z:.3f} m")
 
     # ---- 4. 闭链约束残差 ----
-    print("\n[4/6] 闭链约束稳定性")
+    print("\n[4/8] 闭链约束稳定性")
     # 跑 100 步物理看闭链是否发散/爆炸
     d2 = mujoco.MjData(m)
     mujoco.mj_resetDataKeyframe(m, d2, 0)
@@ -99,7 +108,7 @@ def main():
             f"漂移 {drift:.4f} m, 最大速度 {vel_max:.2f} m/s")
 
     # ---- 5. 静态稳定 ----
-    print("\n[5/6] 静态稳定性")
+    print("\n[5/8] 静态稳定性")
     # 腿保持驻留 (position actuator ctrl=0 维持 q=0), 轮无控制 (motor ctrl=0 无力矩)
     # 轮式倒立摆本质不稳定, 无轮控制时机身必然倾倒; 此处验证腿关节在重力下不松脱 (q 保持 ≈0)
     d3 = mujoco.MjData(m)
@@ -115,7 +124,7 @@ def main():
             f"1s 后 hip_A 最大偏移 {hip_drift*1e3:.1f} mrad ({np.degrees(hip_drift):.2f}°)")
 
     # ---- 6. LQR baseline 闭环 ----
-    print("\n[6/6] LQR baseline 平衡能力")
+    print("\n[6/8] LQR baseline 平衡能力")
     # 给 5° 初始 pitch 扰动, 用 LQR K 控制, 看能否恢复
     d4 = mujoco.MjData(m)
     mujoco.mj_resetDataKeyframe(m, d4, 0)
@@ -155,6 +164,88 @@ def main():
         final_th = np.arcsin(np.clip(2*qw*qy, -0.999999, 0.999999))
         r.check("LQR 恢复 5° 扰动", False,
                 f"4s 后仍 {np.degrees(final_th):.1f}° (未恢复)")
+
+    # ---- 7. yaw 条件阻尼基层 ----
+    print("\n[7/8] yaw 条件阻尼基层")
+    # 给初始 yaw 角速度 (低于阈值, 测阻尼收敛); 大 yaw_rate 会耦合 pitch 不稳定,
+    # 基层关闭阻尼 — 故只测小 ωz 阻尼, yaw 命令跟踪交 RL
+    d5 = mujoco.MjData(m)
+    mujoco.mj_resetDataKeyframe(m, d5, 0)
+    d5.qvel[5] = 0.2  # 初始 yaw 角速度 0.2 rad/s (< YAW_DAMP_THRESH=0.3)
+    mujoco.mj_forward(m, d5)
+    yaw_rate_converged = False
+    for step in range(2000):  # 4s
+        qw, qx, qy, qz = d5.qpos[3], d5.qpos[4], d5.qpos[5], d5.qpos[6]
+        q = np.array([qw, qx, qy, qz])
+        lin_vel_local = _rotate_vec_by_quat_conj(q, d5.qvel[0:3])
+        ang_vel_local = _rotate_vec_by_quat_conj(q, d5.qvel[3:6])
+        pitch = np.arcsin(np.clip(2*(qw*qy - qx*qz), -0.999999, 0.999999))
+        if abs(pitch) > np.radians(20):
+            break  # 倒了
+        xdot = lin_vel_local[0]
+        thetadot = ang_vel_local[1]
+        yaw_rate = ang_vel_local[2]
+        F = -(K @ np.array([0.0, pitch, xdot, thetadot]))
+        tau_p = F * P.R / 2.0
+        if abs(yaw_rate) < P.YAW_DAMP_THRESH:
+            tau_diff = np.clip(-P.YAW_KD * yaw_rate, -P.TAU_WHEEL_RATED, P.TAU_WHEEL_RATED)
+        else:
+            tau_diff = 0.0
+        d5.ctrl[0] = tau_p + tau_diff
+        d5.ctrl[1] = tau_p - tau_diff
+        d5.ctrl[2:6] = 0
+        mujoco.mj_step(m, d5)
+        if abs(yaw_rate) < 0.02 and step > 50:
+            yaw_rate_converged = True
+            r.check("yaw 条件阻尼收敛 0.2→<0.02 rad/s", True,
+                    f"{step*0.002:.2f}s 内收敛, pitch={np.degrees(pitch):.1f}°")
+            break
+    if not yaw_rate_converged:
+        q_f = np.array([d5.qpos[3], d5.qpos[4], d5.qpos[5], d5.qpos[6]])
+        avl = _rotate_vec_by_quat_conj(q_f, d5.qvel[3:6])
+        r.check("yaw 条件阻尼收敛 0.2→<0.02 rad/s", False,
+                f"4s 后 yaw_rate={avl[2]:.3f}, pitch={np.degrees(pitch):.1f}°")
+
+    # ---- 8. roll 调平 PD 基层 ----
+    print("\n[8/8] roll 调平 PD 基层")
+    d6 = mujoco.MjData(m)
+    mujoco.mj_resetDataKeyframe(m, d6, 0)
+    # 给 3° 初始 roll 扰动 (绕 X 轴)
+    ph0 = np.radians(3)
+    d6.qpos[3:7] = [np.cos(ph0/2), np.sin(ph0/2), 0, 0]
+    mujoco.mj_forward(m, d6)
+    for step in range(2000):  # 4s
+        qw, qx, qy, qz = d6.qpos[3], d6.qpos[4], d6.qpos[5], d6.qpos[6]
+        q = np.array([qw, qx, qy, qz])
+        lin_vel_local = _rotate_vec_by_quat_conj(q, d6.qvel[0:3])
+        ang_vel_local = _rotate_vec_by_quat_conj(q, d6.qvel[3:6])
+        pitch = np.arcsin(np.clip(2*(qw*qy - qx*qz), -0.999999, 0.999999))
+        roll = np.arctan2(2*(qw*qx + qy*qz), 1 - 2*(qx**2 + qy**2))
+        xdot = lin_vel_local[0]
+        thetadot = ang_vel_local[1]
+        omega_x = ang_vel_local[0]  # 本体系 wx = roll rate
+        F = -(K @ np.array([0.0, pitch, xdot, thetadot]))
+        tau_p = F * P.R / 2.0
+        d6.ctrl[0] = tau_p
+        d6.ctrl[1] = tau_p
+        # roll PD: 左右 D0 差
+        d_d0_mm = -(P.ROLL_KP * roll + P.ROLL_KD * omega_x)
+        d_d0_rad = d_d0_mm / (P.D0_MAX - P.D0_MIN) * 2 * P.HIP_STROKE
+        d6.ctrl[2] = d_d0_rad / 2.0   # hip_A_l
+        d6.ctrl[3] = -d_d0_rad / 2.0  # hip_A_r
+        d6.ctrl[4] = d_d0_rad / 2.0   # hip_B_l
+        d6.ctrl[5] = -d_d0_rad / 2.0  # hip_B_r
+        mujoco.mj_step(m, d6)
+        if abs(roll) < np.radians(0.5) and step > 50:
+            r.check("roll PD 调平 3° 扰动", True,
+                    f"{step*0.002:.2f}s 内恢复到 <0.5°")
+            break
+    else:
+        qw, qx = d6.qpos[3], d6.qpos[4]
+        final_roll = np.arctan2(2*(qw*qx + d6.qpos[5]*d6.qpos[6]),
+                                1 - 2*(qx**2 + d6.qpos[5]**2))
+        r.check("roll PD 调平 3° 扰动", False,
+                f"4s 后仍 {np.degrees(final_roll):.1f}° (未恢复)")
 
     return r.summary()
 

@@ -55,8 +55,8 @@ ALGORITHM = {
 POLICY = {
     "class_name": "ActorCritic",
     "init_noise_std": 1.0,
-    "actor_hidden_dims": [512, 512, 512],   # 主干 MLP: obs(140) → 512×3 → action 6
-    "critic_hidden_dims": [512, 512, 512],  # value head (输入 140 proprio + 12 特权 = 152)
+    "actor_hidden_dims": [512, 512, 512],   # 主干 MLP: obs(157=proprio148+z9) → 512×3 → action 6
+    "critic_hidden_dims": [512, 512, 512],  # value head (输入 actor obs 157 + 瞬态 3 = 160)
     "activation": "elu",
 }
 

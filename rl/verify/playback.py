@@ -27,7 +27,7 @@ import mujoco.viewer
 import kuafu_physics as P
 
 # 观测/动作维度 (与训练环境单一真源一致)
-from rl.env.kuafu_env import OBS_DIM_BASE, OBS_DIM, ACTION_DIM  # 35 / 140 / 6
+from rl.env.kuafu_env import OBS_DIM_BASE, OBS_DIM, ACTION_DIM  # 37 / 148 / 6
 
 # 从 eval_policy.py 导入统一的物理工具函数和 obs 构造器
 from rl.verify.eval_policy import (
@@ -78,23 +78,23 @@ def playback_teacher(ckpt_path: str, xml_path: str, duration: float = 10.0, late
 
             # 50Hz: 推理 (用延迟后的 obs, 第一步全 0 与训练 reset 一致)
             # latency=k 取 k 步前 = buf[-(k+1)], 与训练 _delayed_obs 语义一致
-            # teacher actor 条件于静态特权 z(9), 标称评估下补 nominal z → 149 维
-            inf_obs140 = obs_delay_buf[-(latency + 1)] if latency > 0 else obs_history.flatten()
-            inf_obs = np.concatenate([inf_obs140, NOMINAL_STATIC])
+            # teacher actor 条件于静态特权 z(9), 标称评估下补 nominal z → 157 维
+            inf_obs148 = obs_delay_buf[-(latency + 1)] if latency > 0 else obs_history.flatten()
+            inf_obs = np.concatenate([inf_obs148, NOMINAL_STATIC])
             with torch.no_grad():
                 action = teacher(torch.from_numpy(inf_obs).float().unsqueeze(0)).numpy()[0]
             applied = act_delay_buf[-(latency + 1)] if latency > 0 else action
 
             # 应用动作 + 500Hz 物理子步: 加 viewer.lock 防止渲染线程并发读/重分配 data 导致堆损坏
+            command = np.array([0.0, 0.0, P.D0_MIN])
             with viewer.lock():
-                _apply_action(data, applied)
+                _apply_action(data, applied, command)
                 last_action = action
                 for _ in range(N_SUBSTEPS):
                     mujoco.mj_step(model, data)
 
             # 推理后才更新 history (与训练 step() 顺序一致)
-            command = np.array([0.0, 0.0, P.D0_MIN])
-            base_obs = _build_obs(data, last_action, command, step)
+            base_obs = _build_obs(data, last_action, command, step, model)
             obs_history = np.roll(obs_history, -1, axis=0)
             obs_history[-1] = base_obs
             obs_delay_buf.append(obs_history.flatten().astype(np.float32).copy())
@@ -172,15 +172,15 @@ def playback_student(ckpt_path: str, xml_path: str, duration: float = 10.0, late
             applied = act_delay_buf[-(latency + 1)] if latency > 0 else action
 
             # 加 viewer.lock 防止渲染线程并发读/重分配 data 导致堆损坏
+            command = np.array([0.0, 0.0, P.D0_MIN])
             with viewer.lock():
-                _apply_action(data, applied)
+                _apply_action(data, applied, command)
                 last_action = action
                 for _ in range(N_SUBSTEPS):
                     mujoco.mj_step(model, data)
 
             # 推理后才更新 history (与训练 step() 顺序一致)
-            command = np.array([0.0, 0.0, P.D0_MIN])
-            base_obs = _build_obs(data, last_action, command, step)
+            base_obs = _build_obs(data, last_action, command, step, model)
             obs_history = np.roll(obs_history, -1, axis=0)
             obs_history[-1] = base_obs
             rma_history = np.roll(rma_history, -1, axis=1)

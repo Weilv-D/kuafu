@@ -85,10 +85,11 @@ ACT_HIP_B_R = 5
 HIP_STROKE = 1.52    # 曲柄半行程 rad
 
 # 观测维度
-# 训练用 4 步堆叠 → 140 维 proprio (RSL-RL ActorCritic 直接消费)
-OBS_DIM_BASE = 35    # 全观测 4 舵机 (hip_A + hip_B 各左右): 3+3+4+8+2+4+6+3+2
+# 训练用 4 步堆叠 → 148 维 proprio (RSL-RL ActorCritic 直接消费)
+# base 37 维: 3+3+4+8+2+4+6+3+2+2 (含左右轮接触标志 2 维, M2/M4 涌现关键)
+OBS_DIM_BASE = 37    # 全观测 4 舵机 + 接触标志
 HISTORY_STEPS = 4
-OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS  # 140 本体感受 (4步堆叠)
+OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS  # 148 本体感受 (4步堆叠)
 PRIVILEGED_DIM = 12    # teacher critic 特权 = 静态外因(9) + 瞬态扰动(3)
 # 特权观测拆分 (RMA 最佳实践, Kumar et al. RSS 2021):
 # - 静态环境外因 (RMA latent, 9 维): friction/mass/com/inertia/torque/deadband/delay
@@ -102,14 +103,14 @@ DELAY_BUFFER_LEN = 3   # 最大延迟缓冲 (3步×20ms=60ms, 覆盖 DR_DELAY_AC
 
 # RMA actor 条件化 (Kumar et al. RSS 2021): 训练阶段 base policy 必须以静态特权
 # latent z(9) 为条件, 部署时由 adapter 从历史预测 z_hat 替代。故:
-#   actor obs  = proprio(140) + z(9)        = 149
-#   critic obs = actor obs(149) + 瞬态(3)   = 152
+#   actor obs  = proprio(148) + z(9)       = 157
+#   critic obs = actor obs(157) + 瞬态(3)  = 160
 # (瞬态 active_push 由本体感受在线感知, 仅 critic 额外特权, 不进 latent)
-PROPRIO_DIM = OBS_DIM                      # 140 本体感受 (4步堆叠)
+PROPRIO_DIM = OBS_DIM                      # 148 本体感受 (4步堆叠)
 Z_DIM = RMA_STATIC_DIM                     # 9 静态环境外因 latent
-ACTOR_OBS_DIM = PROPRIO_DIM + Z_DIM        # 149 (actor 输入)
+ACTOR_OBS_DIM = PROPRIO_DIM + Z_DIM        # 157 (actor 输入)
 CRITIC_PRIV_DIM = TRANSIENT_DIM            # 3 (critic 额外瞬态特权)
-CRITIC_OBS_DIM = ACTOR_OBS_DIM + CRITIC_PRIV_DIM  # 152 (critic 输入)
+CRITIC_OBS_DIM = ACTOR_OBS_DIM + CRITIC_PRIV_DIM  # 160 (critic 输入)
 
 # 物理常量 (JAX 数组)
 LQR_K = jp.array(P.LQR_K)          # [-4.47, -61.18, -5.82, -4.02]
@@ -121,6 +122,12 @@ G = P.G                             # 9.81
 
 # DDSM back-EMF: 额定转速下力矩线性衰减
 OMEGA_NOLOAD = P.RPM_WHEEL_NOLOAD * 2 * jp.pi / 60  # 315 rpm → rad/s
+
+# 基层 yaw 条件阻尼 + roll 调平增益 (与 kuafu_physics 同源, STM32 1kHz 兜底层)
+YAW_KD = P.YAW_KD             # yaw 阻尼 (仅低 ωz 时生效)
+YAW_DAMP_THRESH = P.YAW_DAMP_THRESH  # yaw 阻尼阈值
+ROLL_KP = P.ROLL_KP     # roll 调平比例 (mm/rad)
+ROLL_KD = P.ROLL_KD     # roll 阻尼
 
 # 命令范围
 V_CMD_RANGE = (-0.5, 0.5)     # m/s (轮缘额定 0.82 m/s, 留余量)
@@ -373,14 +380,15 @@ class KuafuMjxEnv(MjxEnv):
         w_cmd = jp.where(is_zero, 0.0, w_cmd)
         return rng, v_cmd, w_cmd, d0_cmd
 
-    # ---- LQR 底层 ----
-    def _lqr_balance(self, data: mjx.Data) -> jax.Array:
-        """LQR 轮式倒立摆平衡: 输出每轮力矩.
+    # ---- LQR-lite 基层 (pitch + conditional yaw 阻尼, 三轴兜底之二) ----
+    def _lqr_balance(self, data: mjx.Data, env_state: EnvState) -> Tuple[jax.Array, jax.Array]:
+        """基层轮式倒立摆: pitch LQR + 条件 yaw 阻尼。返回 (tau_pitch, tau_diff)。
 
-        使用本体感受投影：
-        - xdot: 本体坐标系前向速度 (vx_local)
-        - theta: 本体坐标系 Pitch 角 (解耦后的 arcsin)
-        - thetadot: 本体坐标系 Pitch 角速度 (wy_local)
+        pitch: LQR 状态 [x, θ, ẋ, θ̇] → 纵置力 F, 两轮等分 τ_pitch = F·R/2
+        yaw:   条件阻尼 — 仅在 |ωz| < YAW_DAMP_THRESH 时施加小阻尼抑制漂移;
+               |ωz| 大时关闭 (任何差速扭力在高 yaw_rate 下耦合 pitch 不稳定,
+               同轴轮 IP 物理特性, 见 verify_model 标定)。yaw 命令跟踪交 RL。
+        RL 挂掉时: pitch 稳 + yaw 不低频漂移 (高频 yaw 漂移属任务, 非安全)。
         """
         qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
         q = jp.stack([qw, qx, qy, qz])
@@ -391,15 +399,22 @@ class KuafuMjxEnv(MjxEnv):
 
         # 本体系角速度
         ang_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
-        thetadot = ang_vel_local[1]  # wy
+        thetadot = ang_vel_local[1]  # wy = pitch rate
+        yaw_rate = ang_vel_local[2]  # wz = yaw rate
 
-        # 本体系 Pitch (解耦)
+        # pitch LQR
         theta = jp.arcsin(jp.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
-
         state = jp.stack([0.0, theta, xdot, thetadot])
         F = -(LQR_K @ state)
-        tau = F * WHEEL_R / 2.0
-        return tau
+        tau_pitch = F * WHEEL_R / 2.0
+
+        # 条件 yaw 阻尼: 仅低 yaw_rate 时抑制漂移; 高 yaw_rate 关闭防 pitch 耦合
+        tau_diff = jp.where(
+            jp.abs(yaw_rate) < YAW_DAMP_THRESH,
+            jp.clip(-YAW_KD * yaw_rate, -TAU_WHEEL_RATED, TAU_WHEEL_RATED),
+            0.0)
+
+        return tau_pitch, tau_diff
 
     # ---- DDSM back-EMF 限制 ----
     def _limit_wheel_torque(self, tau: jax.Array, omega: jax.Array) -> jax.Array:
@@ -409,8 +424,22 @@ class KuafuMjxEnv(MjxEnv):
         return jp.clip(tau, -tau_avail, tau_avail)
 
     # ---- 观测 ----
+    def _wheel_contact(self, data: mjx.Data) -> jax.Array:
+        """左右轮接触标志 (2 维): 1.0 = 接地, 0.0 = 离地。
+
+        从 data.contact.geom 过滤含轮 geom 的接触。M2/M4 涌现关键:
+        策略据此判断轮是否接地, 决定伸腿/调平时机。
+        """
+        # contact.geom: (ncon, 2) — 每个接触的两个 geom id; 非活动接触 geom=-1
+        geom = data.contact.geom
+        l_mask = (geom[:, 0] == self._wheel_l_geom_id) | (geom[:, 1] == self._wheel_l_geom_id)
+        r_mask = (geom[:, 0] == self._wheel_r_geom_id) | (geom[:, 1] == self._wheel_r_geom_id)
+        contact_l = jp.any(l_mask).astype(jp.float32)
+        contact_r = jp.any(r_mask).astype(jp.float32)
+        return jp.stack([contact_l, contact_r])
+
     def _base_observation(self, data: mjx.Data, env_state: EnvState) -> jax.Array:
-        """35 维本体感受观测 (2-DOF 五杆: 全观测 4 舵机 hip_A + hip_B 各左右)."""
+        """37 维本体感受观测 (含左右轮接触标志, M2/M4 涌现关键)."""
         # 机身姿态 (3): roll/pitch/yaw from quaternion (Pitch 采用 arcsin)
         qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
         roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
@@ -457,6 +486,9 @@ class KuafuMjxEnv(MjxEnv):
         phase = env_state.step_count.astype(jp.float32) / EPISODE_LENGTH
         phase_clock = jp.stack([jp.sin(2 * jp.pi * phase), jp.cos(2 * jp.pi * phase)])
 
+        # 接触标志 (2): 左右轮是否接地 (M2/M4 涌现关键)
+        contact = self._wheel_contact(data)
+
         return jp.concatenate([
             attitude,        # 3
             ang_vel,         # 3
@@ -467,20 +499,8 @@ class KuafuMjxEnv(MjxEnv):
             last_action,     # 6
             command,         # 3
             phase_clock,     # 2
-        ])                    # = 35
-
-    def _privileged_observation(self, env_state: EnvState) -> jax.Array:
-        """12 维特权观测 (teacher critic only): 静态外因(9) + 瞬态扰动(3)."""
-        return jp.concatenate([
-            env_state.friction[jp.newaxis],      # 1
-            env_state.mass_scale[jp.newaxis],     # 1
-            env_state.com_bias,                   # 3
-            env_state.inertia_scale[jp.newaxis],  # 1
-            env_state.torque_scale[jp.newaxis],   # 1
-            env_state.deadband[jp.newaxis],       # 1 死区真值
-            env_state.delay_steps.astype(jp.float32)[jp.newaxis],  # 1 延迟步数真值
-            env_state.active_push,                # 3 实际施加的扰动力真值 (瞬态)
-        ])
+            contact,         # 2
+        ])                    # = 37
 
     def _static_privileged_observation(self, env_state: EnvState) -> jax.Array:
         """9 维静态环境外因 (RMA latent 监督目标): 不含瞬态 active_push."""
@@ -514,16 +534,16 @@ class KuafuMjxEnv(MjxEnv):
 
         obs_history 已在 step() 中更新 (含最新帧); 此处对 policy 观测施加观测延迟。
 
-        RMA (Kumar 2021): teacher actor 以 proprio(140) + 静态特权 latent z(9) = 149
+        RMA (Kumar 2021): teacher actor 以 proprio(148) + 静态特权 latent z(9) = 157
         为条件 (训练时喂真值, 部署时由 adapter 预测 z_hat 替代); critic 额外吃瞬态
-        扰动 active_push(3) → 152。student 模式返扁平 proprio(140), 由外部 adapter
+        扰动 active_push(3) → 160。student 模式返扁平 proprio(148), 由外部 adapter
         补 z_hat。
         """
-        flat_obs = self._delayed_obs(env_state)    # (140,) 已含观测延迟
+        flat_obs = self._delayed_obs(env_state)    # (148,) 已含观测延迟
 
         if self._teacher:
             static_z = self._static_privileged_observation(env_state)  # (9,)
-            actor_obs = jp.concatenate([flat_obs, static_z])          # (149,)
+            actor_obs = jp.concatenate([flat_obs, static_z])          # (157,)
             transient = env_state.active_push                        # (3,) critic 额外特权
             return {"state": actor_obs, "privileged_state": transient}
         return flat_obs
@@ -564,23 +584,28 @@ class KuafuMjxEnv(MjxEnv):
         ang_vel_error = (yaw_rate - env_state.w_cmd) ** 2
         ang_vel_tracking = jp.exp(-ang_vel_error / 0.25)
 
-        # default_pose: 关节空间正则, 惩罚偏离默认站立姿态 (joint pose regularization)
-        # 2-DOF 五杆: 4 个曲柄都应回到目标。d0_cmd=dwell 时目标=0 (全部曲柄归零)
-        # 伸展时 hip_A 目标=-d0_norm×HIP_STROKE, hip_B 镜像 (对称伸展驻留构型)
+        # d0_avg_tracking: 关节正则, 只惩罚**左右平均** D0 偏离 d0_cmd (不惩罚左右差)
+        # → 允许左右 D0 不等用于 roll 调平 (原 default_pose 把 4 髋锁同一 d0_cmd, 抑制调平)
+        # 2-DOF 五杆: 左右平均 D0 目标: hip_A_target = -d0_norm×HIP_STROKE, hip_B 镜像
         d0_norm = (env_state.d0_cmd - P.D0_MIN) / (P.D0_MAX - P.D0_MIN)
         hip_A_target = -d0_norm * HIP_STROKE       # A 链目标 (伸展为负)
         hip_B_target = d0_norm * HIP_STROKE        # B 链镜像 (对称构型 Q 在 X=0)
-        pose_err = (
-            (data.qpos[QPOS_HIP_A_L] - hip_A_target) ** 2
-            + (data.qpos[QPOS_HIP_A_R] - hip_A_target) ** 2
-            + (data.qpos[QPOS_HIP_B_L] - hip_B_target) ** 2
-            + (data.qpos[QPOS_HIP_B_R] - hip_B_target) ** 2
-        ) / 2.0
-        default_pose = jp.exp(-pose_err / 0.1)
+        # 左右平均 (A_l+A_r)/2 等 → 只惩罚对称偏离, 不惩罚左右差
+        avg_A = (data.qpos[QPOS_HIP_A_L] + data.qpos[QPOS_HIP_A_R]) / 2.0
+        avg_B = (data.qpos[QPOS_HIP_B_L] + data.qpos[QPOS_HIP_B_R]) / 2.0
+        pose_err = (avg_A - hip_A_target) ** 2 + (avg_B - hip_B_target) ** 2
+        d0_avg_tracking = jp.exp(-pose_err / 0.1)
 
-        # extension_cost: 仅在 D0 伸展时惩罚 (d0=dwell 时为 0)。default_pose 把腿锁向
-        # d0_cmd 目标, 但无条件奖励伸展会与"平衡需挪腿移 COM"冲突且抬高 COM、降低倒立摆
-        # 稳定裕度。故伸展按 d0_norm 随能量/风险加罚, 与平衡解耦。
+        # roll_leveling: 显式奖励机身水平 (roll→0)。机构支持左右 D0 不等调平,
+        # 此项激活该能力 (原无, default_pose 反而抑制)。
+        roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
+        roll_leveling = jp.exp(-roll ** 2 / 0.05)  # σ=0.05 rad²≈(13°)²
+
+        # contact_asymmetry_penalty: 抑制长时间单轮卸载 (限制 M4 为短暂轻抬)
+        contact = self._wheel_contact(data)
+        contact_asym = -jp.abs(contact[0] - contact[1])
+
+        # extension_cost: 仅在 D0 伸展时惩罚 (d0=dwell 时为 0)。
         hip_ext = (
             jp.abs(data.qpos[QPOS_HIP_A_L]) + jp.abs(data.qpos[QPOS_HIP_A_R])
             + jp.abs(data.qpos[QPOS_HIP_B_L]) + jp.abs(data.qpos[QPOS_HIP_B_R])
@@ -629,8 +654,10 @@ class KuafuMjxEnv(MjxEnv):
             + 0.5 * ang_vel_tracking
             + 1.0 * orientation
             + 0.5 * tilt_cost
-            + 0.3 * default_pose
-            + 0.3 * extension_cost
+            + 0.3 * d0_avg_tracking
+            + 1.0 * roll_leveling
+            + 0.5 * extension_cost
+            + 0.3 * contact_asym
             + 0.1 * alive
             + 0.05 * ang_vel_xy
             + 0.01 * action_rate
@@ -772,12 +799,15 @@ class KuafuMjxEnv(MjxEnv):
             action[jp.newaxis, :],
         ], axis=0)
 
-        # ---- LQR 底层 (torque_scale 模拟电机常数偏差, 对 LQR+RL 统一生效) ----
-        tau_lqr = self._lqr_balance(data) * env_state.torque_scale
+        # ---- 基层 LQR-lite (pitch + yaw, torque_scale 模拟电机常数偏差) ----
+        tau_pitch, tau_diff = self._lqr_balance(data, env_state)
+        tau_pitch = tau_pitch * env_state.torque_scale
+        tau_diff = tau_diff * env_state.torque_scale
 
         # ---- RL 残差叠加 (用延迟后的动作) ----
-        tau_wheel_l = tau_lqr + delayed_action[0] * TAU_WHEEL_RATED * env_state.torque_scale
-        tau_wheel_r = tau_lqr + delayed_action[1] * TAU_WHEEL_RATED * env_state.torque_scale
+        # 轮: τ_L = τ_pitch + τ_diff + Δτ_L·τ_rated, τ_R = τ_pitch - τ_diff + Δτ_R·τ_rated
+        tau_wheel_l = tau_pitch + tau_diff + delayed_action[0] * TAU_WHEEL_RATED * env_state.torque_scale
+        tau_wheel_r = tau_pitch - tau_diff + delayed_action[1] * TAU_WHEEL_RATED * env_state.torque_scale
         tau_wheel_l = self._limit_wheel_torque(
             jp.clip(tau_wheel_l, -TAU_WHEEL_STALL, TAU_WHEEL_STALL),
             data.qvel[QVEL_WHEEL_L])
@@ -785,9 +815,34 @@ class KuafuMjxEnv(MjxEnv):
             jp.clip(tau_wheel_r, -TAU_WHEEL_STALL, TAU_WHEEL_STALL),
             data.qvel[QVEL_WHEEL_R])
 
-        # 腿: 位置目标 (q=0 = 驻留态, delayed_action±1 → ±HIP_STROKE rad)
-        # 2-DOF 五杆: action[2:6] 分别为 4 舵机目标 (q_hip_A_l/r, q_hip_B_l/r)
-        hip_goal = delayed_action[2:6] * HIP_STROKE
+        # ---- 腿: 基层(D0对称 + roll 调平 PD) + RL 位置残差 ----
+        # 基层 D0 对称目标: d0_cmd → hip_A_target = -d0_norm·HIP_STROKE, hip_B 镜像
+        # roll 调平: ΔD0 = -Kp·roll - Kd·ωx → 左腿 += ΔD0/2, 右腿 -= ΔD0/2 (mm → rad)
+        # RL 残差: delayed_action[2:6]·HIP_STROKE 叠加在基层之上 (含轻量 M4 不对称)
+        qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
+        roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
+        q = jp.stack([qw, qx, qy, qz])
+        ang_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
+        omega_x = ang_vel_local[0]  # roll rate
+        d0_norm = (env_state.d0_cmd - P.D0_MIN) / (P.D0_MAX - P.D0_MIN)
+        hip_A_base = -d0_norm * HIP_STROKE       # A 链对称目标 (伸展为负)
+        hip_B_base = d0_norm * HIP_STROKE        # B 链镜像
+
+        # roll 调平: 左右 D0 差 (mm → rad, 经 HIP_STROKE 归一化)
+        d_d0_mm = -(ROLL_KP * roll + ROLL_KD * omega_x)  # 正 roll → 缩左伸右 (符号待标定)
+        d_d0_rad = d_d0_mm / (P.D0_MAX - P.D0_MIN) * 2 * HIP_STROKE  # mm→归一化→rad
+        hip_A_l_base = hip_A_base + d_d0_rad / 2.0
+        hip_A_r_base = hip_A_base - d_d0_rad / 2.0
+        hip_B_l_base = hip_B_base + d_d0_rad / 2.0
+        hip_B_r_base = hip_B_base - d_d0_rad / 2.0
+
+        # RL 残差叠加
+        hip_goal = jp.stack([
+            hip_A_l_base + delayed_action[2] * HIP_STROKE,
+            hip_A_r_base + delayed_action[3] * HIP_STROKE,
+            hip_B_l_base + delayed_action[4] * HIP_STROKE,
+            hip_B_r_base + delayed_action[5] * HIP_STROKE,
+        ])
 
         # 舵机死区: 当目标与当前实际位置偏差小于 deadband 时，设置目标等于当前位置，输出 0 驱动力矩
         actual_hips = jp.stack([
