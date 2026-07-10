@@ -55,6 +55,7 @@ static void MX_DMA_Init(void);
 static void System_Initial_Setup(void);
 static void Pi_Command_Snapshot(Pi_Command_Heartbeat_t *hb, Pi_Command_Action_t *act);
 static int16_t Servo_Angle_To_Ticks(float angle_rad, int idx);
+static float Servo_Feedback_Angle(int idx);
 void Error_Handler(void);
 
 int main(void) {
@@ -168,19 +169,20 @@ int main(void) {
                     g_lqr.target_velocity = hb.target_velocity;
                     g_lqr.target_yaw_rate = hb.target_yaw_rate;
 
-                    /* Run LQR once per 250 Hz cycle; cache both wheel commands */
+                    /* Run LQR once per 250 Hz cycle; cache both wheel commands.
+                     * Wheel velocity feedback is mapped into the body frame. */
                     lqr_update(&g_lqr,
                                body_pitch,
                                body_pitch_rate,
-                               g_ddsm_left.velocity_rads,
-                               g_ddsm_right.velocity_rads,
+                               WHEEL_DIR_L * g_ddsm_left.velocity_rads,
+                               WHEEL_DIR_R * g_ddsm_right.velocity_rads,
                                act.delta_torque_l,
                                act.delta_torque_r,
                                0.004f,
                                &g_ctrl_tau_l,
                                &g_ctrl_tau_r);
 
-                    ddsm_set_torque(&huart2, DDSM_LEFT_ID, g_ctrl_tau_l);
+                    ddsm_set_torque(&huart2, DDSM_LEFT_ID, WHEEL_DIR_L * g_ctrl_tau_l);
                 } else {
                     /* Safe stop wheels if in FAULT or INIT */
                     g_ctrl_tau_l = 0.0f;
@@ -200,7 +202,7 @@ int main(void) {
             /* --- Slot 1: Command & Poll Right DDSM Motor (uses cached torque) --- */
             else if (slot == 1) {
                 if (g_safety_state.current_mode != STATE_FAULT && g_safety_state.current_mode != STATE_INIT) {
-                    ddsm_set_torque(&huart2, DDSM_RIGHT_ID, g_ctrl_tau_r);
+                    ddsm_set_torque(&huart2, DDSM_RIGHT_ID, WHEEL_DIR_R * g_ctrl_tau_r);
                 } else {
                     ddsm_set_torque(&huart2, DDSM_RIGHT_ID, 0.0f);
                 }
@@ -224,20 +226,22 @@ int main(void) {
                                  g_imu.gyro[1], 
                                  g_imu.gyro[2]);
 
+                /* Report joint feedback in the shared sim/body frame so it is
+                 * symmetric with the command contract (mirror + zero applied). */
                 float servo_pos[4], servo_vel[4], servo_cur[4];
                 for (int i = 0; i < 4; i++) {
-                    servo_pos[i] = g_servos[i].position_rad;
-                    servo_vel[i] = g_servos[i].velocity_rads;
+                    servo_pos[i] = Servo_Feedback_Angle(i);
+                    servo_vel[i] = (float)g_servo_dir[i] * g_servos[i].velocity_rads;
                     servo_cur[i] = g_servos[i].current_a;
                 }
-                
-                /* Calculate cumulative wheel angles in radians */
+
+                /* Single-turn wheel angle (raw); velocity/torque mapped to body frame */
                 float wheel_l_pos = g_ddsm_left.position_rad;
                 float wheel_r_pos = g_ddsm_right.position_rad;
 
-                pi_link_send_joints(&huart6, 
-                                    wheel_l_pos, g_ddsm_left.velocity_rads, g_ddsm_left.torque,
-                                    wheel_r_pos, g_ddsm_right.velocity_rads, g_ddsm_right.torque,
+                pi_link_send_joints(&huart6,
+                                    wheel_l_pos, WHEEL_DIR_L * g_ddsm_left.velocity_rads, WHEEL_DIR_L * g_ddsm_left.torque,
+                                    wheel_r_pos, WHEEL_DIR_R * g_ddsm_right.velocity_rads, WHEEL_DIR_R * g_ddsm_right.torque,
                                     servo_pos, servo_vel, servo_cur);
             }
 
@@ -388,6 +392,16 @@ static void Pi_Command_Snapshot(Pi_Command_Heartbeat_t *hb, Pi_Command_Action_t 
  */
 static int16_t Servo_Angle_To_Ticks(float angle_rad, int idx) {
     return (int16_t)((float)g_servo_dir[idx] * angle_rad * SERVO_TICKS_PER_RAD) + g_servo_center[idx];
+}
+
+/**
+ * @brief Converts a decoded servo position (driver frame, relative to
+ *        SERVO_CENTER_TICKS) into the sim/command frame, applying the per-servo
+ *        mechanical zero and mirror direction. Inverse of Servo_Angle_To_Ticks.
+ */
+static float Servo_Feedback_Angle(int idx) {
+    float center_offset = (float)(SERVO_CENTER_TICKS - g_servo_center[idx]) / SERVO_TICKS_PER_RAD;
+    return (float)g_servo_dir[idx] * (g_servos[idx].position_rad + center_offset);
 }
 
 /**

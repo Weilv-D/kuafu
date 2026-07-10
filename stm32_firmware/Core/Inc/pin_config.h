@@ -94,6 +94,13 @@
 #define DDSM_RAW_TO_TORQUE      (1.0f / DDSM_TORQUE_TO_RAW)
 #define DDSM_MAX_TORQUE_NM      1.1f
 
+/* Wheel rotation direction mapping (body frame: +torque/+velocity = forward).
+ * Left/right hub motors may be mirror mounted; set the affected side to -1.0f.
+ * Applied to both torque commands and velocity feedback so the LQR and the Pi
+ * telemetry share one consistent body frame. Verify on bench (defaults: none). */
+#define WHEEL_DIR_L             (+1.0f)
+#define WHEEL_DIR_R             (+1.0f)
+
 /* 5-Bar Linkage Kinematics parameters (meters) */
 #define KIN_LEG_A               0.093f          /* Upper leg crank length 'a' (93mm) */
 #define KIN_LEG_B               0.149f          /* Lower leg rod length 'b' (149mm)  */

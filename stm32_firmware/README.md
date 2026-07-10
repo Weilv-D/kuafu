@@ -158,14 +158,17 @@
 *   **动作顺序**：`target_q[4]` 顺序为 `[LF, RF, LB, RB]`，即 `[hip_A_l, hip_A_r, hip_B_l, hip_B_r]`；A 链为前腿（髋点 X=-26mm），B 链为后腿（髋点 X=+26mm）。
 *   **镜像与零位由固件处理**：`tick = SERVO_DIR[i] · q[i] · SERVO_TICKS_PER_RAD + SERVO_CENTER[i]`。因仿真模型左右髋同为 +Y 轴、而真机舵机镜像安装，固件对右侧（`_r`）舵机取负（`SERVO_DIR` 默认 `{+1,-1,+1,-1}`）。
 *   **STAND/CLIMB**：由固件本地五杆逆解 `kinematics_solve_ik(D0)` 生成 dwell 相对角，A 链角送 LF/RF、B 链角送 LB/RB，零位约定与 ACTIVE 模式一致。
+*   **反馈同帧**：上报给树莓派的关节反馈（舵机位置/速度、轮速/力矩）经同一 `SERVO_DIR`/`SERVO_CENTER`、`WHEEL_DIR` 逆映射回 sim/机体帧，与下发指令共用同一参考系。
+*   **轮向**：轮毂电机以机体帧（+力矩/+速度即前进）约定；若左右电机镜像安装，由 `WHEEL_DIR_L/R` 取负（默认 `+1`），同时作用于力矩指令与速度反馈。
 
 ### 上板标定清单（代码留占位，须实测填值）
 
 1.  `pin_config.h: SERVO_CENTER_INIT` —— 各舵机机械零位 tick（默认 2048）。
 2.  `pin_config.h: SERVO_DIR_INIT` —— 各舵机镜像符号实测复核（默认 `{+1,-1,+1,-1}`）。
-3.  `pin_config.h: ATT_PITCH / ATT_PITCH_RATE_*` —— IMU 轴向：静态倾斜机身确认 pitch 方向与单调性正确。
-4.  `kinematics.c` —— dwell 参考角随实测机械零位微调。
-5.  电池监测：当前 `main.c` 中 `dummy_battery_mv` 为占位模拟值，硬件未接 ADC 分压，暂不做欠压保护。
+3.  `pin_config.h: WHEEL_DIR_L / WHEEL_DIR_R` —— 轮毂电机方向实测复核（默认 `+1`）。
+4.  `pin_config.h: ATT_PITCH / ATT_PITCH_RATE_*` —— IMU 轴向：静态倾斜机身确认 pitch 方向与单调性正确。
+5.  `kinematics.c` —— dwell 参考角随实测机械零位微调。
+6.  电池监测：当前 `main.c` 中 `dummy_battery_mv` 为占位模拟值，硬件未接 ADC 分压，暂不做欠压保护。
 
 ## 协议与文档参考来源
 
