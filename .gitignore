@@ -5,6 +5,10 @@
 # ---- CAD 模型(体积大,单独管理)----
 3Dmodel/
 
+# ---- 训练日志 ----
+train.log
+train_*.log
+
 # ---- Python ----
 __pycache__/
 *.py[cod]
