@@ -45,20 +45,24 @@ def make_train_cfg() -> dict:
 
 
 class Curriculum:
-    """全局课程: 按成功率滑动窗口连续提升 difficulty (DR/扰动强度).
+    """全局课程: 按成功率滑动窗口双向调节 difficulty (DR/扰动强度).
 
     设计参考 terrain.py CurriculumController 与 ETH legged_gym: 训练初期即设难度下限,
     注入 DR + 随机推力(见 kuafu_mjx_env push), 避免策略过拟合标称参数、永久卡在
     difficulty=0 (原 per-episode ±0.05 在训练初期频繁跌倒时永不上升的缺陷)。
+
+    双向调节: 成功率 ≥ threshold 升级, ≤ fallback_threshold 降级;
+    降级让策略退化 (如熵坍缩后) 时能回退到可驾驭的难度恢复, 避免永久卡死。
     """
 
     def __init__(self, start: float = 0.1, max_d: float = 1.0, step: float = 0.05,
-                 window: int = 200, threshold: float = 0.8):
+                 window: int = 200, threshold: float = 0.8, fallback_threshold: float = 0.4):
         self.d = start
         self.max_d = max_d
         self.step = step
         self.window = window
         self.threshold = threshold
+        self.fallback_threshold = fallback_threshold
         self._buf = []
 
     def update(self, successes):
@@ -70,6 +74,8 @@ class Curriculum:
             rate = sum(self._buf) / len(self._buf)
             if rate >= self.threshold and self.d < self.max_d:
                 self.d = min(self.max_d, self.d + self.step)
+            elif rate <= self.fallback_threshold and self.d > 0.1:
+                self.d = max(0.1, self.d - self.step)
 
 
 def main():
@@ -78,6 +84,8 @@ def main():
     parser.add_argument("--num_envs", type=int, default=RUN["num_envs"], help="并行环境数")
     parser.add_argument("--iterations", type=int, default=RUN["iterations"], help="训练迭代数")
     parser.add_argument("--seed", type=int, default=RUN["seed"], help="随机种子")
+    parser.add_argument("--num_steps_per_env", type=int, default=RUN["num_steps_per_env"],
+                        help="每次 rollout 步数 (默认 72)")
     parser.add_argument("--run_name", type=str, required=True,
                         help="训练代号(如 garlic),产物存至 rl/checkpoints/<run_name>/teacher/")
     parser.add_argument("--log_dir", type=str, default="rl/checkpoints", help="checkpoint 根目录")
@@ -96,8 +104,8 @@ def main():
     print(f"  JAX 设备: {jax.devices()}")
 
     # ---- 创建环境 ----
-    # 课程: 全局成功率滑动窗口驱动 difficulty (Curriculum 类, 初始 0.1 即注入 DR+扰动),
-    # 地形(斜坡+台阶)由 KuafuMjxEnv._apply_terrain 按 difficulty 生成。
+    # 课程: 双向滑动窗口调节 d_max (Curriculum 类, 初始 0.1 即注入 DR+扰动),
+    # per-env 采样 Uniform(0, d_max); 地形(斜坡+台阶)由 KuafuMjxEnv._apply_terrain 按 difficulty 生成。
     from rl.env.kuafu_mjx_env import (
         KuafuMjxEnv, OBS_DIM, PRIVILEGED_DIM, RMA_STATIC_DIM, TRANSIENT_DIM,
         ACTOR_OBS_DIM, CRITIC_PRIV_DIM, CRITIC_OBS_DIM)
@@ -128,17 +136,19 @@ def main():
             self.max_episode_length = env._episode_length
             self.episode_length_buf = torch.zeros(num_envs, device=device, dtype=torch.long)
 
-            # 课程: 全局成功率滑动窗口驱动 difficulty (避免 per-episode ±0.05 卡在 0,
-            # 且训练初期即注入 DR + 随机推力, 防过拟合标称参数, ETH legged_gym 实践)
+            # 课程: d_max 由高难度环境存活率驱动 (滑动窗口), per-env 采样 Uniform(0, d_max)
+            # 训练初期即注入 DR + 随机推力, 防过拟合标称参数, ETH legged_gym 实践
             self._curriculum = Curriculum(start=0.1, max_d=1.0, step=0.05,
                                           window=200, threshold=0.8)
-            self._difficulty = jax.numpy.float32(self._curriculum.d)  # 标量全局难度
+            self._difficulty = jax.numpy.float32(self._curriculum.d)  # d_max (课程上界)
 
             self._reset_vmapped = jax.jit(jax.vmap(env.reset, in_axes=(0, 0)))
             self._step_vmapped = jax.jit(jax.vmap(env.step))
 
             self._rng = jax.random.PRNGKey(seed)
-            diff_vec = jax.numpy.full(num_envs, self._difficulty)
+            self._rng, diff_rng = jax.random.split(self._rng)
+            diff_vec = jax.random.uniform(diff_rng, (num_envs,),
+                                          minval=0.0, maxval=self._difficulty)
             self._state = self._reset_vmapped(jax.random.split(self._rng, num_envs), diff_vec)
 
         def _to_torch(self, x):
@@ -161,9 +171,10 @@ def main():
 
         def reset(self):
             """VecEnv 接口要求: 重置所有环境."""
-            self._rng, reset_rng = jax.random.split(self._rng)
-            # 使用当前全局 difficulty (标量广播为 per-env 向量)
-            diff_vec = jax.numpy.full(self.num_envs, self._difficulty)
+            self._rng, reset_rng, diff_rng = jax.random.split(self._rng, 3)
+            # per-env 独立采样难度 Uniform(0, d_max), 策略同时面对简单与困难场景
+            diff_vec = jax.random.uniform(diff_rng, (self.num_envs,),
+                                          minval=0.0, maxval=self._difficulty)
             self._state = self._reset_vmapped(jax.random.split(reset_rng, self.num_envs), diff_vec)
             self.episode_length_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
             return self.get_observations()
@@ -181,19 +192,24 @@ def main():
             # auto-reset done 环境 (保持 JAX array 在 GPU 上)
             done_any = jax.device_get(done_jax.any())
             if done_any:
-                self._rng, reset_rng = jax.random.split(self._rng)
-                
-                # 全局课程: 统计 done 环境是否"存活成功"(timeout 且未倒下), 更新成功率
-                # 滑动窗口 → 连续提升 difficulty (DR + 扰动随难度缩放, 见 kuafu_mjx_env)
+                self._rng, reset_rng, diff_rng = jax.random.split(self._rng, 3)
+
+                # 课程: 仅统计 done 且高难度 (difficulty > d_max×0.7) 环境的存活成功率
+                # 避免低难度环境虚高 + 非 done 环境稀释 (原 bug: 传入全部 1024 envs)
                 cur_env_state = self._state.info["env_state"]
                 survived = (cur_env_state.step_count >= self.max_episode_length) & (cur_env_state.fall_count == 0)
-                survived_done = jax.device_get(survived & done_jax)
-                self._curriculum.update([bool(x) for x in survived_done])
+                high_diff = cur_env_state.difficulty > (self._difficulty * 0.7)
+                relevant = done_jax & high_diff
+                survived_np = jax.device_get(survived)
+                relevant_np = jax.device_get(relevant)
+                self._curriculum.update([bool(x) for x in survived_np[relevant_np]])
                 self._difficulty = jax.numpy.float32(self._curriculum.d)
 
+                # per-env 独立采样难度 Uniform(0, d_max)
+                diff_vec = jax.random.uniform(diff_rng, (self.num_envs,),
+                                              minval=0.0, maxval=self._difficulty)
                 reset_state = self._reset_vmapped(
-                    jax.random.split(reset_rng, self.num_envs),
-                    jax.numpy.full(self.num_envs, self._difficulty))
+                    jax.random.split(reset_rng, self.num_envs), diff_vec)
                 done_mask = done_jax.astype(jax.numpy.bool_)
                 self._state = jax.tree_util.tree_map(
                     lambda cur, new: jax.numpy.where(
@@ -208,7 +224,7 @@ def main():
             self.episode_length_buf += 1
 
             # 收集 episode 级指标到 info["log"] (RSL-RL 自动写入 TensorBoard)
-            # 仅在有环境 done 时才填充, 其余步留空 {} — RSL-RL 收集器遇空 dict 自动跳过,
+            # episode 级指标仅在有环境 done 时才填充, 其余步留空 {} - RSL-RL 收集器遇空 dict 自动跳过,
             # 避免中途帧的 0.0 被计入均值导致指标被稀释趋零
             log = {}
             if done_any:
@@ -216,12 +232,14 @@ def main():
                 n_done = done_mask.sum().clamp(min=1)
                 # episode_length 在清零前读取 (上面 +1 后, done 帧的值即该 episode 总长)
                 log["episode_length"] = (self.episode_length_buf * done_mask).sum().item() / n_done.item()
-                # 记录全局难度进展均值
-                log["difficulty"] = self._to_torch(self._difficulty).mean().item()
                 for key in ["orientation", "lin_vel_tracking"]:
                     if key in metrics_jax:
                         val = self._to_torch(metrics_jax[key])
                         log[key] = (val * done_mask).sum().item() / n_done.item()
+            # difficulty 每步记录 (d_max 课程标量 + per-env 实际均值)
+            log["difficulty"] = self._to_torch(self._difficulty).mean().item()
+            log["difficulty_mean"] = self._to_torch(
+                self._state.info["env_state"].difficulty).mean().item()
 
             self.episode_length_buf = torch.where(
                 done > 0, torch.zeros_like(self.episode_length_buf), self.episode_length_buf)
@@ -258,6 +276,7 @@ def main():
 
     # ---- 训练配置 ----
     train_cfg = make_train_cfg()
+    train_cfg["num_steps_per_env"] = args.num_steps_per_env
 
     # ---- 日志目录: rl/checkpoints/<run_name>/teacher/ ----
     run_root = os.path.join(PROJ_ROOT, args.log_dir, args.run_name)

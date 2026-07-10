@@ -97,11 +97,11 @@ REWARD_TASK = {
     "orientation":       ("exp(-α·(gx²+gy²)) 重力向量",    1.0),
     "tilt_cost":         ("-‖g_xy‖ 线性倾角惩罚(恢复激励)",  0.5),
     "roll_leveling":     ("exp(-roll²/σ²) 机身水平奖励",    1.0),
-    "alive":             ("存活奖励 (对抗过早终止)",        0.1),
+    "alive":             ("存活奖励 (倒下时归零, 防蹭奖)",  0.1),
     "fall_penalty":      ("倒下当步终止惩罚",              1.0),
 }
 REWARD_STYLE = {
-    "extension_cost":    ("D0 伸展代价(仅伸展时, 与平衡解耦)", 0.5),
+    "extension_cost":    ("超 d0_cmd 过度伸展惩罚(不惩罚命令内伸展)", 0.5),
     "contact_asymmetry": ("-|contact_L-R| 抑制长时间单轮卸载(限M4)", 0.3),
     "ang_vel_xy":        ("-(ωx²+ωy²) 惩罚 roll/pitch 角速度", 0.05),
     "action_rate":       ("-‖a_t - a_{t-1}‖² (一阶)",  0.01),
@@ -109,7 +109,7 @@ REWARD_STYLE = {
     "torque_limit":      ("超连续安全扭矩惩罚 (4舵机)",   0.5),
 }
 REWARD_SAFETY = {
-    "soft_termination":  ("连续倒下≥10步(200ms)才终止, 靠 episode 截断 + alive 门控", None),
+    "soft_termination":  ("连续倒下≥10步(200ms)才终止, alive门控+fall_penalty双重抑制", None),
     "joint_limit":       ("超机械限位惩罚",             None),
     "leg_overload":      ("舵机电流超连续安全 → 回锁",   None),
 }

@@ -10,7 +10,7 @@
 | 仿真模型 `kuafu.xml` | ✅ | 闭链残差 0mm, 轮挂 Q 点, armature=0; 轮改 capsule 兼容 MJX 地形碰撞; 4 舵机独立 |
 | 物理验证（阶段 0） | ✅ | **13/13**, LQR pitch 0.1s 恢复 5° + yaw 条件阻尼 + roll PD 调平 0.1s 恢复 3° |
 | MJX 环境 `kuafu_mjx_env.py` | ✅ | 三轴基层(pitch LQR+yaw阻尼+roll PD) + RL残差; 接触obs; 地形(斜坡+台阶); 延迟DR; 烟测通过 |
-| Teacher PPO 训练 `train.py` | ✅ | RSL-RL 2.x + DLPack; actor 157(proprio148+z9), critic 160; 全局成功率课程; 烟测通过 |
+| Teacher PPO 训练 `train.py` | ✅ | RSL-RL 2.x + DLPack; actor 157(proprio148+z9), critic 160; 双向课程(≥80%升/≤40%降)+per-env Uniform(0,d_max)采样; 烟测通过 |
 | Student 蒸馏 `distill.py` | ✅ | DAgger + z 回归 (MSE), teacher actor 157 维对齐, 待 teacher 训练后跑 |
 | ONNX 导出 `export_policy.py` | ✅ | teacher (含 normalizer) / student 两种模式 |
 | 显存测算 `probe_envs.py` | ✅ | RTX 4070: 2048 envs 可行, 推荐 1024 |
@@ -75,7 +75,7 @@ python3 rl/verify/verify_model.py           # 11/11 通过
 python3 rl/verify/launch_viewer.py
 
 # 4. Teacher PPO 训练（--run_name 必填，代号如 garlic）
-rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 1024  # 默认 3000 iter, ~73M steps, RTX4070 约 6–12h
+rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 1024  # 默认 72 步/rollout; 可选 --num_steps_per_env 调整 (3000 iter ≈ 221M steps)
 # 推荐后台运行:
 nohup rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 1024 > train.log 2>&1 &
 tail -f train.log
@@ -153,7 +153,7 @@ JAX 0.10.2 (cuda13)  ←→  DLPack 零拷贝  ←→  PyTorch 2.12.1 (cu130)
 
 | 项 | 状态 | 影响 | 计划 |
 |----|------|------|------|
-| `terrain.py` 课程参数 | 参考规格; 活跃课程由 `train.py` 的 `Curriculum` 类(全局成功率滑动窗口)驱动, 地形由 `KuafuMjxEnv._apply_terrain` 生成 | 不影响训练 | 真实地形已接入(斜坡+台阶), `terrain.py` 保留作阶段参数参考 |
+| `terrain.py` 课程参数 | 参考规格; 活跃课程由 `train.py` 的 `Curriculum` 类(双向: ≥80%升/≤40%降, per-env Uniform(0,d_max))驱动, 地形由 `KuafuMjxEnv._apply_terrain` 生成 | 不影响训练 | 真实地形已接入(斜坡+台阶), `terrain.py` 保留作阶段参数参考 |
 | 轮 geom 改 capsule | 为兼容 MJX 地形碰撞(动态圆柱不与 box/heightfield 碰撞) | 接触模型与原 cylinder 略有差异(圆端) | 落地前复跑 `verify_model.py` 11/11 确认物理无回归 |
 | 延迟鲁棒性对拍 | `eval_policy.py` / `playback.py` `--latency` 复现训练 latency DR (索引已修正: delay=k 取 k 步前) | 落地前建议带延迟跑一遍 | 真机/带延迟 sim 对拍 |
 | history_len 4 vs 50 | 环境用 4 步堆叠(140 维), RMA adapter 需 50 步 | 不影响训练（actor 吃 149 维）, 蒸馏时已处理 | distill.py 从 50 步序列取 base_obs(35) 喂给 adapter |

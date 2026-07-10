@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 NUM_ENVS = 1024              # 并行环境数 (RTX 4070 8GB 实测, 4090 可调 4096)
 ITERATIONS = 12000           # 训练迭代数
 SEED = 42
-NUM_STEPS_PER_ENV = 24       # 每次 rollout 的步数
+NUM_STEPS_PER_ENV = 72       # 每次 rollout 的步数 (72×0.02s=1.44s, 覆盖完整步态+越障周期)
 
 # ============================================================
 # PPO 超参 (RSL-RL legged locomotion 事实标准, design.md §2.6)
@@ -39,7 +39,7 @@ ALGORITHM = {
     "gamma": 0.99,
     "lam": 0.95,
     "value_loss_coef": 0.5,
-    "entropy_coef": 0.005,
+    "entropy_coef": 0.01,
     "learning_rate": 3e-4,
     "max_grad_norm": 1.0,
     "schedule": "adaptive",   # 按 KL 自适应调学习率
@@ -86,7 +86,7 @@ DISTILL = {
 
 # ============================================================
 # 课程 (design.md §2.6: 自动课程) — 设计参考; 实际课程由 train.py 的 Curriculum 类
-# 驱动 (全局成功率滑动窗口, 初始难度 0.1 即注入 DR + 随机推力, 防卡 difficulty=0)
+# 驱动 (全局成功率滑动窗口双向调节, 初始难度 0.1 即注入 DR + 随机推力, 防卡 difficulty=0)
 # ============================================================
 CURRICULUM = [
     {"name": "flat_balance",    "terrain": "plane",        "difficulty": 0.0, "threshold": 0.90},
@@ -94,7 +94,7 @@ CURRICULUM = [
     {"name": "rough",           "terrain": "hfield",       "difficulty": 0.5, "threshold": 0.80},
     {"name": "stair_30mm",      "terrain": "mesh_stair",   "difficulty": 0.7, "threshold": 0.80},  # M4 验收
     {"name": "perturbation",    "terrain": "plane",        "difficulty": 1.0, "threshold": 0.80},
-    # 当前成功率 > threshold → 解锁下一关
+    # 成功率 ≥ threshold -> 升级; ≤ 40% -> 降级 (双向调节, 避免策略退化后永久卡死)
 ]
 
 # ============================================================

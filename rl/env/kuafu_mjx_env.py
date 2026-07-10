@@ -605,16 +605,20 @@ class KuafuMjxEnv(MjxEnv):
         contact = self._wheel_contact(data)
         contact_asym = -jp.abs(contact[0] - contact[1])
 
-        # extension_cost: 仅在 D0 伸展时惩罚 (d0=dwell 时为 0)。
+        # extension_cost: 仅惩罚超出 d0_cmd 的过度伸展 (不惩罚命令内的伸展,
+        # 避免与 d0_avg_tracking 奖励梯度互抵)。
+        target_ext = 4.0 * d0_norm * HIP_STROKE   # 命令伸展量 (4 髋 × d0_norm × stroke)
         hip_ext = (
             jp.abs(data.qpos[QPOS_HIP_A_L]) + jp.abs(data.qpos[QPOS_HIP_A_R])
             + jp.abs(data.qpos[QPOS_HIP_B_L]) + jp.abs(data.qpos[QPOS_HIP_B_R])
         )
-        extension_cost = -d0_norm * hip_ext
+        extension_cost = -jp.maximum(hip_ext - target_ext, 0.0)
 
         # alive: 存活奖励, 对抗训练初期"一碰就死"的局部最优 (T1 轮式用 0.25, KUAFU 有
         # 坚实 orientation+tracking 故降至 0.1; 配合 FALL_GRACE_STEPS 软终止)
-        alive = 1.0
+        # 门控: 倒下期间不发 alive, 防止软终止窗口内"蹭存活奖励"的退化策略
+        fallen_flag = self._is_fallen(data).astype(jp.float32)
+        alive = 1.0 - fallen_flag
 
         # --- style (负向惩罚) ---
         # ang_vel_xy: 惩罚 roll/pitch 角速度 (ωx²+ωy²), 抑制高频抖动。
@@ -647,7 +651,7 @@ class KuafuMjxEnv(MjxEnv):
         torque_limit = -tau_excess
 
         # termination_penalty: 倒下当步给负奖励, 配合 LQR 兜底, 引导尽快恢复/避免倒下
-        fall_penalty = -1.0 * self._is_fallen(data).astype(jp.float32)
+        fall_penalty = -1.0 * fallen_flag
 
         total = (
             1.0 * lin_vel_tracking
@@ -682,7 +686,7 @@ class KuafuMjxEnv(MjxEnv):
         """软终止: 连续倒下 ≥ FALL_GRACE_STEPS 或超时.
 
         跌倒后宽限 10 步 (200ms) 让策略有机会恢复, 避免训练初期"一碰就死"。
-        (与 alive=0.1 奖励配合, 鼓励长时平衡)
+        (与 alive 门控配合: 倒下时 alive=0 + fall_penalty=-1, 鼓励长时平衡)
         """
         fallen = self._is_fallen(data)
         # fall_count: 倒下时累加, 恢复时清零
@@ -912,7 +916,7 @@ class KuafuMjxEnv(MjxEnv):
             env_state.step_count >= self._episode_length)
 
         # reward × CTRL_DT (Go1/T1 标准: 每项 ×scale 后乘 dt, 保持 PPO value 尺度一致)
-        # 软终止期间不额外惩罚 (靠 episode 结束截断后续 reward + alive 门控)
+        # 软终止期间: alive=0 + fall_penalty=-1 双重抑制 (靠 episode 结束截断后续 reward)
         reward = raw_reward * CTRL_DT
 
         # 更新 env_state (reward 算完后再更新 prev_action)
