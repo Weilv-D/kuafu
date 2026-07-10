@@ -79,11 +79,10 @@ class StudentPolicy(nn.Module):
         super().__init__()
         self.adapter = RMAAdapter(history_obs_dim, history_len, latent_dim, (32, 64, 32))
 
-        # 注册 Normalizer Buffers (从 Teacher Checkpoint 载入)
-        self.register_buffer("obs_mean", torch.zeros(1, proprio_dim))
-        self.register_buffer("obs_std", torch.ones(1, proprio_dim))
-        self.register_buffer("priv_mean", torch.zeros(1, latent_dim))
-        self.register_buffer("priv_std", torch.ones(1, latent_dim))
+        # 注册 Normalizer Buffers (从 Teacher Checkpoint 载入, 维度 = proprio+latent = 149)
+        # 与 Teacher actor 一致: EmpiricalNormalization 对 [proprio, z] 整体归一化。
+        self.register_buffer("obs_mean", torch.zeros(1, proprio_dim + latent_dim))
+        self.register_buffer("obs_std", torch.ones(1, proprio_dim + latent_dim))
 
         act_fn = nn.ELU
         layers = []
@@ -98,12 +97,12 @@ class StudentPolicy(nn.Module):
     def forward(self, proprio: torch.Tensor, history: torch.Tensor):
         z = self.adapter(history)
 
-        # 观测值正规化 (Normalizer)
-        proprio_norm = (proprio - self.obs_mean) / (self.obs_std + 1e-8)
-        z_norm = (z - self.priv_mean) / (self.priv_std + 1e-8)
+        # 与 Teacher actor 对齐: 将 [proprio, z] 拼成 149 维后整体归一化,
+        # 再由 trunk 处理。z 在原始空间 (与训练时真值同尺度), 不直接归一化。
+        full = torch.cat([proprio, z], dim=-1)
+        full_norm = (full - self.obs_mean) / (self.obs_std + 1e-8)
 
-        x = torch.cat([proprio_norm, z_norm], dim=-1)
-        h = self.trunk(x)
+        h = self.trunk(full_norm)
         action = torch.tanh(self.actor_mean(h))
 
         if self.training:

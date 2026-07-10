@@ -19,10 +19,13 @@ checkpoint 实际键名 (从 model_0.pt 实读, 2-DOF 五杆 6 维动作):
   privileged_obs_norm_state_dict:           # critic 特权归一化 (本模块不消费)
     _mean: (1, OBS_DIM+PRIVILEGED_DIM)
 
- 关键: actor 只吃 proprio(OBS_DIM=140), critic 吃 proprio+特权(152)。
-      actor 是 4 层 Linear 全在 Sequential 内 (含输出层), 不是 trunk+head 拆分。
-      obs_norm 键名是 _mean/_var/_std, 不是 obs_rms.mean。
+  关键: actor 吃 proprio+z(OBS_DIM=140 + Z_DIM=9 = 149), critic 吃 actor obs+瞬态(152)。
+       actor 是 4 层 Linear 全在 Sequential 内 (含输出层), 不是 trunk+head 拆分。
+       RMA: 训练时 actor 以静态特权 latent z(9) 为条件 (Kumar 2021), 部署时由
+       student adapter 预测 z_hat 替代。obs_norm 键名是 _mean/_var/_std。
 """
+import os
+
 import torch
 import torch.nn as nn
 
@@ -38,7 +41,7 @@ class TeacherInferenceModel(nn.Module):
       action = model(obs_tensor)  # obs: (B, OBS_DIM) → action: (B, ACTION_DIM)
     """
 
-    def __init__(self, obs_dim: int = 140, action_dim: int = 6, hidden: tuple = (512, 512, 512)):
+    def __init__(self, obs_dim: int = 149, action_dim: int = 6, hidden: tuple = (512, 512, 512)):
         super().__init__()
         # actor: Linear(140,256) ELU Linear(256,256) ELU Linear(256,256) ELU Linear(256,6)
         # 键名: actor.0, actor.2, actor.4, actor.6 (Sequential 索引)
@@ -61,9 +64,19 @@ class TeacherInferenceModel(nn.Module):
         return torch.tanh(self.actor(obs_norm))
 
     @classmethod
-    def from_checkpoint(cls, ckpt_path: str, obs_dim: int = 140, action_dim: int = 6) -> "TeacherInferenceModel":
-        """从 RSL-RL checkpoint 加载, 并断言权重全部命中."""
-        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    def from_checkpoint(cls, ckpt_path: str, obs_dim: int = 149, action_dim: int = 6) -> "TeacherInferenceModel":
+        """从 RSL-RL checkpoint 加载, 并断言权重全部命中.
+
+        对文件缺失 / 损坏 / 结构不匹配分别给出可操作提示, 而非裸 assert。
+        """
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"Teacher checkpoint 不存在: {ckpt_path}")
+        try:
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        except Exception as e:
+            raise RuntimeError(f"Teacher checkpoint 读取失败 (可能损坏或非 .pt): {e}") from e
+        if "model_state_dict" not in ckpt:
+            raise KeyError(f"checkpoint 缺少 'model_state_dict' 键, 疑似非 RSL-RL 导出: {list(ckpt.keys())}")
         model_state = ckpt.get("model_state_dict", {})
 
         # 动态推断隐藏层维度

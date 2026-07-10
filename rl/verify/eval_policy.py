@@ -35,6 +35,11 @@ PITCH_THRESH = np.radians(30)   # 与训练 _is_fallen 一致
 ROLL_THRESH = np.radians(30)
 OMEGA_NOLOAD = P.RPM_WHEEL_NOLOAD * 2 * np.pi / 60  # DDSM315 空载角速度 rad/s
 
+# RMA: 训练时 teacher actor 以静态特权 latent z(9) 为条件 (Kumar 2021)。
+# 仿真评估在标称平地下进行, z 取标称值:
+# [friction, mass_scale, com_bias(x,y,z), inertia_scale, torque_scale, deadband, delay_steps]
+NOMINAL_STATIC = np.array([1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0], dtype=np.float32)
+
 
 def _limit_wheel_torque(tau, omega):
     """DDSM back-EMF 限幅: τ_avail = τ_stall × (1 - |ω|/ω_noload). 与训练环境一致."""
@@ -149,12 +154,15 @@ def run_episode(model, data, teacher, command, max_steps, rng=None, dr=False,
     for step in range(max_steps):
         if _is_fallen(data):
             break
-        # 推理: 用延迟后的 obs_history (latency=0 时为当前, 与训练 reset 一致)
-        inf_obs = obs_delay_buf[-latency] if latency > 0 else obs_history.flatten()
+        # 推理: 用延迟后的 obs_history。latency=0 为当前; latency=k 取 k 步前 = buf[-(k+1)]
+        # (缓冲末尾为当前帧, 与训练 _delayed_obs 语义一致)
+        # teacher actor 条件于静态特权 z(9), 标称评估下补 nominal z → 149 维
+        inf_obs140 = obs_delay_buf[-(latency + 1)] if latency > 0 else obs_history.flatten()
+        inf_obs = np.concatenate([inf_obs140, NOMINAL_STATIC])
         with torch.no_grad():
             action = teacher(torch.from_numpy(inf_obs).float().unsqueeze(0)).numpy()[0]
-        # 执行延迟后的动作 (latency=0 时为当前 action)
-        applied = act_delay_buf[-latency] if latency > 0 else action
+        # 执行延迟后的动作 (latency=0 时为当前 action; latency=k 取 k 步前)
+        applied = act_delay_buf[-(latency + 1)] if latency > 0 else action
         action_delta = action - last_action
         _apply_action(data, applied)
         last_action = action  # 注意: obs 里的 last_action 用 policy 原始输出 (与 env 一致)

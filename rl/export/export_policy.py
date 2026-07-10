@@ -30,13 +30,13 @@ def export_teacher(ckpt_path: str, out_path: str):
     使用共享的 TeacherInferenceModel (精确匹配 checkpoint 键名)。
     """
     import torch
-    from rl.env.kuafu_mjx_env import OBS_DIM, ACTION_DIM
+    from rl.env.kuafu_mjx_env import OBS_DIM, ACTION_DIM, ACTOR_OBS_DIM
     from rl.train.teacher_model import TeacherInferenceModel
 
-    model = TeacherInferenceModel.from_checkpoint(ckpt_path, obs_dim=OBS_DIM)
+    model = TeacherInferenceModel.from_checkpoint(ckpt_path, obs_dim=ACTOR_OBS_DIM)
 
     # 导出
-    dummy_obs = torch.randn(1, OBS_DIM)
+    dummy_obs = torch.randn(1, ACTOR_OBS_DIM)
     torch.onnx.export(
         model, dummy_obs, out_path,
         input_names=["obs"],

@@ -73,7 +73,20 @@ RUN = {
 }
 
 # ============================================================
-# 课程 (design.md §2.6: 自动课程, 按成功率递增) — 设计参考, 当前由 train.py 内联逻辑驱动
+# 蒸馏 (design.md §2.6 阶段 2: Student DAgger) — 单一真相源
+# ============================================================
+DISTILL = {
+    "max_grad_norm": 1.0,        # 梯度裁剪阈值 (与 PPO max_grad_norm 对齐)
+    "z_loss_weight": 5.0,        # latent MSE 相对 action MSE 的权重
+    "buffer_capacity": 200_000,  # 回放缓冲上限 (ring 覆盖旧样本)
+    "train_batches": 16,         # 每 iter 从缓冲训练 batch 数
+    "mini_batch_size": 256,      # 训练 mini-batch
+    "buffer_device": "cpu",      # 缓冲驻留设备 (默认 cpu 控显存峰值)
+}
+
+# ============================================================
+# 课程 (design.md §2.6: 自动课程) — 设计参考; 实际课程由 train.py 的 Curriculum 类
+# 驱动 (全局成功率滑动窗口, 初始难度 0.1 即注入 DR + 随机推力, 防卡 difficulty=0)
 # ============================================================
 CURRICULUM = [
     {"name": "flat_balance",    "terrain": "plane",        "difficulty": 0.0, "threshold": 0.90},
@@ -85,12 +98,20 @@ CURRICULUM = [
 ]
 
 # ============================================================
-# 收敛判据 (design.md M5 验收)
+# 收敛判据 (design.md M5 验收) — "两者结合": 原恢复时间指标保留为子集,
+# 同时加入速度跟踪 / 扰动承受 / 地形成功率多维指标 (残差 RL 安全定位)
 # ============================================================
 CONVERGENCE = {
-    "recovery_time_target": "LQR_baseline × 0.85",   # 残差 RL 恢复时间缩短 ≥15%
-    "perturbation_target":  "LQR_baseline × 1.20",   # 扰动承受提升 ≥20%
-    "student_teacher_ratio": 0.90,                    # student 无特权 ≥ teacher×0.9
+    # 子集指标: 残差 RL 恢复时间缩短 ≥15% (靠大扰动/地形逼入非线性区争取达成)
+    "recovery_time_target": "LQR_baseline × 0.85 (subset)",
+    # 扰动承受提升 ≥20% (最大可恢复推力对比 LQR)
+    "perturbation_target":  "LQR_baseline × 1.20",
+    # student 无特权 ≥ teacher×0.9
+    "student_teacher_ratio": 0.90,
+    # 新增多维验收 (M5 综合判据)
+    "lin_vel_track_err_max": 0.10,    # m/s, cmd_sweep 速度跟踪误差均值上限
+    "terrain_stair_success": 0.80,    # M4: 30mm 台阶成功率 ≥80%
+    "latency_robustness":   "带延迟(≤40ms)+DR 评估不显著退化",
 }
 
 

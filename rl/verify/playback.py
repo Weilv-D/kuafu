@@ -34,7 +34,8 @@ from rl.verify.eval_policy import (
     _build_obs,
     _apply_action,
     rotate_vector_by_quaternion_conj,
-    _limit_wheel_torque
+    _limit_wheel_torque,
+    NOMINAL_STATIC,
 )
 
 # 控制频率 (与训练环境一致)
@@ -76,10 +77,13 @@ def playback_teacher(ckpt_path: str, xml_path: str, duration: float = 10.0, late
                 break
 
             # 50Hz: 推理 (用延迟后的 obs, 第一步全 0 与训练 reset 一致)
-            inf_obs = obs_delay_buf[-latency] if latency > 0 else obs_history.flatten()
+            # latency=k 取 k 步前 = buf[-(k+1)], 与训练 _delayed_obs 语义一致
+            # teacher actor 条件于静态特权 z(9), 标称评估下补 nominal z → 149 维
+            inf_obs140 = obs_delay_buf[-(latency + 1)] if latency > 0 else obs_history.flatten()
+            inf_obs = np.concatenate([inf_obs140, NOMINAL_STATIC])
             with torch.no_grad():
                 action = teacher(torch.from_numpy(inf_obs).float().unsqueeze(0)).numpy()[0]
-            applied = act_delay_buf[-latency] if latency > 0 else action
+            applied = act_delay_buf[-(latency + 1)] if latency > 0 else action
 
             # 应用动作 + 500Hz 物理子步: 加 viewer.lock 防止渲染线程并发读/重分配 data 导致堆损坏
             with viewer.lock():
@@ -157,14 +161,15 @@ def playback_student(ckpt_path: str, xml_path: str, duration: float = 10.0, late
                 break
 
             # 50Hz: 推理 (用延迟后的 proprio + RMA history)
-            inf_obs = obs_delay_buf[-latency] if latency > 0 else obs_history.flatten()
-            inf_rma = rma_delay_buf[-latency] if latency > 0 else rma_history
+            # latency=k 取 k 步前 = buf[-(k+1)], 与训练 _delayed_obs 语义一致
+            inf_obs = obs_delay_buf[-(latency + 1)] if latency > 0 else obs_history.flatten()
+            inf_rma = rma_delay_buf[-(latency + 1)] if latency > 0 else rma_history
             with torch.no_grad():
                 action = student(
                     torch.from_numpy(inf_obs).float().unsqueeze(0),
                     torch.from_numpy(inf_rma).float(),
                 ).numpy()[0]
-            applied = act_delay_buf[-latency] if latency > 0 else action
+            applied = act_delay_buf[-(latency + 1)] if latency > 0 else action
 
             # 加 viewer.lock 防止渲染线程并发读/重分配 data 导致堆损坏
             with viewer.lock():

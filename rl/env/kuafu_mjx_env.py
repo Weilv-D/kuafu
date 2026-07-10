@@ -88,7 +88,7 @@ HIP_STROKE = 1.52    # 曲柄半行程 rad
 # 训练用 4 步堆叠 → 140 维 proprio (RSL-RL ActorCritic 直接消费)
 OBS_DIM_BASE = 35    # 全观测 4 舵机 (hip_A + hip_B 各左右): 3+3+4+8+2+4+6+3+2
 HISTORY_STEPS = 4
-OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS  # 140
+OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS  # 140 本体感受 (4步堆叠)
 PRIVILEGED_DIM = 12    # teacher critic 特权 = 静态外因(9) + 瞬态扰动(3)
 # 特权观测拆分 (RMA 最佳实践, Kumar et al. RSS 2021):
 # - 静态环境外因 (RMA latent, 9 维): friction/mass/com/inertia/torque/deadband/delay
@@ -99,6 +99,17 @@ RMA_STATIC_DIM = 9    # friction(1)+mass_scale(1)+com_bias(3)+inertia_scale(1)+t
 TRANSIENT_DIM = 3     # active_push(3) 瞬态外力
 ACTION_DIM = 6        # [dtau_L, dtau_R, hip_A_l, hip_A_r, hip_B_l, hip_B_r]
 DELAY_BUFFER_LEN = 3   # 最大延迟缓冲 (3步×20ms=60ms, 覆盖 DR_DELAY_ACT=30ms + DR_DELAY_SENSE=20ms)
+
+# RMA actor 条件化 (Kumar et al. RSS 2021): 训练阶段 base policy 必须以静态特权
+# latent z(9) 为条件, 部署时由 adapter 从历史预测 z_hat 替代。故:
+#   actor obs  = proprio(140) + z(9)        = 149
+#   critic obs = actor obs(149) + 瞬态(3)   = 152
+# (瞬态 active_push 由本体感受在线感知, 仅 critic 额外特权, 不进 latent)
+PROPRIO_DIM = OBS_DIM                      # 140 本体感受 (4步堆叠)
+Z_DIM = RMA_STATIC_DIM                     # 9 静态环境外因 latent
+ACTOR_OBS_DIM = PROPRIO_DIM + Z_DIM        # 149 (actor 输入)
+CRITIC_PRIV_DIM = TRANSIENT_DIM            # 3 (critic 额外瞬态特权)
+CRITIC_OBS_DIM = ACTOR_OBS_DIM + CRITIC_PRIV_DIM  # 152 (critic 输入)
 
 # 物理常量 (JAX 数组)
 LQR_K = jp.array(P.LQR_K)          # [-4.47, -61.18, -5.82, -4.02]
@@ -116,9 +127,10 @@ V_CMD_RANGE = (-0.5, 0.5)     # m/s (轮缘额定 0.82 m/s, 留余量)
 W_CMD_RANGE = (-1.0, 1.0)     # rad/s
 D0_CMD_RANGE = (P.D0_MIN, P.D0_MAX)  # (58, 207) mm
 
-# 终止阈值
-PITCH_THRESH = jp.radians(45)  # 倒下判定 (硬阈值)
-ROLL_THRESH = jp.radians(45)
+# 终止阈值 (与评估/回放统一为 30°, 见 eval_policy.py PITCH_THRESH;
+# 物理可恢复俯仰 ~25° (KUAFU.md), 留 5° 余量, 消除 25°~45° 不可恢复却未终止的死区)
+PITCH_THRESH = jp.radians(30)  # 倒下判定 (硬阈值)
+ROLL_THRESH = jp.radians(30)
 # 软终止缓冲: 跌倒后不立即终止, 宽限 FALL_GRACE_STEPS 步 (×20ms) 让策略有机会恢复,
 # 避免"一碰就死"局部最优 (T1/legged_gym alive 奖励 + 软终止的工程共识)
 FALL_GRACE_STEPS = 10  # 10 步 × 20ms = 200ms 宽限
@@ -222,6 +234,14 @@ class KuafuMjxEnv(MjxEnv):
         self._wheel_l_geom_id = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_GEOM, "wheel_l_geom")
         self._wheel_r_geom_id = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_GEOM, "wheel_r_geom")
 
+        # 地形几何 ID (M4 台阶/斜坡, 由 _apply_terrain 按 difficulty 缩放)
+        # 注: MJX 不支持 heightfield×cylinder 碰撞, 故地形用倾斜平面(斜坡) +
+        # 静态 step box(台阶) 实现, 二者均兼容圆柱轮 (cylinder-plane/box 碰撞已支持)
+        self._floor_geom_id = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+        self._step_geom_ids = [
+            mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_GEOM, f"step{i}") for i in range(4)
+        ]
+
         # keyframe 0 (dwell) 的 qpos
         self._keyframe_qpos = self._mj_model.qpos0.copy()
 
@@ -311,6 +331,31 @@ class KuafuMjxEnv(MjxEnv):
         model = model.replace(actuator_gainprm=gainprm, actuator_biasprm=biasprm)
 
         return model, friction_multiplier, mass_scale, inertia_scale, com_bias
+
+    # ---- 地形 (M4 台阶/斜坡) ----
+    def _apply_terrain(self, model: mjx.Model, difficulty: jax.Array, rng: jax.Array) -> mjx.Model:
+        """按课程难度生成地形 (M4 台阶/斜坡), 兼容 MJX 圆柱轮碰撞.
+
+        MJX 不支持 heightfield×cylinder, 故用:
+          - 斜坡: 旋转 ground plane 法向 (绕 Y 轴 ≤10°), 随 difficulty 缩放
+          - 台阶: 4 级静态 step box, 高度 = (i+1)×30mm × difficulty (M4 验收 30mm)
+        difficulty=0 → 平面不倾斜 + 台阶高度≈0, 完全退回已验证的平地行为。
+        出生在原点 (x=0, y=0), 台阶位于 x≥0.6m, 斜坡在原点 z=0 通过, 起步安全。
+        """
+        # 斜坡: 绕 Y 轴旋转 ground plane, 角度 = difficulty × 10°
+        ang = difficulty * jp.radians(10.0)
+        c, s = jp.cos(ang / 2.0), jp.sin(ang / 2.0)
+        floor_quat = jp.array([c, 0.0, s, 0.0])  # (w, x, y, z), 绕 Y
+        geom_quat = model.geom_quat.at[self._floor_geom_id].set(floor_quat)
+        model = model.replace(geom_quat=geom_quat)
+
+        # 台阶: 逐级高度 (i+1)×30mm × difficulty (最小 0.5mm 避免退化)
+        for i, gid in enumerate(self._step_geom_ids):
+            h = jp.maximum((i + 1) * 0.03 * difficulty, 1e-3)
+            size = model.geom_size.at[gid, 2].set(h / 2.0)      # box 半高
+            pos = model.geom_pos.at[gid, 2].set(h / 2.0)        # 底面贴地 (bottom z=0)
+            model = model.replace(geom_size=size, geom_pos=pos)
+        return model
 
     # ---- 命令采样 ----
     def _sample_command(self, rng: jax.Array, difficulty: jax.Array):
@@ -452,27 +497,35 @@ class KuafuMjxEnv(MjxEnv):
     def _delayed_obs(self, env_state: EnvState) -> jax.Array:
         """对喂给 policy 的本体感受观测施加观测延迟 (sensor/compute latency).
 
-        与动作延迟同构: obs_delay_buffer[0]=最旧(2步前), [1]=1步前, [2]=当前。
-        delay_steps>=2 取 2 步前, >=1 取 1 步前, 否则当前。reset 时缓冲为 0(与
-        obs_history 初始全 0 一致, 无回归)。
+        缓冲填充顺序为 [丢弃最旧, 追加最新] (step 中 new_obs_delay_buffer),
+        故 obs_delay_buffer[0]=2步前(最旧), [1]=1步前, [2]=当前。
+        delay_steps>=2 取 2 步前(buf[0]), >=1 取 1 步前(buf[1]), 否则当前。
+        reset 时缓冲为 0(与 obs_history 初始全 0 一致, 无回归)。
         """
         cur = env_state.obs_history.reshape(-1)
         buf = env_state.obs_delay_buffer
         return jp.where(
             env_state.delay_steps >= 2,
-            buf[1],
-            jp.where(env_state.delay_steps >= 1, buf[2], cur))
+            buf[0],
+            jp.where(env_state.delay_steps >= 1, buf[1], cur))
 
     def _observation(self, data: mjx.Data, env_state: EnvState):
         """构建观测: teacher 返回 dict, student 返回扁平数组.
 
         obs_history 已在 step() 中更新 (含最新帧); 此处对 policy 观测施加观测延迟。
+
+        RMA (Kumar 2021): teacher actor 以 proprio(140) + 静态特权 latent z(9) = 149
+        为条件 (训练时喂真值, 部署时由 adapter 预测 z_hat 替代); critic 额外吃瞬态
+        扰动 active_push(3) → 152。student 模式返扁平 proprio(140), 由外部 adapter
+        补 z_hat。
         """
         flat_obs = self._delayed_obs(env_state)    # (140,) 已含观测延迟
 
         if self._teacher:
-            priv = self._privileged_observation(env_state)  # (12,)
-            return {"state": flat_obs, "privileged_state": priv}
+            static_z = self._static_privileged_observation(env_state)  # (9,)
+            actor_obs = jp.concatenate([flat_obs, static_z])          # (149,)
+            transient = env_state.active_push                        # (3,) critic 额外特权
+            return {"state": actor_obs, "privileged_state": transient}
         return flat_obs
 
     # ---- Reward ----
@@ -493,6 +546,11 @@ class KuafuMjxEnv(MjxEnv):
         # 无欧拉角分解, 物理连续无歧义 (MIT Cheetah / Unitree 工业共识)
         grav_local = rotate_vector_by_quaternion_conj(q, jp.array([0.0, 0.0, -1.0]))
         orientation = jp.exp(-ORIENT_ALPHA * jp.sum(grav_local[:2] ** 2))
+
+        # tilt_cost: 对倾角的线性惩罚, 与 orientation(exp) 互补。orientation 在接近直立时
+        # 饱和、对大倾角恢复激励不足; tilt_cost 提供全程梯度, 加速被推后的快速扶正
+        # (perturbation recovery, legged_gym/ETH 实践)。grav_local[:2] 模长≈sin(tilt)。
+        tilt_cost = -jp.sqrt(grav_local[0] ** 2 + grav_local[1] ** 2)
 
         # lin_vel_tracking: 跟踪 v_cmd (本体系前向速度 xdot)
         lin_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
@@ -519,6 +577,15 @@ class KuafuMjxEnv(MjxEnv):
             + (data.qpos[QPOS_HIP_B_R] - hip_B_target) ** 2
         ) / 2.0
         default_pose = jp.exp(-pose_err / 0.1)
+
+        # extension_cost: 仅在 D0 伸展时惩罚 (d0=dwell 时为 0)。default_pose 把腿锁向
+        # d0_cmd 目标, 但无条件奖励伸展会与"平衡需挪腿移 COM"冲突且抬高 COM、降低倒立摆
+        # 稳定裕度。故伸展按 d0_norm 随能量/风险加罚, 与平衡解耦。
+        hip_ext = (
+            jp.abs(data.qpos[QPOS_HIP_A_L]) + jp.abs(data.qpos[QPOS_HIP_A_R])
+            + jp.abs(data.qpos[QPOS_HIP_B_L]) + jp.abs(data.qpos[QPOS_HIP_B_R])
+        )
+        extension_cost = -d0_norm * hip_ext
 
         # alive: 存活奖励, 对抗训练初期"一碰就死"的局部最优 (T1 轮式用 0.25, KUAFU 有
         # 坚实 orientation+tracking 故降至 0.1; 配合 FALL_GRACE_STEPS 软终止)
@@ -554,16 +621,22 @@ class KuafuMjxEnv(MjxEnv):
             + jp.maximum(jp.abs(data.actuator_force[ACT_HIP_B_R]) - TAU_CONT, 0))
         torque_limit = -tau_excess
 
+        # termination_penalty: 倒下当步给负奖励, 配合 LQR 兜底, 引导尽快恢复/避免倒下
+        fall_penalty = -1.0 * self._is_fallen(data).astype(jp.float32)
+
         total = (
             1.0 * lin_vel_tracking
             + 0.5 * ang_vel_tracking
             + 1.0 * orientation
+            + 0.5 * tilt_cost
             + 0.3 * default_pose
+            + 0.3 * extension_cost
             + 0.1 * alive
             + 0.05 * ang_vel_xy
             + 0.01 * action_rate
             + 0.001 * energy
             + 0.5 * torque_limit
+            + 1.0 * fall_penalty
         )
         return total
 
@@ -601,6 +674,8 @@ class KuafuMjxEnv(MjxEnv):
         # 域随机化 (mass/friction/inertia/COM/wheel_r/servo_pd 注入物理, 与 difficulty 缩放)
         model, friction, mass_scale, inertia_scale, com_bias = self._randomize_model(
             self._mjx_model, dr_rng, difficulty)
+        # 地形 heightfield (difficulty=0 → 全平; 见 _apply_terrain)
+        model = self._apply_terrain(model, difficulty, dr_rng)
         
         # DDSM 力矩常数 DR (与 difficulty 缩放)
         torque_scale_raw = jax.random.uniform(
@@ -679,14 +754,15 @@ class KuafuMjxEnv(MjxEnv):
         model = state.info["model"]
 
         # ---- 执行器延迟: 从 action_buffer 取延迟前的动作 ----
-        # action_buffer shape: (DELAY_BUFFER_LEN, ACTION_DIM), [0]=最旧(3步前), [1]=2步前, [2]=1步前
-        # delay_steps=0 → 用当前 action; delay_steps=1 → 用 1步前; delay_steps=2 → 用 2步前
+        # action_buffer 填充顺序 [丢弃最旧, 追加最新] (step 末尾 new_action_buffer),
+        # 故 [0]=2步前(最旧), [1]=1步前, [2]=当前。
+        # delay_steps=0 → 当前 action; delay_steps=1 → 1步前(buf[1]); delay_steps=2 → 2步前(buf[0])
         delayed_action = jp.where(
             env_state.delay_steps >= 2,
-            env_state.action_buffer[1],  # 2 步前
+            env_state.action_buffer[0],  # 2 步前
             jp.where(
                 env_state.delay_steps >= 1,
-                env_state.action_buffer[2],  # 1 步前
+                env_state.action_buffer[1],  # 1 步前
                 action,                      # 当前
             )
         )
