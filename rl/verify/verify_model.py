@@ -127,15 +127,14 @@ def main():
     K = P.LQR_K
     recovered = False
     for step in range(2000):  # 4s
-        # 状态 [x, theta, xdot, thetadot]
-        # root qpos: [x,y,z, qw,qx,qy,qz], pitch=绕Y -> qy=qpos[5]
-        # root qvel: [vx,vy,vz, wx,wy,wz], pitch角速度=绕Y -> wy=qvel[4]
-        x = d4.qpos[0]
-        qw, qy = d4.qpos[3], d4.qpos[5]
-        theta = np.arcsin(np.clip(2 * qw * qy, -0.999999, 0.999999))
-        xdot = d4.qvel[0]
+        # 状态 [0, theta, xdot, thetadot] — 与 kuafu_mjx_env._lqr_balance 完全一致
+        # (x 恒为 0, 与实机/teacher LQR 底层一致, 使"恢复时间 < LQR×0.85"可比)
+        # root quat [qw,qx,qy,qz], pitch=绕Y -> theta=arcsin(2*(qw*qy - qx*qz))
+        qw, qx, qy, qz = d4.qpos[3], d4.qpos[4], d4.qpos[5], d4.qpos[6]
+        theta = np.arcsin(np.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
+        xdot = d4.qvel[0]                              # 前向速度 (小角度下≈本体系)
         thetadot = d4.qvel[4]                          # pitch 角速度 (wy)
-        F = -(K @ np.array([x, theta, xdot, thetadot]))
+        F = -(K @ np.array([0.0, theta, xdot, thetadot]))
         # 两轮各施加 F/2 (力矩 = F*R/2)
         tau = F * P.R / 2
         d4.ctrl[0] = tau  # tau_l

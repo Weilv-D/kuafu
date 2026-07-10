@@ -1,55 +1,79 @@
 # -*- coding: utf-8 -*-
 """
-KUAFU PPO 训练配置 — design.md §2.6 训练管线
+KUAFU PPO 训练配置 — design.md §2.6 训练管线 (单一真相源)
 
-本轮只交付配置，不执行训练。物理验证（verify_model.py 11/11）通过后，
-配合 MuJoCo Playground / RSL-RL 启动训练。
+本文件是训练超参的唯一来源: train.py 的 make_train_cfg() 直接读取这里的常量,
+不再内联重复定义。物理验证（verify_model.py 11/11）通过后, 配合 MuJoCo Playground /
+RSL-RL 2.x 启动训练。
+
+键名严格对齐 RSL-RL 2.x (rsl_rl/algorithms/ppo.py:104-115 与 ActorCritic):
+  algorithm: clip_param / num_learning_epochs / num_mini_batches / value_loss_coef /
+             entropy_coef / gamma / lam / max_grad_norm / desired_kl / schedule / learning_rate
+  policy:    actor_hidden_dims / critic_hidden_dims / activation / init_noise_std
+  runner:    num_steps_per_env / save_interval / empirical_normalization
 
 收敛判据 (design.md M5): 恢复时间 < LQR baseline×0.85 或 扰动承受 > baseline×1.2
 """
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-import kuafu_physics as P
+
 
 # ============================================================
 # 训练规模 (design.md §2.6: MJX 4096 envs, 单 4090 PPO 60-650K steps/s)
 # ============================================================
 NUM_ENVS = 1024              # 并行环境数 (RTX 4070 8GB 实测, 4090 可调 4096)
+ITERATIONS = 3000            # 训练迭代数 (RTX 4070 ~6-12h)
+SEED = 42
 NUM_STEPS_PER_ENV = 24       # 每次 rollout 的步数
-TOTAL_TIMESTEPS = 500_000_000  # 总步数 5亿 (大模型充分收敛, RTX 4070 ~1.5h)
 
 # ============================================================
 # PPO 超参 (RSL-RL legged locomotion 事实标准, design.md §2.6)
+# 键名与 rsl_rl 2.x PPO 算法严格一致
 # ============================================================
-PPO = {
-    "learning_rate": 3e-4,
-    "clip": 0.2,
-    "entropy_coef": 0.005,
-    "value_coef": 0.5,
-    "max_grad_norm": 1.0,
-    "gamma": 0.99,
-    "gae_lambda": 0.95,
-    "num_minibatches": 4,
+ALGORITHM = {
+    "class_name": "PPO",
     "num_learning_epochs": 5,
+    "num_mini_batches": 4,
+    "clip_param": 0.2,
+    "gamma": 0.99,
+    "lam": 0.95,
+    "value_loss_coef": 0.5,
+    "entropy_coef": 0.005,
+    "learning_rate": 3e-4,
+    "max_grad_norm": 1.0,
     "schedule": "adaptive",   # 按 KL 自适应调学习率
+    "desired_kl": 0.01,
+    "rnd_cfg": None,
+    "symmetry_cfg": None,
 }
 
 # ============================================================
 # 网络结构 (design.md §2.5: Pi5 ONNX <1ms 约束)
 # Scaling: 隐藏层 256→512, 参数量~70万, Pi5 MLP 推理~1.5ms (< 20ms 周期)
 # ============================================================
-NETWORK = {
-    "actor":  [512, 512, 512],   # 主干 MLP: obs(140) → 512×3 → action 6
-    "critic": [512, 512, 512],   # value head (输入 9 维特权)
-    "adapter_cnn": [32, 64, 32], # RMA: 50-step 历史 → 9 维 z
-    "vision_encoder": None,      # M6 启用: CNN ~80k 参数 → 32 维
+POLICY = {
+    "class_name": "ActorCritic",
+    "init_noise_std": 1.0,
+    "actor_hidden_dims": [512, 512, 512],   # 主干 MLP: obs(140) → 512×3 → action 6
+    "critic_hidden_dims": [512, 512, 512],  # value head (输入 140 proprio + 12 特权 = 152)
     "activation": "elu",
-    "total_params_target": 700_000,  # ~70万, Pi5 ONNX ~1.5ms (< 20ms 周期)
 }
 
 # ============================================================
-# 课程 (design.md §2.6: 自动课程, 按成功率递增)
+# Runner 级参数 (OnPolicyRunner 顶层键, 非 PPO 算法内部)
+# ============================================================
+RUN = {
+    "num_envs": NUM_ENVS,
+    "iterations": ITERATIONS,
+    "seed": SEED,
+    "num_steps_per_env": NUM_STEPS_PER_ENV,
+    "save_interval": 50,
+    "empirical_normalization": True,
+}
+
+# ============================================================
+# 课程 (design.md §2.6: 自动课程, 按成功率递增) — 设计参考, 当前由 train.py 内联逻辑驱动
 # ============================================================
 CURRICULUM = [
     {"name": "flat_balance",    "terrain": "plane",        "difficulty": 0.0, "threshold": 0.90},
@@ -59,15 +83,6 @@ CURRICULUM = [
     {"name": "perturbation",    "terrain": "plane",        "difficulty": 1.0, "threshold": 0.80},
     # 当前成功率 > threshold → 解锁下一关
 ]
-
-# ============================================================
-# 域随机化 (design.md §2.4, 从物理真源取, 避免链式加载 JAX)
-# ============================================================
-DR_MASS = P.DR_MASS
-DR_COM = P.DR_COM
-DR_INERTIA = P.DR_INERTIA
-DR_FRICTION = P.DR_FRICTION
-DR_TORQUE_CONST = P.DR_TORQUE_CONST
 
 # ============================================================
 # 收敛判据 (design.md M5 验收)
@@ -80,13 +95,14 @@ CONVERGENCE = {
 
 
 def print_config():
-    print("="*60)
-    print("KUAFU PPO 训练配置 (design.md §2.6)")
-    print("="*60)
-    print(f"并行环境: {NUM_ENVS} (MJX GPU)")
-    print(f"总步数: {TOTAL_TIMESTEPS:,}")
-    print(f"PPO: lr={PPO['learning_rate']}, clip={PPO['clip']}")
-    print(f"网络: actor {NETWORK['actor']}, 参数 <{NETWORK['total_params_target']}")
+    print("=" * 60)
+    print("KUAFU PPO 训练配置 (design.md §2.6, RSL-RL 2.x)")
+    print("=" * 60)
+    print(f"并行环境: {RUN['num_envs']} (MJX GPU)")
+    print(f"迭代数: {RUN['iterations']} × {RUN['num_envs']} envs × {RUN['num_steps_per_env']} steps")
+    print(f"PPO: lr={ALGORITHM['learning_rate']}, clip={ALGORITHM['clip_param']}, "
+          f"schedule={ALGORITHM['schedule']}, desired_kl={ALGORITHM['desired_kl']}")
+    print(f"网络: actor {POLICY['actor_hidden_dims']}, 参数 <700k, Pi5 ONNX ~1.5ms (< 20ms 周期)")
     print(f"课程: {len(CURRICULUM)} 阶段")
     for c in CURRICULUM:
         print(f"  - {c['name']:18s} {c['terrain']:14s} 解锁阈值 {c['threshold']}")

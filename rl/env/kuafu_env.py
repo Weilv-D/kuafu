@@ -41,17 +41,26 @@ OBS_DIM_BASE = sum(d for _, d, _, _ in OBS_SPEC)     # = 35
 HISTORY_STEPS = 4                                      # design.md §2.1: 堆叠 N=4
 OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS                # = 140
 
-# teacher 特权观测 (仅训练, design.md §2.1)
-PRIVILEGED_SPEC = [
-    ("terrain_height", -1, "机身周围高度图",        "sim 注入"),
+# teacher 特权观测 (仅训练, design.md §2.1) 拆分为静态外因 + 瞬态扰动
+# 静态环境外因 (RMA latent 监督目标, 9 维): episode 级常量, 由 RMA adapter 从
+#   本体感受历史推断 (Kumar et al. RSS 2021)。与 kuafu_mjx_env.RMA_STATIC_DIM 一致。
+PRIVILEGED_STATIC_SPEC = [
     ("friction",        1, "接触摩擦系数真值",      "sim"),
-    ("mass_bias",       3, "M/COM 偏移真值",        "sim"),
-    ("delay",           2, "actuator/sensor 延迟",  "sim"),
-    ("external_force",  3, "外部扰动力向量",        "sim"),
+    ("mass_scale",      1, "整机质量缩放真值",      "sim"),
+    ("com_bias",        3, "M/COM 偏移真值",        "sim"),
+    ("inertia_scale",   1, "转动惯量缩放真值",      "sim"),
+    ("torque_scale",    1, "电机力矩常数缩放真值",  "sim"),
+    ("deadband",        1, "舵机死区真值",          "sim"),
+    ("delay_steps",     1, "执行器/传感延迟步数",  "sim"),
+]
+# 瞬态扰动 (3 维): 每步变化的外部推力, 由 policy 本体感受(wheel/hip torque)在线
+#   感知, 只留 teacher critic 特权, 不进 RMA latent。与 kuafu_mjx_env.TRANSIENT_DIM 一致。
+TRANSIENT_SPEC = [
+    ("active_push",     3, "实际施加的瞬态扰动力",  "sim"),
 ]
 
-# RMA latent (design.md §2.5)
-RMA_LATENT_DIM = 5
+# RMA latent (design.md §2.5) — 仅静态环境外因 (9 维)
+RMA_LATENT_DIM = 9
 
 
 # ============================================================
@@ -120,10 +129,14 @@ DOMAIN_RANDOMIZATION = {
 LQR_K = P.LQR_K  # [-4.47, -61.18, -5.82, -4.02], 状态 [x,θ,ẋ,θ̇]
 
 
-def residual_wheel_torque(lqr_F, dtau_norm):
-    """RL 轮力矩残差叠加: τ_cmd = clip(LQR/2 + Δτ×τ_max, ±堵转), 每轮."""
-    tau_lqr = lqr_F * P.R / 2.0          # LQR 输出分摊两轮
-    tau_rl = dtau_norm * WHEEL_TAU_MAX   # 残差归一化→Nm
+def residual_wheel_torque(lqr_F, dtau_norm, torque_scale=1.0):
+    """RL 轮力矩残差叠加 (与 kuafu_mjx_env.step 一致):
+
+    τ_cmd = clip((LQR×R/2 + Δτ×τ_max) × torque_scale, ±堵转), 每轮。
+    torque_scale 模拟电机常数偏差, 对 LQR 底层与 RL 残差统一生效。
+    """
+    tau_lqr = lqr_F * P.R / 2.0 * torque_scale          # LQR 输出分摊两轮
+    tau_rl = dtau_norm * WHEEL_TAU_MAX * torque_scale    # 残差归一化→Nm
     return float(np.clip(tau_lqr + tau_rl, -WHEEL_TAU_CLIP, WHEEL_TAU_CLIP))
 
 

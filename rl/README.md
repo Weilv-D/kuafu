@@ -131,7 +131,7 @@ JAX 0.10.2 (cuda13)  ←→  DLPack 零拷贝  ←→  PyTorch 2.12.1 (cu130)
 ```
 
 - **JAX + PyTorch 共享 CUDA 13 runtime**，DLPack 零拷贝交换 GPU 张量
-- **Teacher**：RSL-RL 内置 ActorCritic [512,512,512]，critic 含特权信息，actor 仅本体感受 140 维
+- **Teacher**：RSL-RL 内置 ActorCritic [512,512,512]，critic 含特权信息 12 维（9 维静态环境外因 + 3 维瞬态推力），actor 仅本体感受 140 维
 - **Student**：StudentPolicy(trunk + RMA adapter)，参数量随隐藏层同步 scaling
 - **LQR 底层**：永远在环，RL 挂掉时兜底（K=[-4.47,-61.18,-5.82,-4.02]，LP=56mm）
 
@@ -139,5 +139,6 @@ JAX 0.10.2 (cuda13)  ←→  DLPack 零拷贝  ←→  PyTorch 2.12.1 (cu130)
 
 | 项 | 状态 | 影响 | 计划 |
 |----|------|------|------|
-| `terrain.py` 未接入 `train.py` | 代码就绪但未引用 | 不影响平地训练 | 平地 reward 收敛后，在 train.py 外层循环接入 CurriculumController |
+| `terrain.py` 课程/地形 | 参考规格 (设计文档化); 活跃课程逻辑在 `train.py` 内联 | 不影响平地训练 | 接入真实地形时应在 `KuafuMjxEnv.step` 调用, 或替换内联课程为 `CurriculumController` |
+| 延迟鲁棒性对拍 | `eval_policy.py` / `playback.py` 新增 `--latency` (观测+动作延迟), 可复现训练 latency DR | 落地前建议带延迟跑一遍确认 | 真机/带延迟 sim 对拍 |
 | history_len 4 vs 50 | 环境用 4 步堆叠(140 维), RMA 需 50 步 | 不影响训练（RSL-RL 吃 140 维），蒸馏时已处理 | distill.py 从 50 步序列取 base_obs(35) 喂给 adapter |

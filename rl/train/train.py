@@ -30,42 +30,23 @@ import jax
 
 
 def make_train_cfg() -> dict:
-    """RSL-RL 2.x OnPolicyRunner 配置格式."""
+    """RSL-RL 2.x OnPolicyRunner 配置 — 全部源自 train_config (单一真相源)."""
+    from rl.train.train_config import ALGORITHM, POLICY, RUN
     return {
-        "algorithm": {
-            "class_name": "PPO",
-            "num_learning_epochs": 5,
-            "num_mini_batches": 4,
-            "clip_param": 0.2,
-            "gamma": 0.99,
-            "lam": 0.95,
-            "value_loss_coef": 0.5,
-            "entropy_coef": 0.005,
-            "learning_rate": 3e-4,
-            "max_grad_norm": 1.0,
-            "schedule": "adaptive",
-            "desired_kl": 0.01,
-            "rnd_cfg": None,
-            "symmetry_cfg": None,
-        },
-        "policy": {
-            "class_name": "ActorCritic",
-            "init_noise_std": 1.0,
-            "actor_hidden_dims": [512, 512, 512],
-            "critic_hidden_dims": [512, 512, 512],
-            "activation": "elu",
-        },
-        "num_steps_per_env": 24,
-        "save_interval": 50,
-        "empirical_normalization": True,
+        "algorithm": dict(ALGORITHM),
+        "policy": dict(POLICY),
+        "num_steps_per_env": RUN["num_steps_per_env"],
+        "save_interval": RUN["save_interval"],
+        "empirical_normalization": RUN["empirical_normalization"],
     }
 
 
 def main():
     parser = argparse.ArgumentParser(description="KUAFU Teacher PPO Training")
-    parser.add_argument("--num_envs", type=int, default=1024, help="并行环境数")
-    parser.add_argument("--iterations", type=int, default=3000, help="训练迭代数")
-    parser.add_argument("--seed", type=int, default=42, help="随机种子")
+    from rl.train.train_config import RUN
+    parser.add_argument("--num_envs", type=int, default=RUN["num_envs"], help="并行环境数")
+    parser.add_argument("--iterations", type=int, default=RUN["iterations"], help="训练迭代数")
+    parser.add_argument("--seed", type=int, default=RUN["seed"], help="随机种子")
     parser.add_argument("--run_name", type=str, required=True,
                         help="训练代号(如 garlic),产物存至 rl/checkpoints/<run_name>/teacher/")
     parser.add_argument("--log_dir", type=str, default="rl/checkpoints", help="checkpoint 根目录")
@@ -83,7 +64,8 @@ def main():
     # ---- 创建环境 ----
     # 当前: 平地训练 (difficulty=0)。课程地形 (terrain.py CurriculumController)
     #       待平地 reward 收敛后在此处接入: 按 episode 成功率更新 difficulty。
-    from rl.env.kuafu_mjx_env import KuafuMjxEnv, OBS_DIM, PRIVILEGED_DIM
+    from rl.env.kuafu_mjx_env import (
+        KuafuMjxEnv, OBS_DIM, PRIVILEGED_DIM, RMA_STATIC_DIM, TRANSIENT_DIM)
     import torch
 
     env = KuafuMjxEnv(teacher=True, num_envs=args.num_envs)
@@ -223,6 +205,13 @@ def main():
     print(f"  obs={torch_env.num_obs}, privileged={torch_env.num_privileged_obs}, "
           f"action={torch_env.num_actions}")
 
+    # ---- 维度一致性守卫 (防止规格再次漂移) ----
+    assert torch_env.num_privileged_obs == OBS_DIM + PRIVILEGED_DIM, \
+        f"critic 维度错: {torch_env.num_privileged_obs} != {OBS_DIM}+{PRIVILEGED_DIM}"
+    assert RMA_STATIC_DIM + TRANSIENT_DIM == PRIVILEGED_DIM, \
+        f"特权拆分错: {RMA_STATIC_DIM}+{TRANSIENT_DIM} != {PRIVILEGED_DIM}"
+    assert torch_env.num_obs == OBS_DIM, f"actor obs 维度错: {torch_env.num_obs} != {OBS_DIM}"
+
     # ---- 训练配置 ----
     train_cfg = make_train_cfg()
 
@@ -274,8 +263,8 @@ def main():
         print("🔥 烟测: 5 iteration")
         run_iter = 5
 
-    total_steps = args.num_envs * 24 * run_iter
-    print(f"开始训练: 需进行 {run_iter} 轮迭代 (已完成 {start_iter} 轮, 目标 {n_iter} 轮) × {args.num_envs} envs × 24 steps = {total_steps:,} steps")
+    total_steps = args.num_envs * train_cfg["num_steps_per_env"] * run_iter
+    print(f"开始训练: 需进行 {run_iter} 轮迭代 (已完成 {start_iter} 轮, 目标 {n_iter} 轮) × {args.num_envs} envs × {train_cfg['num_steps_per_env']} steps = {total_steps:,} steps")
     t0 = time.time()
     runner.learn(num_learning_iterations=run_iter, init_at_random_ep_len=True)
     elapsed = time.time() - t0

@@ -89,7 +89,14 @@ HIP_STROKE = 1.52    # 曲柄半行程 rad
 OBS_DIM_BASE = 35    # 全观测 4 舵机 (hip_A + hip_B 各左右): 3+3+4+8+2+4+6+3+2
 HISTORY_STEPS = 4
 OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS  # 140
-PRIVILEGED_DIM = 12    # friction(1)+mass_scale(1)+com_bias(3)+inertia_scale(1)+torque_scale(1)+deadband(1)+delay_steps(1)+active_push(3)
+PRIVILEGED_DIM = 12    # teacher critic 特权 = 静态外因(9) + 瞬态扰动(3)
+# 特权观测拆分 (RMA 最佳实践, Kumar et al. RSS 2021):
+# - 静态环境外因 (RMA latent, 9 维): friction/mass/com/inertia/torque/deadband/delay
+#     episode 级常量, 由 adaptation module 从本体感受历史推断, 喂给 base policy
+# - 瞬态扰动 (3 维): active_push 每步变化的外部推力, 由 policy 本体感受
+#     (wheel_torque/hip_torque) 在线感知, 只留在 teacher critic 特权, 不进 RMA latent
+RMA_STATIC_DIM = 9    # friction(1)+mass_scale(1)+com_bias(3)+inertia_scale(1)+torque_scale(1)+deadband(1)+delay_steps(1)
+TRANSIENT_DIM = 3     # active_push(3) 瞬态外力
 ACTION_DIM = 6        # [dtau_L, dtau_R, hip_A_l, hip_A_r, hip_B_l, hip_B_r]
 DELAY_BUFFER_LEN = 3   # 最大延迟缓冲 (3步×20ms=60ms, 覆盖 DR_DELAY_ACT=30ms + DR_DELAY_SENSE=20ms)
 
@@ -168,6 +175,8 @@ class EnvState:
     delay_steps: jax.Array
     # 动作延迟缓冲 (DELAY_BUFFER_LEN × ACTION_DIM)
     action_buffer: jax.Array
+    # 观测延迟缓冲 (DELAY_BUFFER_LEN × OBS_DIM) — 传感器/计算延迟 DR (latency randomization)
+    obs_delay_buffer: jax.Array
     # 软终止: 连续倒下步数计数 (≥FALL_GRACE_STEPS 才真正终止)
     fall_count: jax.Array
     # 课程系统参数 (per-env)
@@ -416,7 +425,7 @@ class KuafuMjxEnv(MjxEnv):
         ])                    # = 35
 
     def _privileged_observation(self, env_state: EnvState) -> jax.Array:
-        """12 维特权观测 (teacher only)."""
+        """12 维特权观测 (teacher critic only): 静态外因(9) + 瞬态扰动(3)."""
         return jp.concatenate([
             env_state.friction[jp.newaxis],      # 1
             env_state.mass_scale[jp.newaxis],     # 1
@@ -425,18 +434,44 @@ class KuafuMjxEnv(MjxEnv):
             env_state.torque_scale[jp.newaxis],   # 1
             env_state.deadband[jp.newaxis],       # 1 死区真值
             env_state.delay_steps.astype(jp.float32)[jp.newaxis],  # 1 延迟步数真值
-            env_state.active_push,                # 3 实际施加的扰动力真值
+            env_state.active_push,                # 3 实际施加的扰动力真值 (瞬态)
         ])
+
+    def _static_privileged_observation(self, env_state: EnvState) -> jax.Array:
+        """9 维静态环境外因 (RMA latent 监督目标): 不含瞬态 active_push."""
+        return jp.concatenate([
+            env_state.friction[jp.newaxis],      # 1
+            env_state.mass_scale[jp.newaxis],     # 1
+            env_state.com_bias,                   # 3
+            env_state.inertia_scale[jp.newaxis],  # 1
+            env_state.torque_scale[jp.newaxis],   # 1
+            env_state.deadband[jp.newaxis],       # 1 死区真值
+            env_state.delay_steps.astype(jp.float32)[jp.newaxis],  # 1 延迟步数真值
+        ])
+
+    def _delayed_obs(self, env_state: EnvState) -> jax.Array:
+        """对喂给 policy 的本体感受观测施加观测延迟 (sensor/compute latency).
+
+        与动作延迟同构: obs_delay_buffer[0]=最旧(2步前), [1]=1步前, [2]=当前。
+        delay_steps>=2 取 2 步前, >=1 取 1 步前, 否则当前。reset 时缓冲为 0(与
+        obs_history 初始全 0 一致, 无回归)。
+        """
+        cur = env_state.obs_history.reshape(-1)
+        buf = env_state.obs_delay_buffer
+        return jp.where(
+            env_state.delay_steps >= 2,
+            buf[1],
+            jp.where(env_state.delay_steps >= 1, buf[2], cur))
 
     def _observation(self, data: mjx.Data, env_state: EnvState):
         """构建观测: teacher 返回 dict, student 返回扁平数组.
 
-        obs_history 已在 step() 中更新 (含最新帧), 这里只 reshape。
+        obs_history 已在 step() 中更新 (含最新帧); 此处对 policy 观测施加观测延迟。
         """
-        flat_obs = env_state.obs_history.reshape(-1)    # (140,)
+        flat_obs = self._delayed_obs(env_state)    # (140,) 已含观测延迟
 
         if self._teacher:
-            priv = self._privileged_observation(env_state)  # (9,)
+            priv = self._privileged_observation(env_state)  # (12,)
             return {"state": flat_obs, "privileged_state": priv}
         return flat_obs
 
@@ -616,6 +651,7 @@ class KuafuMjxEnv(MjxEnv):
             deadband=deadband,
             delay_steps=delay_steps,
             action_buffer=jp.zeros((DELAY_BUFFER_LEN, ACTION_DIM)),
+            obs_delay_buffer=jp.zeros((DELAY_BUFFER_LEN, OBS_DIM)),
             fall_count=jp.int32(0),
             difficulty=difficulty,
             push_force=jp.zeros(3),
@@ -770,6 +806,13 @@ class KuafuMjxEnv(MjxEnv):
             base_obs[jp.newaxis, :],
         ], axis=0)
         env_state = env_state.replace(obs_history=new_history)
+
+        # 更新观测延迟缓冲 (与动作延迟同构: 推入当前 obs, 丢弃最旧)
+        new_obs_delay_buffer = jp.concatenate([
+            env_state.obs_delay_buffer[1:],
+            new_history.reshape(-1)[jp.newaxis, :],
+        ], axis=0)
+        env_state = env_state.replace(obs_delay_buffer=new_obs_delay_buffer)
 
         # lin_vel_tracking / orientation 实际值 (供 metric 记录)
         q = jp.stack([data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]])

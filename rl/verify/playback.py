@@ -11,7 +11,11 @@ KUAFU 策略回放 — design.md §2.6 阶段 3
 """
 import os
 import sys
+import time
 import argparse
+import faulthandler
+
+faulthandler.enable()  # 崩溃时打印 Python/C 栈, 便于定位原生堆损坏
 
 PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJ_ROOT)
@@ -39,8 +43,11 @@ N_SUBSTEPS = 10  # 500 Hz 物理
 OMEGA_NOLOAD = P.RPM_WHEEL_NOLOAD * 2 * np.pi / 60  # DDSM315 空载角速度 rad/s
 
 
-def playback_teacher(ckpt_path: str, xml_path: str, duration: float = 10.0):
-    """加载 Teacher policy, 50Hz 控制 + 500Hz 物理回放."""
+def playback_teacher(ckpt_path: str, xml_path: str, duration: float = 10.0, latency: int = 0):
+    """加载 Teacher policy, 50Hz 控制 + 500Hz 物理回放.
+
+    latency: 观测/动作延迟步数, 复现训练侧 latency DR (默认 0).
+    """
     import torch
     from rl.train.teacher_model import TeacherInferenceModel
 
@@ -55,38 +62,57 @@ def playback_teacher(ckpt_path: str, xml_path: str, duration: float = 10.0):
 
     obs_history = np.zeros((4, OBS_DIM_BASE), dtype=np.float32)
     last_action = np.zeros(ACTION_DIM, dtype=np.float32)
+    cap = max(latency, 0) + 1
+    obs_delay_buf = [obs_history.flatten().astype(np.float32).copy() for _ in range(cap)]
+    act_delay_buf = [last_action.copy() for _ in range(cap)]
     n_ctrl_steps = int(duration / CTRL_DT)
 
-    print(f"启动回放: {duration:.0f}s ({n_ctrl_steps} ctrl steps × {N_SUBSTEPS} substeps)")
+    print(f"启动回放: {duration:.0f}s ({n_ctrl_steps} ctrl steps × {N_SUBSTEPS} substeps)"
+          + (f", latency={latency}" if latency > 0 else ""))
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
         for step in range(n_ctrl_steps):
             if not viewer.is_running():
                 break
 
-            # 50Hz: 推理 (用当前 history, 第一步全 0 与训练 reset 一致)
-            obs_flat = obs_history.flatten()
+            # 50Hz: 推理 (用延迟后的 obs, 第一步全 0 与训练 reset 一致)
+            inf_obs = obs_delay_buf[-latency] if latency > 0 else obs_history.flatten()
             with torch.no_grad():
-                action = teacher(torch.from_numpy(obs_flat).float().unsqueeze(0)).numpy()[0]
+                action = teacher(torch.from_numpy(inf_obs).float().unsqueeze(0)).numpy()[0]
+            applied = act_delay_buf[-latency] if latency > 0 else action
 
-            # 应用动作
-            _apply_action(data, action)
-            last_action = action
-
-            # 500Hz: 10 子步物理
-            for _ in range(N_SUBSTEPS):
-                mujoco.mj_step(model, data)
+            # 应用动作 + 500Hz 物理子步: 加 viewer.lock 防止渲染线程并发读/重分配 data 导致堆损坏
+            with viewer.lock():
+                _apply_action(data, applied)
+                last_action = action
+                for _ in range(N_SUBSTEPS):
+                    mujoco.mj_step(model, data)
 
             # 推理后才更新 history (与训练 step() 顺序一致)
             command = np.array([0.0, 0.0, P.D0_MIN])
             base_obs = _build_obs(data, last_action, command, step)
             obs_history = np.roll(obs_history, -1, axis=0)
             obs_history[-1] = base_obs
+            obs_delay_buf.append(obs_history.flatten().astype(np.float32).copy())
+            if len(obs_delay_buf) > cap:
+                obs_delay_buf.pop(0)
+            act_delay_buf.append(action.copy())
+            if len(act_delay_buf) > cap:
+                act_delay_buf.pop(0)
             viewer.sync()
 
+        # 回放结束后保留窗口供肉眼检查, 用户关窗才退出 (避免 sim.exit() 死锁导致卡死)
+        while viewer.is_running():
+            viewer.sync()
+            time.sleep(0.01)
+        os._exit(0)  # 在 with 块内强制退出, 跳过 __exit__ 的 sim.exit() 死锁
 
-def playback_student(ckpt_path: str, xml_path: str, duration: float = 10.0):
-    """加载 Student policy, 50Hz 控制 + 500Hz 物理回放."""
+
+def playback_student(ckpt_path: str, xml_path: str, duration: float = 10.0, latency: int = 0):
+    """加载 Student policy, 50Hz 控制 + 500Hz 物理回放.
+
+    latency: 观测/动作延迟步数, 复现训练侧 latency DR (默认 0).
+    """
     import torch
     from rl.train.networks import StudentPolicy
 
@@ -111,32 +137,41 @@ def playback_student(ckpt_path: str, xml_path: str, duration: float = 10.0):
     )
     student.load_state_dict(state, strict=False)
     student.eval()
+    print(f"Student hidden_dims={hidden_dims}")
 
     obs_history = np.zeros((4, OBS_DIM_BASE), dtype=np.float32)
     rma_history = np.zeros((1, 50, OBS_DIM_BASE), dtype=np.float32)  # RMA adapter 50 步历史
     last_action = np.zeros(ACTION_DIM, dtype=np.float32)
+    cap = max(latency, 0) + 1
+    obs_delay_buf = [obs_history.flatten().astype(np.float32).copy() for _ in range(cap)]
+    rma_delay_buf = [rma_history.copy() for _ in range(cap)]
+    act_delay_buf = [last_action.copy() for _ in range(cap)]
     n_ctrl_steps = int(duration / CTRL_DT)
 
-    print(f"启动 Student 回放: {duration:.0f}s")
+    print(f"启动 Student 回放: {duration:.0f}s"
+          + (f", latency={latency}" if latency > 0 else ""))
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
         for step in range(n_ctrl_steps):
             if not viewer.is_running():
                 break
 
-            # 50Hz: 推理 (用当前 history, 第一步全 0 与训练 reset 一致)
-            obs_flat = obs_history.flatten()
+            # 50Hz: 推理 (用延迟后的 proprio + RMA history)
+            inf_obs = obs_delay_buf[-latency] if latency > 0 else obs_history.flatten()
+            inf_rma = rma_delay_buf[-latency] if latency > 0 else rma_history
             with torch.no_grad():
                 action = student(
-                    torch.from_numpy(obs_flat).float().unsqueeze(0),
-                    torch.from_numpy(rma_history).float(),
+                    torch.from_numpy(inf_obs).float().unsqueeze(0),
+                    torch.from_numpy(inf_rma).float(),
                 ).numpy()[0]
+            applied = act_delay_buf[-latency] if latency > 0 else action
 
-            _apply_action(data, action)
-            last_action = action
-
-            for _ in range(N_SUBSTEPS):
-                mujoco.mj_step(model, data)
+            # 加 viewer.lock 防止渲染线程并发读/重分配 data 导致堆损坏
+            with viewer.lock():
+                _apply_action(data, applied)
+                last_action = action
+                for _ in range(N_SUBSTEPS):
+                    mujoco.mj_step(model, data)
 
             # 推理后才更新 history (与训练 step() 顺序一致)
             command = np.array([0.0, 0.0, P.D0_MIN])
@@ -145,7 +180,22 @@ def playback_student(ckpt_path: str, xml_path: str, duration: float = 10.0):
             obs_history[-1] = base_obs
             rma_history = np.roll(rma_history, -1, axis=1)
             rma_history[0, -1, :] = base_obs
+            obs_delay_buf.append(obs_history.flatten().astype(np.float32).copy())
+            if len(obs_delay_buf) > cap:
+                obs_delay_buf.pop(0)
+            rma_delay_buf.append(rma_history.copy())
+            if len(rma_delay_buf) > cap:
+                rma_delay_buf.pop(0)
+            act_delay_buf.append(action.copy())
+            if len(act_delay_buf) > cap:
+                act_delay_buf.pop(0)
             viewer.sync()
+
+        # 回放结束后保留窗口供肉眼检查, 用户关窗才退出 (避免 sim.exit() 死锁导致卡死)
+        while viewer.is_running():
+            viewer.sync()
+            time.sleep(0.01)
+        os._exit(0)  # 在 with 块内强制退出, 跳过 __exit__ 的 sim.exit() 死锁
 
 
 def main():
@@ -153,14 +203,16 @@ def main():
     parser.add_argument("--ckpt", required=True, help="Checkpoint 路径")
     parser.add_argument("--student", action="store_true", help="Student 模式 (否则 Teacher)")
     parser.add_argument("--duration", type=float, default=10.0, help="回放时长 (s)")
+    parser.add_argument("--latency", type=int, default=0,
+                        help="观测/动作延迟步数 (复现训练 latency DR, 默认 0)")
     args = parser.parse_args()
 
     xml = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "kuafu.xml")
 
     if args.student:
-        playback_student(args.ckpt, xml, args.duration)
+        playback_student(args.ckpt, xml, args.duration, latency=args.latency)
     else:
-        playback_teacher(args.ckpt, xml, args.duration)
+        playback_teacher(args.ckpt, xml, args.duration, latency=args.latency)
 
 
 if __name__ == "__main__":

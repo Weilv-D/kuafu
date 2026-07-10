@@ -112,8 +112,14 @@ def _site_gap(data, model, suffix):
     return np.linalg.norm(sa - sb)
 
 
-def run_episode(model, data, teacher, command, max_steps, rng=None, dr=False):
-    """跑一个 episode, 返回指标 dict. fallen 则提前终止."""
+def run_episode(model, data, teacher, command, max_steps, rng=None, dr=False,
+                latency=0):
+    """跑一个 episode, 返回指标 dict. fallen 则提前终止.
+
+    latency: 观测/动作延迟步数 (默认 0). 复现训练侧 latency randomization
+    (kuafu_mjx_env 的 obs_delay_buffer / action_buffer), 用于检验部署鲁棒性。
+    与训练一致, 同一 latency 同时作用于 obs 与 action。
+    """
     import torch
     mujoco.mj_resetDataKeyframe(model, data, 0)
     if dr and rng is not None:
@@ -130,6 +136,11 @@ def run_episode(model, data, teacher, command, max_steps, rng=None, dr=False):
     obs_history = np.zeros((4, OBS_DIM_BASE), dtype=np.float32)
     last_action = np.zeros(ACTION_DIM, dtype=np.float32)
 
+    # 延迟缓冲 (复现训练侧 latency): 存历史 obs(140) 与 action(6)
+    cap = max(latency, 0) + 1
+    obs_delay_buf = [obs_history.flatten().astype(np.float32).copy() for _ in range(cap)]
+    act_delay_buf = [last_action.copy() for _ in range(cap)]
+
     pitches, rolls = [], []
     ang_vels, lin_vels_local = [], []
     actions_sq = []
@@ -138,13 +149,15 @@ def run_episode(model, data, teacher, command, max_steps, rng=None, dr=False):
     for step in range(max_steps):
         if _is_fallen(data):
             break
-        # 推理: 用当前 obs_history (第一步全 0, 与训练 reset 一致)
-        obs_flat = obs_history.flatten()
+        # 推理: 用延迟后的 obs_history (latency=0 时为当前, 与训练 reset 一致)
+        inf_obs = obs_delay_buf[-latency] if latency > 0 else obs_history.flatten()
         with torch.no_grad():
-            action = teacher(torch.from_numpy(obs_flat).float().unsqueeze(0)).numpy()[0]
+            action = teacher(torch.from_numpy(inf_obs).float().unsqueeze(0)).numpy()[0]
+        # 执行延迟后的动作 (latency=0 时为当前 action)
+        applied = act_delay_buf[-latency] if latency > 0 else action
         action_delta = action - last_action
-        _apply_action(data, action)
-        last_action = action
+        _apply_action(data, applied)
+        last_action = action  # 注意: obs 里的 last_action 用 policy 原始输出 (与 env 一致)
         for _ in range(N_SUBSTEPS):
             mujoco.mj_step(model, data)
 
@@ -152,6 +165,14 @@ def run_episode(model, data, teacher, command, max_steps, rng=None, dr=False):
         base_obs = _build_obs(data, last_action, command, step)
         obs_history = np.roll(obs_history, -1, axis=0)
         obs_history[-1] = base_obs
+
+        # 推入延迟缓冲
+        obs_delay_buf.append(obs_history.flatten().astype(np.float32).copy())
+        if len(obs_delay_buf) > cap:
+            obs_delay_buf.pop(0)
+        act_delay_buf.append(action.copy())
+        if len(act_delay_buf) > cap:
+            act_delay_buf.pop(0)
 
         pitch, roll = _get_pitch_roll(data)
         pitches.append(pitch); rolls.append(roll)
@@ -208,6 +229,8 @@ def main():
     parser.add_argument("--episodes", type=int, default=10, help="DR 模式 episode 数")
     parser.add_argument("--max_steps", type=int, default=10000,
                         help="单 episode 最大步数 (默认 10000=200s)")
+    parser.add_argument("--latency", type=int, default=0,
+                        help="观测/动作延迟步数 (复现训练 latency DR, 默认 0)")
     args = parser.parse_args()
 
     from rl.train.teacher_model import TeacherInferenceModel
@@ -224,7 +247,7 @@ def main():
 
     if args.mode == "deterministic":
         command = np.array([0.0, 0.0, DWELL])
-        r = run_episode(model, data, teacher, command, args.max_steps)
+        r = run_episode(model, data, teacher, command, args.max_steps, latency=args.latency)
         print_report("deterministic (v=0, ω=0, d0=dwell)", [r])
 
     elif args.mode == "dr":
@@ -232,7 +255,8 @@ def main():
         command = np.array([0.0, 0.0, DWELL])
         results = []
         for ep in range(args.episodes):
-            r = run_episode(model, data, teacher, command, args.max_steps, rng=rng, dr=True)
+            r = run_episode(model, data, teacher, command, args.max_steps, rng=rng, dr=True,
+                            latency=args.latency)
             results.append(r)
             status = "倒下" if r["fallen"] else "稳定"
             print(f"  ep {ep+1}/{args.episodes}: {r['stable_steps']}步 ({r['stable_seconds']:.1f}s) [{status}]")
@@ -245,7 +269,7 @@ def main():
         print(f"  {'v_cmd':>8} {'稳定步数':>10} {'状态':>6} {'跟踪误差':>10}")
         for v in velocities:
             command = np.array([v, 0.0, DWELL])
-            r = run_episode(model, data, teacher, command, args.max_steps)
+            r = run_episode(model, data, teacher, command, args.max_steps, latency=args.latency)
             results.append(r)
             status = "倒下" if r["fallen"] else "稳定"
             print(f"  {v:>8.2f} {r['stable_steps']:>10} {status:>6} {r['lin_vel_track_err']:>10.4f}")

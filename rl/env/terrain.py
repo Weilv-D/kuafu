@@ -1,22 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-KUAFU 课程地形系统 — design.md §2.6 / §3.4
+KUAFU 课程/地形 设计参考 (design.md §2.6 / §3.4)
 
-[状态: 未接入训练] 当前 train.py 不引用本模块。平地平衡 reward 收敛后,
-在 train.py 外层循环中调用 CurriculumController, 将 difficulty 传入环境。
+[状态: 参考规格, 未接入训练] 本模块是课程阶段与地形参数的*设计参考*,
+当前 train.py 的 DirectVecEnv.step 已实现等价的内联课程逻辑 (per-episode
+按 success 调整 difficulty), 不 import 本模块。KUAFU_MJX_ENV 也在 step 内
+联实现了推力扰动 (xfrc_applied) 与 difficulty 缩放的域随机化, 同样不调用
+本模块的 get_terrain_params / sample_push_impulse。
 
-get_terrain_params 使用 difficulty 连续缩放 (JIT 兼容, 无 Python if 分支)。
-terrain_type 选择由 host 侧 CurriculumController (Python 类) 决定。
+→ 因此: 本模块的函数/类为参考实现, 修改它们不会自动影响训练。
+  若要将地形/推力真正接入训练, 应在 KuafuMjxEnv.step 内调用, 或把
+  DirectVecEnv 的内联课程替换为下面的 CurriculumController。
 
-按课程阶段 (difficulty 0.0→1.0) 程序化生成地形:
+课程阶段 (difficulty 0.0→1.0, 与 train.py 内联逻辑范围一致):
   0.0: plane (平地平衡)
   0.3: plane_tilt (坡度 ±10°)
   0.5: hfield (随机粗糙噪声)
   0.7: mesh_stair (30mm 台阶, M4 验收)
   1.0: perturbation (平地 + 随机推力扰动)
-
-地形通过修改 MJCF floor geom 实现, 或在 step 中注入外部扰动力。
-本轮提供地形参数生成 + 外部扰动采样, 供 KuafuMjxEnv 使用。
 """
 import jax
 import jax.numpy as jp

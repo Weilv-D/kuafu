@@ -10,14 +10,16 @@ checkpoint 实际键名 (从 model_0.pt 实读, 2-DOF 五杆 6 维动作):
     actor.2.weight:    (H, H)
     actor.4.weight:    (H, H)
     actor.6.weight:    (ACTION_DIM, H) 最后一层 Linear 在 Sequential 内 (6)
-    critic.0.weight:   (H, PRIVILEGED_DIM)  critic 输入=9 (仅 privileged)
+    critic.0.weight:   (H, OBS_DIM+PRIVILEGED_DIM)  critic 输入=152 (proprio 140 + 特权 12)
     critic.6.weight:   (1, H)
   obs_norm_state_dict:
-    _mean: (1, OBS_DIM)    EmpiricalNormalization
+    _mean: (1, OBS_DIM)    EmpiricalNormalization (actor 本体感受)
     _var:  (1, OBS_DIM)
     _std:  (1, OBS_DIM)
+  privileged_obs_norm_state_dict:           # critic 特权归一化 (本模块不消费)
+    _mean: (1, OBS_DIM+PRIVILEGED_DIM)
 
-关键: actor 只吃 proprio(OBS_DIM), critic 只吃 privileged(9)。
+ 关键: actor 只吃 proprio(OBS_DIM=140), critic 吃 proprio+特权(152)。
       actor 是 4 层 Linear 全在 Sequential 内 (含输出层), 不是 trunk+head 拆分。
       obs_norm 键名是 _mean/_var/_std, 不是 obs_rms.mean。
 """

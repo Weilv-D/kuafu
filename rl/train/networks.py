@@ -2,8 +2,8 @@
 """
 KUAFU RL 策略网络 — PyTorch nn.Module (部署用)
 
-design.md §2.5: RMA Adapter [32,64,32]→5 + StudentPolicy [256,256,256]
-约束: 总参数 <200k (Pi5 ONNX <1ms)
+design.md §2.5: RMA Adapter [32,64,32]→9 (静态环境外因) + StudentPolicy [512,512,512]
+约束: 总参数 ~621k (与 teacher 隐藏层对齐, Pi5 ONNX ~1.5ms < 20ms 周期)
 
 注意: Teacher 训练使用 RSL-RL 内置 ActorCritic (由 train.py config 配置),
 本文件仅定义部署用的 StudentPolicy 和 RMAAdapter。
@@ -24,7 +24,7 @@ from typing import Tuple
 class RMAAdapter(nn.Module):
     """RMA 适配器: 从历史观测推断环境隐变量 z.
 
-    design.md §2.5: 50 步历史 → CNN [32,64,32] → 5 维 z
+    design.md §2.5: 50 步历史 → CNN [32,64,32] → 9 维静态环境参数 z
     Student 部署时在线推断 z, 适应质量/摩擦/延迟变化。
     """
 
@@ -32,7 +32,7 @@ class RMAAdapter(nn.Module):
         self,
         obs_dim: int = 35,
         history_len: int = 50,
-        latent_dim: int = 12,
+        latent_dim: int = 9,
         hidden_dims: Tuple[int, ...] = (32, 64, 32),
     ):
         super().__init__()
@@ -73,7 +73,7 @@ class StudentPolicy(nn.Module):
         history_obs_dim: int = 35,
         history_len: int = 50,
         action_dim: int = 6,
-        latent_dim: int = 12,
+        latent_dim: int = 9,
         hidden_dims: Tuple[int, ...] = (512, 512, 512),
     ):
         super().__init__()

@@ -57,7 +57,8 @@ def distill(
       Student = trunk(proprio + z) + adapter(history→z) + policy_head(trunk+z→action)
       Teacher 已训练好 (actor 仅吃 proprio), student 用历史推测特权 z, 拟合 teacher 动作。
     """
-    from rl.env.kuafu_mjx_env import KuafuMjxEnv, OBS_DIM, OBS_DIM_BASE, PRIVILEGED_DIM, ACTION_DIM
+    from rl.env.kuafu_mjx_env import (
+        KuafuMjxEnv, OBS_DIM, OBS_DIM_BASE, PRIVILEGED_DIM, RMA_STATIC_DIM, ACTION_DIM)
     from rl.train.networks import StudentPolicy, count_parameters
     from rl.train.teacher_model import TeacherInferenceModel
 
@@ -78,7 +79,7 @@ def distill(
         history_obs_dim=OBS_DIM_BASE,
         history_len=50,
         action_dim=ACTION_DIM,
-        latent_dim=PRIVILEGED_DIM,
+        latent_dim=RMA_STATIC_DIM,
         hidden_dims=tuple(teacher_hidden),
     ).cuda()
 
@@ -95,7 +96,9 @@ def distill(
     reset_fn = jax.jit(jax.vmap(env.reset))
     step_fn = jax.jit(jax.vmap(env.step))
 
-    state = reset_fn(jax.random.split(jax.random.PRNGKey(42), num_envs))
+    rng = jax.random.PRNGKey(42)
+    state = reset_fn(jax.random.split(rng, num_envs))
+    rng = jax.random.fold_in(rng, 0xABCD)  # 与初始 reset 解耦, 保证后续 reset 用不同种子
 
     n_iter = 5 if smoke_test else iterations
     # 历史缓冲放在 GPU 显存上 (RMA adapter 消费 50 步 base_obs)
@@ -131,7 +134,8 @@ def distill(
         done_jax = state.done
         done_any = bool(jax.device_get(done_jax.any()))
         if done_any:
-            reset_state = reset_fn(jax.random.split(jax.random.PRNGKey(it * 1000), num_envs))
+            rng, reset_rng = jax.random.split(rng)
+            reset_state = reset_fn(jax.random.split(reset_rng, num_envs))
             done_mask = done_jax.astype(jp.bool_)
             state = jax.tree_util.tree_map(
                 lambda cur, new: jp.where(
@@ -169,8 +173,10 @@ def distill(
             pred_action, pred_z = student(p_b, h_b)
 
             # Multi-task Loss (Action MSE + Latent MSE)
+            # z 仅监督静态环境外因 (前 RMA_STATIC_DIM 维), 瞬态 active_push 不进 latent
+            priv_static_b = priv_b[:, :RMA_STATIC_DIM]
             loss_action = mse_loss(pred_action, t_act_b)
-            loss_z = mse_loss(pred_z, priv_b)
+            loss_z = mse_loss(pred_z, priv_static_b)
             loss = loss_action + 5.0 * loss_z
 
             optimizer.zero_grad()
