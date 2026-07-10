@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 # 训练规模 (design.md §2.6: MJX 4096 envs, 单 4090 PPO 60-650K steps/s)
 # ============================================================
 NUM_ENVS = 1024              # 并行环境数 (RTX 4070 8GB 实测, 4090 可调 4096)
-ITERATIONS = 3000            # 训练迭代数 (RTX 4070 ~6-12h)
+ITERATIONS = 12000           # 训练迭代数
 SEED = 42
 NUM_STEPS_PER_ENV = 24       # 每次 rollout 的步数
 
