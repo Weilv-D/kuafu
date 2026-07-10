@@ -53,6 +53,11 @@ void safety_state_update(float pitch_rad, float gyro_y_rads, float max_temp_c, f
 
     /* --- 1. Global Fault Detection --- */
     if (g_safety_state.current_mode != STATE_INIT) {
+        /* Emergency stop requested by the Pi */
+        if (g_pi_cmd_heartbeat.mode_request == STATE_FAULT) {
+            safety_state_trigger_fault(FAULT_EMERGENCY);
+        }
+
         /* Check Tilt (Pitch > 45 degrees) */
         if (fabsf(pitch_rad) > SAFETY_MAX_PITCH_RAD) {
             safety_state_trigger_fault(FAULT_TILT);

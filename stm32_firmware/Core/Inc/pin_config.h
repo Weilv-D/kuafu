@@ -105,6 +105,31 @@
 #define SERVO_CENTER_TICKS      2048
 #define SERVO_TICKS_PER_RAD     (4096.0f / (2.0f * 3.14159265f))
 
+/* --------------------------------------------------------------------------
+ * Servo interface contract (firmware is the source of truth):
+ *   Pi sends sim-frame joint angles (dwell = 0), order [LF, RF, LB, RB] =
+ *   [hip_A_l, hip_A_r, hip_B_l, hip_B_r]. Firmware maps each servo as:
+ *     tick = SERVO_DIR[i] * q[i] * SERVO_TICKS_PER_RAD + SERVO_CENTER[i]
+ *   - SERVO_DIR: right-side (_r) servos are mirror mounted -> negated.
+ *   - SERVO_CENTER: per-servo mechanical zero tick (dwell posture).
+ *   NOTE: SERVO_DIR signs and SERVO_CENTER values MUST be verified/calibrated
+ *         on the physical robot. Defaults below are placeholders.
+ * ------------------------------------------------------------------------ */
+#define SERVO_DIR_INIT          { +1, -1, +1, -1 }   /* [LF, RF, LB, RB] */
+#define SERVO_CENTER_INIT       { SERVO_CENTER_TICKS, SERVO_CENTER_TICKS, \
+                                  SERVO_CENTER_TICKS, SERVO_CENTER_TICKS }
+
+/* ========================================================================== */
+/*                     IMU Attitude Axis Mapping (calibratable)               */
+/* ========================================================================== */
+/* Map the balance-relevant tilt/rate to the physical IMU mounting.
+ * Verify on bench: tilt the body forward/back and confirm ATT_PITCH() rises
+ * monotonically with the correct sign. Adjust source/sign/index if mounted
+ * on a different axis or orientation. */
+#define ATT_PITCH(mahony)        (+1.0f * (mahony)->pitch)  /* body pitch (rad) */
+#define ATT_PITCH_RATE_IDX       1                          /* gyro[] index (Y) */
+#define ATT_PITCH_RATE_SIGN      (+1.0f)                    /* pitch-rate sign  */
+
 /* ========================================================================== */
 /*                            Safety Thresholds                               */
 /* ========================================================================== */

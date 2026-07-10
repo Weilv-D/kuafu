@@ -12,6 +12,8 @@
 #define BMI088_ACC_ERR_REG       0x02
 #define BMI088_ACC_STATUS        0x03
 #define BMI088_ACC_X_LSB         0x12
+#define BMI088_ACC_TEMP_MSB      0x22
+#define BMI088_ACC_TEMP_LSB      0x23
 #define BMI088_ACC_CONF          0x40
 #define BMI088_ACC_RANGE         0x41
 #define BMI088_ACC_PWR_CONF      0x7C
@@ -59,5 +61,13 @@ int bmi088_read_accel(BMI088_t *imu);
  * @return int 0 on success, -1 on failure.
  */
 int bmi088_read_gyro(BMI088_t *imu);
+
+/**
+ * @brief Reads the accelerometer chip temperature and converts to degC.
+ *
+ * @param imu Pointer to the device structure.
+ * @return int 0 on success, -1 on failure.
+ */
+int bmi088_read_temp(BMI088_t *imu);
 
 #endif /* BMI088_H */

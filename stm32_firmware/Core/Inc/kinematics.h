@@ -3,13 +3,14 @@
 
 /**
  * @brief Solves the inverse kinematics for a 5-bar linkage leg.
- *        Maps target virtual leg length D0 (in meters) to target crank angles (in radians).
- * 
+ *        Maps target virtual leg length D0 (in meters) to dwell-relative crank
+ *        angles (radians), matching the sim/servo zero convention (dwell = 0).
+ *
  * @param D0 Target virtual leg length (meters, range: 0.058m to 0.207m).
- * @param alpha1 Out: Target angle for the Back crank/servo (radians).
- * @param alpha2 Out: Target angle for the Front crank/servo (radians).
+ * @param q_hip_A Out: Front (A-chain) crank angle, dwell-relative (radians).
+ * @param q_hip_B Out: Back (B-chain) crank angle, dwell-relative (radians).
  * @return int 0 on success, -1 on failure (out of reachable workspace).
  */
-int kinematics_solve_ik(float D0, float *alpha1, float *alpha2);
+int kinematics_solve_ik(float D0, float *q_hip_A, float *q_hip_B);
 
 #endif /* KINEMATICS_H */

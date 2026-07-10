@@ -119,3 +119,21 @@ int bmi088_read_gyro(BMI088_t *imu) {
 
     return 0;
 }
+
+int bmi088_read_temp(BMI088_t *imu) {
+    uint8_t buffer[2];
+
+    /* Temperature lives on the accelerometer die (TEMP_MSB:0x22, TEMP_LSB:0x23) */
+    if (HAL_I2C_Mem_Read(imu->hi2c, BMI088_ACCEL_ADDR << 1, BMI088_ACC_TEMP_MSB, I2C_MEMADD_SIZE_8BIT, buffer, 2, 10) != HAL_OK) {
+        return -1;
+    }
+
+    /* 11-bit signed value: MSB holds bits[10:3], LSB[7:5] hold bits[2:0] */
+    uint16_t temp_uint11 = ((uint16_t)buffer[0] << 3) | (buffer[1] >> 5);
+    int16_t temp_int11 = (temp_uint11 > 1023) ? (int16_t)temp_uint11 - 2048 : (int16_t)temp_uint11;
+
+    /* Datasheet: Temperature = Temp_int11 * 0.125 degC + 23 degC */
+    imu->temperature = (float)temp_int11 * 0.125f + 23.0f;
+
+    return 0;
+}

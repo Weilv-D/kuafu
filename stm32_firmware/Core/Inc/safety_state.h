@@ -16,7 +16,8 @@ typedef enum {
     FAULT_TILT = 0x01,          /* Tilt / Pitch too high (> 45 degrees) */
     FAULT_HEARTBEAT = 0x02,     /* Pi link heartbeat lost */
     FAULT_OVERTEMP = 0x04,      /* Servo/sensor overtemperature */
-    FAULT_EMERGENCY = 0x08      /* Emergency stop request from Pi */
+    FAULT_EMERGENCY = 0x08,     /* Emergency stop request from Pi */
+    FAULT_SERVO = 0x10          /* Hip servo communication lost */
 } FaultCode_t;
 
 typedef struct {
