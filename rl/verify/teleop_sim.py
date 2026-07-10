@@ -13,7 +13,7 @@ KUAFU 仿真遥控 - 手柄/键盘实时操控虚拟机器人
   5. 手柄抢占/交还自主(若接了自主 stub)切换平滑
 
 运行:
-  rl/.venv/bin/python rl/verify/teleop_sim.py --ckpt rl/checkpoints/teacher_*/model_*.pt
+  rl/.venv/bin/python rl/verify/teleop_sim.py --ckpt rl/checkpoints/garlic/teacher/model_3999.pt
   rl/.venv/bin/python rl/verify/teleop_sim.py --ckpt ... --device keyboard   # 无手柄时
   rl/.venv/bin/python rl/verify/teleop_sim.py --ckpt ... --student            # Student 策略
 """

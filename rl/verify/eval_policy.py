@@ -12,7 +12,7 @@ KUAFU 策略评估 — headless deterministic / DR / 命令扫描
 
 运行:
   rl/.venv/bin/python rl/verify/eval_policy.py \
-      --ckpt rl/checkpoints/teacher_*/model_2999.pt
+      --ckpt rl/checkpoints/garlic/teacher/model_3999.pt
   rl/.venv/bin/python rl/verify/eval_policy.py --ckpt ... --mode dr --episodes 20
   rl/.venv/bin/python rl/verify/eval_policy.py --ckpt ... --mode cmd_sweep
 """

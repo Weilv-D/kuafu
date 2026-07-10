@@ -7,15 +7,17 @@ Teacher (特权信息) → Student (仅本体感受 + RMA latent):
   2. adapter z 监督: MSE(student_z, teacher_z) [阶段 2 后期加入]
 
 运行:
-  rl/.venv/bin/python rl/train/distill.py --teacher_ckpt rl/checkpoints/teacher_*/model_3000.pt
+  rl/.venv/bin/python rl/train/distill.py \
+    --run_name garlic --teacher_ckpt rl/checkpoints/garlic/teacher/model_3999.pt
 
 产出:
-  rl/checkpoints/student_{timestamp}/model_final.pt
+  rl/checkpoints/<run_name>/student/model_final.pt
 """
 import os
 import sys
 import argparse
 import time
+import re
 
 PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJ_ROOT)
@@ -47,6 +49,7 @@ def distill(
     iterations: int = 1000,
     log_dir: str = "rl/checkpoints",
     smoke_test: bool = False,
+    run_name: str = None,
 ):
     """Student DAgger 蒸馏.
 
@@ -186,13 +189,20 @@ def distill(
     print(f"\n✅ 蒸馏完成: {elapsed:.1f}s")
 
     if not smoke_test:
-        save_dir = os.path.join(PROJ_ROOT, log_dir, f"student_{int(time.time())}")
+        save_dir = os.path.join(PROJ_ROOT, log_dir, run_name, "student")
         os.makedirs(save_dir, exist_ok=True)
         save_path = os.path.join(save_dir, "model_final.pt")
+        # 解析 teacher iter (model_{iter}.pt)
+        m = re.search(r"model_(\d+)\.pt", teacher_ckpt)
+        teacher_iter = int(m.group(1)) if m else None
         torch.save({
             "model_state_dict": student.state_dict(),  # 标准 key 名
             "student_state_dict": student.state_dict(),  # 兼容旧导出脚本
             "iter": n_iter,
+            "teacher_ckpt": os.path.relpath(teacher_ckpt, PROJ_ROOT),  # 源 teacher .pt
+            "teacher_run": run_name,           # codename, 与目录一致
+            "teacher_iter": teacher_iter,      # teacher 迭代数
+            "distill_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }, save_path)
         print(f"   Checkpoint: {save_path}")
         print(f"   导出: rl/.venv/bin/python rl/export/export_policy.py --ckpt {save_path} --mode student")
@@ -200,7 +210,9 @@ def distill(
 
 def main():
     parser = argparse.ArgumentParser(description="KUAFU Student 蒸馏")
-    parser.add_argument("--teacher_ckpt", required=True, help="Teacher checkpoint 路径")
+    parser.add_argument("--teacher_ckpt", required=True, help="Teacher checkpoint 路径 (.pt)")
+    parser.add_argument("--run_name", type=str, required=True,
+                        help="训练代号(须与 teacher 一致),产物存至 rl/checkpoints/<run_name>/student/")
     parser.add_argument("--num_envs", type=int, default=1024)
     parser.add_argument("--iterations", type=int, default=500)
     parser.add_argument("--smoke_test", action="store_true")
@@ -210,11 +222,22 @@ def main():
         print(f"❌ Teacher checkpoint 不存在: {args.teacher_ckpt}")
         sys.exit(1)
 
+    # codename 一致性校验: 从 teacher_ckpt 路径解析 codename, 与 --run_name 比对
+    parts = os.path.abspath(args.teacher_ckpt).replace("\\", "/").split("/")
+    if "checkpoints" in parts:
+        idx = parts.index("checkpoints")
+        inferred = parts[idx + 1] if idx + 1 < len(parts) else None
+        if inferred and inferred != args.run_name:
+            print(f"❌ --run_name({args.run_name}) 与 teacher 路径中的代号({inferred})不一致")
+            print(f"   teacher_ckpt: {args.teacher_ckpt}")
+            sys.exit(1)
+
     distill(
         teacher_ckpt=args.teacher_ckpt,
         num_envs=args.num_envs,
         iterations=args.iterations,
         smoke_test=args.smoke_test,
+        run_name=args.run_name,
     )
 
 

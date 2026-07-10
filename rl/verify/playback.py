@@ -6,8 +6,8 @@ KUAFU 策略回放 — design.md §2.6 阶段 3
 50Hz 控制频率, 500Hz 物理子步 (10:1), 与训练环境时序一致。
 
 运行:
-  rl/.venv/bin/python rl/verify/playback.py --ckpt rl/checkpoints/teacher_*/model_500.pt
-  rl/.venv/bin/python rl/verify/playback.py --ckpt policy.pt --student
+  rl/.venv/bin/python rl/verify/playback.py --ckpt rl/checkpoints/garlic/teacher/model_3999.pt
+  rl/.venv/bin/python rl/verify/playback.py --ckpt rl/checkpoints/garlic/student/model_final.pt --student
 """
 import os
 import sys
@@ -60,14 +60,14 @@ def playback_teacher(ckpt_path: str, xml_path: str, duration: float = 10.0):
     print(f"启动回放: {duration:.0f}s ({n_ctrl_steps} ctrl steps × {N_SUBSTEPS} substeps)")
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
-        for _ in range(n_ctrl_steps):
+        for step in range(n_ctrl_steps):
             if not viewer.is_running():
                 break
 
             # 50Hz: 推理 (用当前 history, 第一步全 0 与训练 reset 一致)
             obs_flat = obs_history.flatten()
             with torch.no_grad():
-                action = teacher(torch.from_numpy(obs_flat).float()).numpy()
+                action = teacher(torch.from_numpy(obs_flat).float().unsqueeze(0)).numpy()[0]
 
             # 应用动作
             _apply_action(data, action)

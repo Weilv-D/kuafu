@@ -6,15 +6,20 @@ MJX 环境 (JAX/GPU) → DirectVecEnv (DLPack 零拷贝) → RSL-RL 2.x PPO (PyT
 Teacher: critic 含特权信息 (friction/mass/COM/inertia), actor 仅本体感受。
 
 运行:
-  rl/.venv/bin/python rl/train/train.py --num_envs 1024 --iterations 1000
+  rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 1024 --iterations 1000
 
 产出:
-  rl/checkpoints/teacher_{timestamp}/model_{iter}.pt
+  rl/checkpoints/<run_name>/run.json                 训练元数据
+  rl/checkpoints/<run_name>/teacher/model_{iter}.pt  Teacher checkpoint
+  rl/checkpoints/<run_name>/teacher/events.out.tfevents.*  TensorBoard
+  rl/checkpoints/<run_name>/teacher/git/kuafu.diff   代码快照
 """
 import os
 import sys
 import argparse
 import time
+import json
+import glob
 
 PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJ_ROOT)
@@ -61,9 +66,12 @@ def main():
     parser.add_argument("--num_envs", type=int, default=1024, help="并行环境数")
     parser.add_argument("--iterations", type=int, default=3000, help="训练迭代数")
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
-    parser.add_argument("--log_dir", type=str, default="rl/checkpoints", help="checkpoint 目录")
+    parser.add_argument("--run_name", type=str, required=True,
+                        help="训练代号(如 garlic),产物存至 rl/checkpoints/<run_name>/teacher/")
+    parser.add_argument("--log_dir", type=str, default="rl/checkpoints", help="checkpoint 根目录")
     parser.add_argument("--smoke_test", action="store_true", help="烟测模式 (5 iteration)")
-    parser.add_argument("--resume", type=str, default=None, help="从已有的 checkpoint 恢复训练")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="从 checkpoint 恢复训练(传 .pt 路径,如 rl/checkpoints/garlic/teacher/model_3999.pt)")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -218,9 +226,33 @@ def main():
     # ---- 训练配置 ----
     train_cfg = make_train_cfg()
 
-    # ---- 日志目录 ----
-    log_dir = os.path.join(PROJ_ROOT, args.log_dir, f"teacher_{int(time.time())}")
+    # ---- 日志目录: rl/checkpoints/<run_name>/teacher/ ----
+    run_root = os.path.join(PROJ_ROOT, args.log_dir, args.run_name)
+    log_dir = os.path.join(run_root, "teacher")
+
+    # 防覆盖校验: 目录已存在且含 .pt, 且非续训 -> 报错
+    existing = glob.glob(os.path.join(log_dir, "model_*.pt"))
+    if existing and not args.resume and not args.smoke_test:
+        print(f"❌ 目录已含 checkpoint: {log_dir}")
+        print(f"   续训请加 --resume <latest.pt>, 或换 --run_name")
+        sys.exit(1)
+
     os.makedirs(log_dir, exist_ok=True)
+
+    # ---- 写训练元数据 run.json ----
+    run_meta = {
+        "run_name": args.run_name,
+        "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "num_envs": args.num_envs,
+        "iterations": args.iterations,
+        "seed": args.seed,
+        "resume_from": args.resume,
+        "algorithm": "PPO",
+        "policy": "ActorCritic [512,512,512] elu",
+    }
+    meta_path = os.path.join(run_root, "run.json")
+    with open(meta_path, "w") as f:
+        json.dump(run_meta, f, indent=2, ensure_ascii=False)
 
     # ---- RSL-RL Runner ----
     from rsl_rl.runners import OnPolicyRunner

@@ -40,13 +40,20 @@ rl/
 ├── verify/
 │   ├── verify_model.py         物理验证 11 项（CPU 即可）
 │   ├── launch_viewer.py        交互 viewer 肉眼检查
-│   ├── probe_envs.py           显存测算（RTX 4070 最大 envs 搜索）
-│   └── playback.py             策略回放（native MuJoCo CPU）
+│   ├── playback.py             策略回放（native MuJoCo CPU）
+│   ├── eval_policy.py          策略评估（deterministic / DR / cmd_sweep）
+│   └── teleop_sim.py           仿真遥控（手柄/键盘实时操控）
+│
+├── teleop/                     遥控接口（手柄/键盘/自主 共用 Command 抽象）
 │
 ├── export/
-│   └── export_policy.py       PyTorch → ONNX（teacher/student 两模式）
+│   └── export_policy.py       PyTorch -> ONNX（teacher/student 两模式）
 │
-└── checkpoints/              ← 训练产出（不入 git）
+└── checkpoints/                ← 训练产出（不入 git）
+    └── <run_name>/             ← 训练代号（如 garlic）
+        ├── run.json            训练元数据
+        ├── teacher/            model_{iter}.pt + tfevents + git 快照
+        └── student/            model_final.pt（蒸馏产物，含 teacher 来源指针）
 ```
 
 ## 快速开始
@@ -62,25 +69,26 @@ python3 rl/verify/verify_model.py           # 11/11 通过
 # 3. 可视化（WSL 用 WSLg）
 python3 rl/verify/launch_viewer.py
 
-# 4. 显存测算
-rl/.venv/bin/python rl/verify/probe_envs.py  # 输出推荐 envs 数
-
-# 5. Teacher PPO 训练
-rl/.venv/bin/python rl/train/train.py --num_envs 1024  # 默认 3000 iter, ~73M steps, RTX4070 约 6–12h
+# 4. Teacher PPO 训练（--run_name 必填，代号如 garlic）
+rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 1024  # 默认 3000 iter, ~73M steps, RTX4070 约 6–12h
 # 推荐后台运行:
-nohup rl/.venv/bin/python rl/train/train.py --num_envs 1024 > train.log 2>&1 &
+nohup rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 1024 > train.log 2>&1 &
 tail -f train.log
+# 续训（从已有 checkpoint 恢复）:
+rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 1024 \
+  --resume rl/checkpoints/garlic/teacher/model_3999.pt
 
-# 6. Student 蒸馏（teacher 训练后）
+# 5. Student 蒸馏（teacher 训练后，--run_name 须与 teacher 一致）
 rl/.venv/bin/python rl/train/distill.py \
-  --teacher_ckpt rl/checkpoints/teacher_*/model_3000.pt
+  --run_name garlic \
+  --teacher_ckpt rl/checkpoints/garlic/teacher/model_3999.pt
 
-# 7. ONNX 导出
+# 6. ONNX 导出
 rl/.venv/bin/python rl/export/export_policy.py \
-  --ckpt rl/checkpoints/teacher_*/model_3000.pt --mode teacher
+  --ckpt rl/checkpoints/garlic/teacher/model_3999.pt --mode teacher
 
-# 8. 策略回放（可视化）
-rl/.venv/bin/python rl/verify/playback.py --ckpt policy.onnx
+# 7. 策略回放（可视化）
+rl/.venv/bin/python rl/verify/playback.py --ckpt rl/checkpoints/garlic/teacher/model_3999.pt
 ```
 
 ## 训练管线状态（design.md §2.6）

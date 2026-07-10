@@ -11,8 +11,8 @@ KUAFU 策略导出 — PyTorch → ONNX (design.md §2.6 阶段 4 / §六 部署
   Pi5: ONNX Runtime aarch64, MLP <1ms 推理, 50Hz 控制循环
 
 运行:
-  rl/.venv/bin/python rl/export/export_policy.py --ckpt model_500.pt --mode teacher
-  rl/.venv/bin/python rl/export/export_policy.py --ckpt model_final.pt --mode student
+  rl/.venv/bin/python rl/export/export_policy.py --ckpt rl/checkpoints/garlic/teacher/model_3999.pt --mode teacher
+  rl/.venv/bin/python rl/export/export_policy.py --ckpt rl/checkpoints/garlic/student/model_final.pt --mode student
 """
 import os
 import sys
