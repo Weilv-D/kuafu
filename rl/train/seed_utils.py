@@ -17,18 +17,28 @@ import numpy as np
 import torch
 
 
-def seed_all(seed: int) -> None:
-    """播种所有随机源 (torch / numpy / python / cuda), 与 JAX 显式 key 同源.
+def seed_all(seed: int):
+    """播种所有随机源 (torch / numpy / python / cuda / JAX), 全部与同一整数同源.
 
     Args:
-        seed: 统一整数种子. JAX 侧仍通过 jax.random.PRNGKey(seed) 显式传入.
+        seed: 统一整数种子.
+
+    Returns:
+        jax.random.PRNGKey(seed); 若 jax 不可用或 seed 为 None 则返回 None.
+        调用方应使用返回 key 驱动 JAX 侧的随机流, 避免"漏播种"导致不可复现.
     """
     if seed is None:
-        return
+        return None
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
+
+    try:
+        import jax
+        return jax.random.PRNGKey(seed)
+    except Exception:
+        return None
 
 
 def capture_provenance() -> dict:

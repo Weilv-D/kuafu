@@ -37,14 +37,20 @@ class AutonomousSource:
         """
         from rl.teleop.command import D0_CMD_RANGE
         self._d0 = d0 if d0 is not None else D0_CMD_RANGE[0]
-        self._active = False   # 规划器未接入, 始终不活跃
+        self._active = False   # 规划器未接入, 默认不活跃
+        self._cmd: Command | None = None
 
     def poll(self) -> Command | None:
-        # stub: 无规划器接入, 返回 None 让仲裁器走 MANUAL / 安全默认
-        return None
+        # 规划器已通过 set_command 写入命令时, 返回自主命令; 否则返回 None 让仲裁器
+        # 走 MANUAL / 安全默认。这样 set_command 接口真实可用(不再死代码)。
+        if not self._active or self._cmd is None:
+            return None
+        return self._cmd
 
     # 以下方法供未来实现时调用 ----------------------------------
     def set_command(self, v: float, omega: float, d0: float | None = None) -> None:
         """规划器回调: 写入最新 [v, ω, d0], 下次 poll 返回它。"""
-        # TODO: 接入 ROS2 subscriber 后在此更新缓存
+        from time import monotonic
+        self._d0 = d0 if d0 is not None else self._d0
+        self._cmd = Command(v, omega, self._d0, Mode.AUTONOMOUS, monotonic())
         self._active = True

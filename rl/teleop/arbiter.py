@@ -7,7 +7,7 @@ CommandArbiter - 多源命令仲裁 + 安全层
   1. 急停最高优先级: 任一源 mode=ESTOP -> 立即输出 [0,0,d0_cur] 并锁定
   2. 手柄抢占:       手柄源 |v| 或 |omega| 超死区 -> MANUAL 抢占, 自主挂起
   3. 交还自主:       手柄归零持续 handoff_time 且自主源活跃 -> 切 AUTONOMOUS
-  4. ramp 平滑:      模式切换瞬间, 输出向新源目标 ramp_time 线性过渡(防突跳摔机)
+   4. 平滑:          输出对目标做 ramp_time 一阶低通(模式切换 / 手柄 idle↔active / 急停均平滑, 防突跳摔机)
   5. 限幅:           clip 到 V/W/D0 CMD_RANGE
   6. 超时降级:       源 stamp 老于 stale_time -> 该源失效
   7. 全无源:         输出安全默认 [0,0,D0_MIN] + ESTOP
@@ -57,9 +57,7 @@ class CommandArbiter:
         self._mode: Mode = Mode.ESTOP          # 启动即急停, 等首个有效命令
         self._estop_locked: bool = True        # 急停锁定标志
         self._manual_idle_since: float | None = None  # 手柄归零计时起点
-        self._last_output: Command = _safe_default()  # 上一步输出(ramp 起点)
-        self._ramp_t0: float | None = None     # ramp 开始时刻; None=不在 ramp
-        self._ramp_from: Command = _safe_default()
+        self._last_output: Command = _safe_default()  # 上一步输出(低通起点)
         self._last_cmd_time: float = time.monotonic()
 
     # ------------------------------------------------------------
@@ -84,15 +82,17 @@ class CommandArbiter:
         auto_cmd = next((c for c in cached if c.mode == Mode.AUTONOMOUS), None)
         estop = any(c.mode == Mode.ESTOP for c in cached)
 
-        # --- 规则 1: 急停最高优先级 ---
+        # --- 规则 1: 急停最高优先级 (速度平滑归零, 保持当前 d0) ---
         if estop:
             self._enter_estop(now)
-            return self._last_output
+            target = Command(0.0, 0.0, self._last_output.d0, Mode.ESTOP, now)
+            return self._emit(target, now)
 
         # 若当前锁定在急停, 需要一个有效源来解锁
         if self._estop_locked:
             if manual_cmd is None and auto_cmd is None:
-                return self._last_output  # 仍无有效源, 保持急停
+                target = Command(0.0, 0.0, self._last_output.d0, Mode.ESTOP, now)
+                return self._emit(target, now)  # 仍无有效源, 保持急停
             self._estop_locked = False    # 解锁
 
         # --- 规则 2/3: 手柄抢占式 ---
@@ -123,46 +123,41 @@ class CommandArbiter:
         else:
             # --- 规则 7: 全无源 -> 安全默认 + ESTOP ---
             self._enter_estop(now)
-            return self._last_output
+            target = Command(0.0, 0.0, self._last_output.d0, Mode.ESTOP, now)
+            return self._emit(target, now)
 
-        # --- 规则 4: ramp 平滑 ---
-        out = self._apply_ramp(target, now)
-        # --- 规则 5: 限幅 ---
+        # --- 规则 4: 平滑 (一阶低通) + 规则 5: 限幅 ---
+        return self._emit(target, now)
+
+    def _emit(self, target: Command, now: float) -> Command:
+        """低通平滑 + 限幅, 更新内部状态并返回。"""
+        out = self._smooth(target, now)
         out = self._clamp_cmd(out)
         self._last_output = out
         self._last_cmd_time = now
         return out
 
     # ------------------------------------------------------------
-    # 状态切换 + ramp
+    # 状态切换 + 平滑
     # ------------------------------------------------------------
     def _switch_mode(self, new_mode: Mode, now: float) -> None:
-        if self._mode != new_mode:
-            # 切换: 启动 ramp, 从当前输出平滑到新源目标
-            self._ramp_from = self._last_output
-            self._ramp_t0 = now
-            self._mode = new_mode
+        self._mode = new_mode
 
     def _enter_estop(self, now: float) -> None:
         self._mode = Mode.ESTOP
         self._estop_locked = True
-        # 急停也走 ramp, 防止速度瞬间归零导致平衡失稳
-        self._ramp_from = self._last_output
-        self._ramp_t0 = now
-        # 急停目标: 速度归零, 保持当前 d0
-        self._last_output = Command(0.0, 0.0, self._last_output.d0, Mode.ESTOP, now)
 
-    def _apply_ramp(self, target: Command, now: float) -> Command:
-        """从 _ramp_from 向 target 线性插值, ramp 期内抑制突变。"""
-        if self._ramp_t0 is None:
-            return target
+    def _smooth(self, target: Command, now: float) -> Command:
+        """一阶低通: 输出从上一周期输出向 target 过渡, 时间常数 ramp_time (防突跳)。
+
+        对模式切换 / 手柄 idle↔active / 急停 统一平滑, 避免速度/蹲起量瞬间跳变摔机。
+        """
         cfg = self.cfg
-        alpha = min(1.0, (now - self._ramp_t0) / cfg.ramp_time) if cfg.ramp_time > 0 else 1.0
-        v = self._ramp_from.v + (target.v - self._ramp_from.v) * alpha
-        w = self._ramp_from.omega + (target.omega - self._ramp_from.omega) * alpha
-        d0 = self._ramp_from.d0 + (target.d0 - self._ramp_from.d0) * alpha
-        if alpha >= 1.0:
-            self._ramp_t0 = None  # ramp 结束
+        dt = now - self._last_cmd_time
+        alpha = min(1.0, dt / cfg.ramp_time) if cfg.ramp_time > 0 else 1.0
+        v = self._last_output.v + (target.v - self._last_output.v) * alpha
+        w = self._last_output.omega + (target.omega - self._last_output.omega) * alpha
+        d0 = self._last_output.d0 + (target.d0 - self._last_output.d0) * alpha
         return Command(v, w, d0, target.mode, now)
 
     def _is_manual_active(self, cmd: Command) -> bool:

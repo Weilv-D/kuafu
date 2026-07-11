@@ -4,10 +4,10 @@ GamepadSource - pygame 手柄命令源
 
 轴映射(Xbox/通用手柄布局):
   左摇杆 Y (轴 1)  -> v_cmd  (前后, ±0.5 m/s)
-  右摇杆 X (轴 2/3) -> ω_cmd  (转向, ±1.0 rad/s)
-  LT/RT 扳机       -> d0     (蹲下/站起, 58~207 mm)
+  右摇杆 X (轴 2)  -> ω_cmd  (转向, ±1.0 rad/s)
+  LT/RT 扳机(轴4/5)-> d0     (蹲下/站起, 58~207 mm)
   A 键 (按钮 0)    -> ESTOP  (急停)
-  B 键 (按钮 1)    -> 模式切换标记(由上层解读)
+  B 键 (按钮 1)    -> ESTOP  (急停)
 
 无手柄时 __init__ 抛 RuntimeError, 上层 fallback 到 KeyboardSource。
 """
@@ -33,9 +33,9 @@ class GamepadSource:
         self._joy = pygame.joystick.Joystick(0)
         # 轴索引(通用布局; 不同手柄可能需微调, 见 _apply_axis_mapping 注释)
         self._axis_v = 1       # 左摇杆 Y
-        self._axis_w = 3       # 右摇杆 X (多数 Xbox 手柄为轴 3)
-        self._axis_lt = 2      # LT
-        self._axis_rt = 5      # RT
+        self._axis_w = 2       # 右摇杆 X (SDL2/pygame 标准: 左x=0 左y=1 右x=2 右y=3)
+        self._axis_lt = 4      # LT (左扳机)
+        self._axis_rt = 5      # RT (右扳机)
         self._btn_estop = 0    # A
         self._btn_mode = 1     # B
         self._d0 = D0_CMD_RANGE[0]  # 初始姿态: 驻留态

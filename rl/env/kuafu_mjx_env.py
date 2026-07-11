@@ -322,18 +322,19 @@ class KuafuMjxEnv(MjxEnv):
         geom_size = geom_size.at[self._wheel_r_geom_id, 0].set(geom_size[self._wheel_r_geom_id, 0] + wheel_r_delta)
         model = model.replace(geom_size=geom_size)
 
-        # servo_pd ±30% (修改 position actuator 的 gainprm[0]=kp, biasprm[1]=-kp*d, biasprm[2]=-kv, 与 difficulty 缩放)
+        # servo_pd ±30% (修改 position actuator 的 gainprm[0]=kp, biasprm[1]=-kp, biasprm[2]=-kv, 与 difficulty 缩放)
         rng, pd_rng = jax.random.split(rng)
         pd_scale_raw = jax.random.uniform(
             pd_rng, minval=P.DR_SERVO_PD[0], maxval=P.DR_SERVO_PD[1])
         pd_scale = 1.0 + difficulty * (pd_scale_raw - 1.0)
         # position actuator idx: 2,3,4,5 (q_hip_A_l/r, q_hip_B_l/r; 4 舵机全部独立驱动)
-        # gainprm[0] = kp, biasprm[2] = -kv (MuJoCo position actuator: gain=fixed kp, bias=affine -kp*q0 -kv*vel)
+        # MuJoCo position actuator: biasprm = [0, -kp, -kv] (affine -kp*q0 -kv*vel);
+        # 故 kp 缩放必须作用在 biasprm[1] (而非 [0] 常量项), 否则平衡位被偏移到 pd_scale×cmd。
         gainprm = model.actuator_gainprm
         biasprm = model.actuator_biasprm
         for i in [ACT_HIP_A_L, ACT_HIP_A_R, ACT_HIP_B_L, ACT_HIP_B_R]:
-            gainprm = gainprm.at[i, 0].set(gainprm[i, 0] * pd_scale)
-            biasprm = biasprm.at[i, 0].set(biasprm[i, 0] * pd_scale)  # -kp*q0
+            gainprm = gainprm.at[i, 0].set(gainprm[i, 0] * pd_scale)  # kp
+            biasprm = biasprm.at[i, 1].set(biasprm[i, 1] * pd_scale)  # -kp*q0
             biasprm = biasprm.at[i, 2].set(biasprm[i, 2] * pd_scale)  # -kv
         model = model.replace(actuator_gainprm=gainprm, actuator_biasprm=biasprm)
 
@@ -430,10 +431,12 @@ class KuafuMjxEnv(MjxEnv):
         从 data.contact.geom 过滤含轮 geom 的接触。M2/M4 涌现关键:
         策略据此判断轮是否接地, 决定伸腿/调平时机。
         """
-        # contact.geom: (ncon, 2) — 每个接触的两个 geom id; 非活动接触 geom=-1
+        # contact.geom: (nconmax, 2) — 仅前 ncon 个接触有效, 越界槽位为历史残留(未清零),
+        # 若其 geom id 恰为轮 id 会误报接地。故先以 ncon 掩码过滤无效槽位。
         geom = data.contact.geom
-        l_mask = (geom[:, 0] == self._wheel_l_geom_id) | (geom[:, 1] == self._wheel_l_geom_id)
-        r_mask = (geom[:, 0] == self._wheel_r_geom_id) | (geom[:, 1] == self._wheel_r_geom_id)
+        active = jp.arange(geom.shape[0]) < data.ncon
+        l_mask = ((geom[:, 0] == self._wheel_l_geom_id) | (geom[:, 1] == self._wheel_l_geom_id)) & active
+        r_mask = ((geom[:, 0] == self._wheel_r_geom_id) | (geom[:, 1] == self._wheel_r_geom_id)) & active
         contact_l = jp.any(l_mask).astype(jp.float32)
         contact_r = jp.any(r_mask).astype(jp.float32)
         return jp.stack([contact_l, contact_r])
@@ -785,15 +788,15 @@ class KuafuMjxEnv(MjxEnv):
         model = state.info["model"]
 
         # ---- 执行器延迟: 从 action_buffer 取延迟前的动作 ----
-        # action_buffer 填充顺序 [丢弃最旧, 追加最新] (step 末尾 new_action_buffer),
-        # 故 [0]=2步前(最旧), [1]=1步前, [2]=当前。
-        # delay_steps=0 → 当前 action; delay_steps=1 → 1步前(buf[1]); delay_steps=2 → 2步前(buf[0])
+        # action_buffer 在 step 末尾填充 [丢弃最旧, 追加最新], 故 step 开始时缓冲为
+        # [a_{t-3}, a_{t-2}, a_{t-1}] (不含当前)。delay_steps=k 取 k 步前的动作:
+        #   delay=1 → 1步前(buf[2]); delay=2 → 2步前(buf[1])。与 _delayed_obs 语义一致。
         delayed_action = jp.where(
             env_state.delay_steps >= 2,
-            env_state.action_buffer[0],  # 2 步前
+            env_state.action_buffer[1],  # 2 步前 a_{t-2}
             jp.where(
                 env_state.delay_steps >= 1,
-                env_state.action_buffer[1],  # 1 步前
+                env_state.action_buffer[2],  # 1 步前 a_{t-1}
                 action,                      # 当前
             )
         )
@@ -832,9 +835,10 @@ class KuafuMjxEnv(MjxEnv):
         hip_A_base = -d0_norm * HIP_STROKE       # A 链对称目标 (伸展为负)
         hip_B_base = d0_norm * HIP_STROKE        # B 链镜像
 
-        # roll 调平: 左右 D0 差 (mm → rad, 经 HIP_STROKE 归一化)
+        # roll 调平: 左右 D0 差 (mm → rad)。左右 D0 差 d_d0_mm 对应每侧位移 ±d_d0_mm/2,
+        # 故每侧 crank 增量 = (d_d0_mm/2) * HIP_STROKE/(D0_MAX-D0_MIN), 即 d_d0_rad = d_d0_mm*HIP_STROKE/range。
         d_d0_mm = -(ROLL_KP * roll + ROLL_KD * omega_x)  # 正 roll → 缩左伸右 (符号待标定)
-        d_d0_rad = d_d0_mm / (P.D0_MAX - P.D0_MIN) * 2 * HIP_STROKE  # mm→归一化→rad
+        d_d0_rad = d_d0_mm / (P.D0_MAX - P.D0_MIN) * HIP_STROKE  # mm→归一化→rad(每侧 ±d_d0_rad/2)
         hip_A_l_base = hip_A_base + d_d0_rad / 2.0
         hip_A_r_base = hip_A_base - d_d0_rad / 2.0
         hip_B_l_base = hip_B_base + d_d0_rad / 2.0

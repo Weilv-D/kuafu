@@ -109,7 +109,7 @@ def distill(
     from rl.train.networks import StudentPolicy, count_parameters
     from rl.train.teacher_model import TeacherInferenceModel
 
-    seed_all(seed)
+    jax_key = seed_all(seed)
     device = dlu.resolve_device(device)
     buffer_device = dlu.resolve_device(buffer_device) if buffer_device != "cpu" else "cpu"
 
@@ -158,7 +158,7 @@ def distill(
     reset_fn = jax.jit(jax.vmap(env.reset))
     step_fn = jax.jit(jax.vmap(env.step))
 
-    rng = jax.random.PRNGKey(seed)
+    rng = jax_key if jax_key is not None else jax.random.PRNGKey(seed)
     state = reset_fn(jax.random.split(rng, num_envs))
     rng = jax.random.fold_in(rng, 0xABCD)  # 与初始 reset 解耦, 保证后续 reset 用不同种子
 

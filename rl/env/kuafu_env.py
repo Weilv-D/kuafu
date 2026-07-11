@@ -40,7 +40,7 @@ OBS_SPEC = [
 ]
 OBS_DIM_BASE = sum(d for _, d, _, _ in OBS_SPEC)     # = 37
 HISTORY_STEPS = 4                                      # design.md §2.1: 堆叠 N=4
-OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS                # = 140
+OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS                # = 148 (37 × 4)
 
 # teacher 特权观测 (仅训练, design.md §2.1) 拆分为静态外因 + 瞬态扰动
 # 静态环境外因 (RMA latent 监督目标, 9 维): episode 级常量, 由 RMA adapter 从

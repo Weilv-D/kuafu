@@ -116,7 +116,7 @@ def main():
     args = parser.parse_args()
 
     # 统一播种所有 RNG (torch/numpy/random 与 JAX 显式 key 同源)
-    seed_all(args.seed)
+    jax_key = seed_all(args.seed)
 
     print("=" * 60)
     print("KUAFU Teacher PPO Training (design.md §2.6 阶段 1)")
@@ -146,12 +146,14 @@ def main():
         scan pytree 不匹配), 直接用 JAX vmap + jax.lax.cond 做 auto-reset,
         通过 DLPack 与 PyTorch 零拷贝交换 GPU 张量。
         """
-        def __init__(self, env, num_envs, seed, device="cuda"):
+        def __init__(self, env, num_envs, seed, device="cuda", jax_key=None):
             self.env = env
             self.num_envs = num_envs
             self.num_actions = env.action_size
             self.num_obs = ACTOR_OBS_DIM                             # actor = proprio(148) + z(9)
-            self.num_privileged_obs = CRITIC_PRIV_DIM if env._teacher else None  # critic 额外瞬态(3)
+            # critic 输入 = actor(157) + 瞬态特权(3) = 160 (RSL-RL 实际从 extras 取此维,
+            # 但此处显式声明以免未来版本误读 env.num_privileged_obs 而建错 critic)。
+            self.num_privileged_obs = CRITIC_OBS_DIM if env._teacher else None
             self.device = device
             self.cfg = {"env_name": "kuafu", "num_envs": num_envs}
             self.max_episode_length = env._episode_length
@@ -167,7 +169,7 @@ def main():
             self._reset_vmapped = jax.jit(jax.vmap(env.reset, in_axes=(0, 0)))
             self._step_vmapped = jax.jit(jax.vmap(env.step))
 
-            self._rng = jax.random.PRNGKey(seed)
+            self._rng = jax_key if jax_key is not None else jax.random.PRNGKey(seed)
             self._rng, diff_rng = jax.random.split(self._rng)
             diff_vec = jax.random.uniform(diff_rng, (num_envs,),
                                           minval=0.0, maxval=self._difficulty)
@@ -286,13 +288,13 @@ def main():
         def step_dt(self):
             return self.env.dt
 
-    torch_env = DirectVecEnv(env, args.num_envs, args.seed, device=device)
+    torch_env = DirectVecEnv(env, args.num_envs, args.seed, device=device, jax_key=jax_key)
     print(f"  obs={torch_env.num_obs}, privileged={torch_env.num_privileged_obs}, "
           f"action={torch_env.num_actions}")
 
     # ---- 维度一致性守卫 (防止规格再次漂移) ----
-    assert torch_env.num_privileged_obs == CRITIC_PRIV_DIM, \
-        f"critic 额外特权维度错: {torch_env.num_privileged_obs} != {CRITIC_PRIV_DIM}"
+    assert torch_env.num_privileged_obs == CRITIC_OBS_DIM, \
+        f"critic 总维度错: {torch_env.num_privileged_obs} != {CRITIC_OBS_DIM}"
     assert RMA_STATIC_DIM + TRANSIENT_DIM == PRIVILEGED_DIM, \
         f"特权拆分错: {RMA_STATIC_DIM}+{TRANSIENT_DIM} != {PRIVILEGED_DIM}"
     assert torch_env.num_obs == ACTOR_OBS_DIM, \

@@ -32,7 +32,7 @@ import kuafu_physics as P
 from rl.env.kuafu_env import OBS_DIM_BASE, OBS_DIM, ACTION_DIM
 # 复用 eval_policy 的 obs 构造 + 动作施加(纯函数, command 注入版, 零改动)
 from rl.verify.eval_policy import _build_obs, _apply_action
-from rl.verify.eval_policy import CTRL_DT, N_SUBSTEPS
+from rl.verify.eval_policy import CTRL_DT, N_SUBSTEPS, NOMINAL_STATIC
 
 from rl.teleop.command import ArbiterConfig, Mode
 from rl.teleop.arbiter import CommandArbiter
@@ -114,10 +114,12 @@ def run_teleop(model, data, policy, ptype, arbiter, viewer, duration, hint):
         command = np.array(cmd.as_array(), dtype=np.float32)
 
         # --- 构造 obs(注入实时 command) ---
+        # teacher actor 条件于静态特权 z(9); 标称遥控评估下补 nominal z → 157 维
         obs_flat = obs_history.flatten()
         with torch.no_grad():
             if ptype == "teacher":
-                action = policy(torch.from_numpy(obs_flat).float().unsqueeze(0)).numpy()[0]
+                inf_obs = np.concatenate([obs_flat, NOMINAL_STATIC])
+                action = policy(torch.from_numpy(inf_obs).float().unsqueeze(0)).numpy()[0]
             else:
                 action = policy(
                     torch.from_numpy(obs_flat).float().unsqueeze(0),
@@ -125,8 +127,8 @@ def run_teleop(model, data, policy, ptype, arbiter, viewer, duration, hint):
                 ).numpy()[0]
         last_action = action
 
-        # --- 施加动作(LQR + 残差) ---
-        _apply_action(data, action)
+        # --- 施加动作(LQR + 残差), 注入实时 command(含 d0 目标, 否则分布偏移) ---
+        _apply_action(data, action, command)
         for _ in range(N_SUBSTEPS):
             mujoco.mj_step(model, data)
 

@@ -45,7 +45,7 @@ def export_teacher(ckpt_path: str, out_path: str):
         dynamic_axes={"obs": {0: "batch"}, "action": {0: "batch"}},
     )
     print(f"✅ Teacher 导出: {out_path}")
-    _verify_onnx(out_path, OBS_DIM, ACTION_DIM)
+    _verify_onnx(out_path, ACTOR_OBS_DIM, ACTION_DIM)
 
 
 def export_student(ckpt_path: str, out_path: str):
