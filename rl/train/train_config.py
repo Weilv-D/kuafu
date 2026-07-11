@@ -39,7 +39,7 @@ ALGORITHM = {
     "gamma": 0.99,
     "lam": 0.95,
     "value_loss_coef": 0.5,
-    "entropy_coef": 0.06,    # 高探索bonus, 防 σ 坍缩, 保证 d_max 升级后策略有探索能力适应更难场景
+    "entropy_coef": 0.03,    # 探索bonus: 高于 0.01(防σ坍缩) 但低于 0.06(避免过度随机), d_max 升级后仍保有探索能力
     "learning_rate": 3e-4,
     "max_grad_norm": 1.0,
     "schedule": "adaptive",   # 按 KL 自适应调学习率
