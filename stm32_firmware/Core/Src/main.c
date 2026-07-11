@@ -164,21 +164,23 @@ int main(void) {
                     Pi_Command_Heartbeat_t hb;
                     Pi_Command_Action_t act;
                     Pi_Command_Snapshot(&hb, &act);
+                    (void)hb;
 
-                    /* Forward Pi velocity/yaw setpoints into the LQR controller */
-                    g_lqr.target_velocity = hb.target_velocity;
-                    g_lqr.target_yaw_rate = hb.target_yaw_rate;
+                    /* Average wheel velocity in body frame -> forward speed ẋ.
+                     * yaw rate (gz) drives the conditional damping term. */
+                    float wheel_vel_avg =
+                        (WHEEL_DIR_L * g_ddsm_left.velocity_rads +
+                         WHEEL_DIR_R * g_ddsm_right.velocity_rads) * 0.5f;
+                    float yaw_rate = gz;
 
-                    /* Run LQR once per 250 Hz cycle; cache both wheel commands.
-                     * Wheel velocity feedback is mapped into the body frame. */
+                    /* Run LQR once per 250 Hz cycle; cache both wheel commands. */
                     lqr_update(&g_lqr,
                                body_pitch,
                                body_pitch_rate,
-                               WHEEL_DIR_L * g_ddsm_left.velocity_rads,
-                               WHEEL_DIR_R * g_ddsm_right.velocity_rads,
+                               wheel_vel_avg,
+                               yaw_rate,
                                act.delta_torque_l,
                                act.delta_torque_r,
-                               0.004f,
                                &g_ctrl_tau_l,
                                &g_ctrl_tau_r);
 

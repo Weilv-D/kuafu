@@ -92,7 +92,15 @@
  * Hence: I_raw = tau * (32767.0f / 6.0f) ~= 5461.17f * tau */
 #define DDSM_TORQUE_TO_RAW      5461.17f
 #define DDSM_RAW_TO_TORQUE      (1.0f / DDSM_TORQUE_TO_RAW)
-#define DDSM_MAX_TORQUE_NM      1.1f
+#define DDSM_MAX_TORQUE_NM      1.1f            /* TAU_WHEEL_STALL (N-m) */
+
+/* Wheel geometry & rated torque (mirrors kuafu_physics.py) */
+#define WHEEL_RADIUS_M          0.03908f        /* R_WHEEL = 39.08mm */
+#define TAU_WHEEL_RATED         0.55f           /* Single wheel rated torque (N-m) */
+
+/* Base-layer yaw conditional damping (mirrors kuafu_physics.py) */
+#define YAW_KD                  0.05f           /* yaw damping gain (N-m·s/rad) */
+#define YAW_DAMP_THRESH         0.3f            /* only damp when |ωz| < this (rad/s) */
 
 /* Wheel rotation direction mapping (body frame: +torque/+velocity = forward).
  * Left/right hub motors may be mirror mounted; set the affected side to -1.0f.

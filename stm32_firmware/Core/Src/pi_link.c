@@ -66,27 +66,27 @@ int pi_link_parse_packet(const uint8_t *buf, uint16_t len) {
             if (cmd == PI_CMD_HEARTBEAT) {
                 g_pi_cmd_heartbeat.mode_request = payload[0];
 
-                int16_t raw_v = (int16_t)((payload[1] << 8) | payload[2]);
+                int16_t raw_v = (int16_t)(((uint16_t)payload[1] << 8) | payload[2]);
                 g_pi_cmd_heartbeat.target_velocity = (float)raw_v / 1000.0f;
 
-                int16_t raw_w = (int16_t)((payload[3] << 8) | payload[4]);
+                int16_t raw_w = (int16_t)(((uint16_t)payload[3] << 8) | payload[4]);
                 g_pi_cmd_heartbeat.target_yaw_rate = (float)raw_w / 1000.0f;
 
-                int16_t raw_d0 = (int16_t)((payload[5] << 8) | payload[6]);
+                int16_t raw_d0 = (int16_t)(((uint16_t)payload[5] << 8) | payload[6]);
                 g_pi_cmd_heartbeat.target_leg_d0 = (float)raw_d0 / 1000.0f;
 
                 g_pi_cmd_heartbeat.last_heartbeat_ms = HAL_GetTick();
                 (void)seq; /* Unused */
 
             } else if (cmd == PI_CMD_ACTION) {
-                int16_t raw_tau_l = (int16_t)((payload[0] << 8) | payload[1]);
+                int16_t raw_tau_l = (int16_t)(((uint16_t)payload[0] << 8) | payload[1]);
                 g_pi_cmd_action.delta_torque_l = (float)raw_tau_l / 10000.0f;
 
-                int16_t raw_tau_r = (int16_t)((payload[2] << 8) | payload[3]);
+                int16_t raw_tau_r = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
                 g_pi_cmd_action.delta_torque_r = (float)raw_tau_r / 10000.0f;
 
                 for (int j = 0; j < 4; j++) {
-                    int16_t raw_q = (int16_t)((payload[4 + j * 2] << 8) | payload[5 + j * 2]);
+                    int16_t raw_q = (int16_t)(((uint16_t)payload[4 + j * 2] << 8) | payload[5 + j * 2]);
                     g_pi_cmd_action.target_q[j] = (float)raw_q / 10000.0f;
                 }
 

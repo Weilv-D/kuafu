@@ -1,9 +1,6 @@
 #include "mahony.h"
 #include <math.h>
 
-/* Helper function declaration to prevent implicit declaration error */
-float asinff(float val);
-
 void mahony_init(MahonyFilter_t *filter, float Kp, float Ki) {
     filter->Kp = Kp;
     filter->Ki = Ki;
@@ -104,13 +101,13 @@ void mahony_update(MahonyFilter_t *filter, float ax, float ay, float az, float g
 
     /* Recalculate Euler Angles */
     filter->roll = atan2f(2.0f * (filter->q0 * filter->q1 + filter->q2 * filter->q3), 1.0f - 2.0f * (filter->q1 * filter->q1 + filter->q2 * filter->q2));
-    filter->pitch = asinff(2.0f * (filter->q0 * filter->q2 - filter->q3 * filter->q1));
-    filter->yaw = atan2f(2.0f * (filter->q0 * filter->q3 + filter->q1 * filter->q2), 1.0f - 2.0f * (filter->q2 * filter->q2 + filter->q3 * filter->q3));
-}
 
-/* Helper function to prevent domain error in asinf */
-float asinff(float val) {
-    if (val > 1.0f) return 1.570796f;
-    if (val < -1.0f) return -1.570796f;
-    return asinf(val);
+    /* pitch = asin(2*(q0*q2 - q3*q1)), clamped to [-1,1] to avoid domain error.
+     * Matches RL sim: arcsin(clip(2*(qw*qy - qx*qz), -0.999999, 0.999999)) */
+    float pitch_arg = 2.0f * (filter->q0 * filter->q2 - filter->q3 * filter->q1);
+    if (pitch_arg > 1.0f) pitch_arg = 1.0f;
+    if (pitch_arg < -1.0f) pitch_arg = -1.0f;
+    filter->pitch = asinf(pitch_arg);
+
+    filter->yaw = atan2f(2.0f * (filter->q0 * filter->q3 + filter->q1 * filter->q2), 1.0f - 2.0f * (filter->q2 * filter->q2 + filter->q3 * filter->q3));
 }

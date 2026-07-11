@@ -2,7 +2,6 @@
 #include "pin_config.h"
 
 #define TICK_TO_RAD          ((2.0f * 3.14159265f) / 4096.0f)
-#define RADS_TO_TICK         (4096.0f / (2.0f * 3.14159265f))
 
 int st3215_sync_write_pos(UART_HandleTypeDef *huart,
                           const uint8_t *ids,
@@ -26,11 +25,13 @@ int st3215_sync_write_pos(UART_HandleTypeDef *huart,
     uint8_t sum = 0xFE + length + ST_INST_SYNC_WRITE + ST_REG_ACC + 7;
 
     for (uint8_t i = 0; i < count; i++) {
-        int16_t pos = positions_ticks[i];
-        if (pos < 0) {
-            pos = -pos;
-            pos |= (1 << 15);
-        }
+        /* ST3215 goal position is an unsigned 16-bit value in [0, 4095].
+         * The caller may pass out-of-range ints (e.g. before center-offset
+         * calibration); clamp to the valid range rather than sign-encoding. */
+        int32_t pos_clamp = positions_ticks[i];
+        if (pos_clamp < 0) pos_clamp = 0;
+        if (pos_clamp > 4095) pos_clamp = 4095;
+        uint16_t pos = (uint16_t)pos_clamp;
 
         uint16_t speed = speeds_ticks[i];
         uint8_t acc = accels[i];
@@ -60,20 +61,8 @@ int st3215_sync_write_pos(UART_HandleTypeDef *huart,
 
 int st3215_read_state(UART_HandleTypeDef *huart, uint8_t id, ST3215_State_t *state) {
     uint8_t tx_buf[8];
-    uint8_t rx_buf[21]; /* Response size is 4 (header+err+crc) + 15 (data) = 19? Wait! */
-    /* Wait! Standard Response is:
-     * 0xFF 0xFF [ID] [Length] [Error] [Data...] [Checksum]
-     * If read_len = 15, then:
-     * Length = read_len + 2 = 17.
-     * Response packet contains:
-     * 0xFF, 0xFF (2 bytes)
-     * id (1 byte)
-     * Length (1 byte, value = 17)
-     * Error (1 byte)
-     * Data (15 bytes)
-     * Checksum (1 byte)
-     * Total = 2 + 1 + 1 + 1 + 15 + 1 = 21 bytes.
-     * Yes! 21 bytes is correct. */
+    /* Response: 0xFF 0xFF [ID] [Length=17] [Error] [Data(15)] [Checksum] = 21 bytes */
+    uint8_t rx_buf[21];
 
     uint8_t read_len = 15;
     tx_buf[0] = 0xFF;
@@ -110,25 +99,18 @@ int st3215_read_state(UART_HandleTypeDef *huart, uint8_t id, ST3215_State_t *sta
     }
 
     /* Parse register block (offset relative to reg 56) */
-    /* Reg 56/57: Present Position */
-    int16_t raw_pos = (int16_t)((rx_buf[5 + 1] << 8) | rx_buf[5 + 0]);
-    if (raw_pos & (1 << 15)) {
-        raw_pos = -(raw_pos & ~(1 << 15));
-    }
+    /* Reg 56/57: Present Position (unsigned, [0, 4095]) */
+    uint16_t raw_pos = ((uint16_t)rx_buf[5 + 1] << 8) | rx_buf[5 + 0];
     state->position_rad = (float)(raw_pos - SERVO_CENTER_TICKS) * TICK_TO_RAD;
 
-    /* Reg 58/59: Present Speed */
-    int16_t raw_speed = (int16_t)((rx_buf[5 + 3] << 8) | rx_buf[5 + 2]);
-    if (raw_speed & (1 << 15)) {
-        raw_speed = -(raw_speed & ~(1 << 15));
-    }
+    /* Reg 58/59: Present Speed (two's complement int16, bit15 = direction) */
+    uint16_t u16_speed = ((uint16_t)rx_buf[5 + 3] << 8) | rx_buf[5 + 2];
+    int16_t raw_speed = (int16_t)u16_speed;
     state->velocity_rads = (float)raw_speed * TICK_TO_RAD;
 
-    /* Reg 60/61: Present Load */
-    int16_t raw_load = (int16_t)((rx_buf[5 + 5] << 8) | rx_buf[5 + 4]);
-    if (raw_load & (1 << 10)) {
-        raw_load = -(raw_load & ~(1 << 10));
-    }
+    /* Reg 60/61: Present Load (bit10 = sign, bits 0-9 = magnitude 0..1000) */
+    uint16_t u16_load = ((uint16_t)rx_buf[5 + 5] << 8) | rx_buf[5 + 4];
+    int16_t raw_load = (u16_load & 0x0400) ? -(int16_t)(u16_load & 0x03FF) : (int16_t)(u16_load & 0x03FF);
     state->load = (float)raw_load / 1000.0f; /* 1000 = 100% max load */
 
     /* Reg 62: Present Voltage */
@@ -137,11 +119,9 @@ int st3215_read_state(UART_HandleTypeDef *huart, uint8_t id, ST3215_State_t *sta
     /* Reg 63: Present Temperature */
     state->temperature_c = (float)rx_buf[5 + 7];
 
-    /* Reg 69/70: Present Current */
-    int16_t raw_current = (int16_t)((rx_buf[5 + 14] << 8) | rx_buf[5 + 13]);
-    if (raw_current & (1 << 15)) {
-        raw_current = -(raw_current & ~(1 << 15));
-    }
+    /* Reg 69/70: Present Current (two's complement int16) */
+    uint16_t u16_current = ((uint16_t)rx_buf[5 + 14] << 8) | rx_buf[5 + 13];
+    int16_t raw_current = (int16_t)u16_current;
     state->current_a = (float)raw_current * 0.0065f; /* 6.5mA per LSB */
 
     state->id = id;
@@ -149,7 +129,7 @@ int st3215_read_state(UART_HandleTypeDef *huart, uint8_t id, ST3215_State_t *sta
 }
 
 int st3215_set_torque_enable(UART_HandleTypeDef *huart, uint8_t id, uint8_t enable) {
-    uint8_t tx_buf[9];
+    uint8_t tx_buf[8];
     tx_buf[0] = 0xFF;
     tx_buf[1] = 0xFF;
     tx_buf[2] = id;

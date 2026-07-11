@@ -125,5 +125,6 @@ void safety_state_update(float pitch_rad, float gyro_y_rads, float max_temp_c, f
             break;
     }
     
-    (void)dt; /* Unused */
+    (void)gyro_y_rads; /* Reserved for future rate-based fault detection */
+    (void)dt;          /* Unused */
 }

@@ -106,16 +106,16 @@ int ddsm_parse_feedback(const uint8_t *rx_buf, DDSM_State_t *state) {
     /* 3. Parse feedback values */
     state->mode = rx_buf[1];
 
-    /* Torque Current (signed 16-bit) */
-    int16_t raw_current = (int16_t)((rx_buf[2] << 8) | rx_buf[3]);
+    /* Torque Current (two's complement int16) */
+    int16_t raw_current = (int16_t)(((uint16_t)rx_buf[2] << 8) | rx_buf[3]);
     state->torque = (float)raw_current * DDSM_RAW_TO_TORQUE;
 
-    /* Speed (signed 16-bit, in RPM) */
-    int16_t raw_speed = (int16_t)((rx_buf[4] << 8) | rx_buf[5]);
+    /* Speed (two's complement int16, in RPM) */
+    int16_t raw_speed = (int16_t)(((uint16_t)rx_buf[4] << 8) | rx_buf[5]);
     state->velocity_rads = (float)raw_speed * RPM_TO_RADS;
 
     /* Position (unsigned 16-bit single-turn, range 0 to 32767) */
-    uint16_t raw_position = (uint16_t)((rx_buf[6] << 8) | rx_buf[7]);
+    uint16_t raw_position = ((uint16_t)rx_buf[6] << 8) | rx_buf[7];
     state->position_rad = (float)raw_position * POS_TO_RAD;
 
     state->error_code = rx_buf[8];

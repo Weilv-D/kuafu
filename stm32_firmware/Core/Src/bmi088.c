@@ -88,10 +88,10 @@ int bmi088_read_accel(BMI088_t *imu) {
         return -1;
     }
 
-    /* Combine raw values and scale to m/s^2 */
-    int16_t raw_x = (int16_t)((buffer[1] << 8) | buffer[0]);
-    int16_t raw_y = (int16_t)((buffer[3] << 8) | buffer[2]);
-    int16_t raw_z = (int16_t)((buffer[5] << 8) | buffer[4]);
+    /* Combine raw values (two's complement int16) and scale to m/s^2 */
+    int16_t raw_x = (int16_t)(((uint16_t)buffer[1] << 8) | buffer[0]);
+    int16_t raw_y = (int16_t)(((uint16_t)buffer[3] << 8) | buffer[2]);
+    int16_t raw_z = (int16_t)(((uint16_t)buffer[5] << 8) | buffer[4]);
 
     imu->accel[0] = (float)raw_x * ACCEL_24G_SCALE;
     imu->accel[1] = (float)raw_y * ACCEL_24G_SCALE;
@@ -108,10 +108,10 @@ int bmi088_read_gyro(BMI088_t *imu) {
         return -1;
     }
 
-    /* Combine raw values and scale to rad/s */
-    int16_t raw_x = (int16_t)((buffer[1] << 8) | buffer[0]);
-    int16_t raw_y = (int16_t)((buffer[3] << 8) | buffer[2]);
-    int16_t raw_z = (int16_t)((buffer[5] << 8) | buffer[4]);
+    /* Combine raw values (two's complement int16) and scale to rad/s */
+    int16_t raw_x = (int16_t)(((uint16_t)buffer[1] << 8) | buffer[0]);
+    int16_t raw_y = (int16_t)(((uint16_t)buffer[3] << 8) | buffer[2]);
+    int16_t raw_z = (int16_t)(((uint16_t)buffer[5] << 8) | buffer[4]);
 
     imu->gyro[0] = (float)raw_x * GYRO_2000_SCALE;
     imu->gyro[1] = (float)raw_y * GYRO_2000_SCALE;
