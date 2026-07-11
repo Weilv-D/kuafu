@@ -31,6 +31,10 @@ PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 sys.path.insert(0, PROJ_ROOT)
 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["JAX_COMPILATION_CACHE_DIR"] = os.path.join(
+    os.path.expanduser("~"), ".cache", "kuafu_jax")
+os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") +
+                           " --xla_gpu_enable_cuda_graphs=true")
 
 import jax
 import jax.numpy as jp
@@ -155,8 +159,8 @@ def distill(
 
     # ---- 环境 (teacher 模式, 获取特权 obs 供 teacher 推理) ----
     env = KuafuMjxEnv(teacher=True, num_envs=num_envs)
-    reset_fn = jax.jit(jax.vmap(env.reset))
-    step_fn = jax.jit(jax.vmap(env.step))
+    reset_fn = jax.jit(jax.vmap(env.reset), donate_argnums=(0, 1))
+    step_fn = jax.jit(jax.vmap(env.step), donate_argnums=(0,))
 
     rng = jax_key if jax_key is not None else jax.random.PRNGKey(seed)
     state = reset_fn(jax.random.split(rng, num_envs))

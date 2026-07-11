@@ -25,6 +25,10 @@ PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 sys.path.insert(0, PROJ_ROOT)
 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["JAX_COMPILATION_CACHE_DIR"] = os.path.join(
+    os.path.expanduser("~"), ".cache", "kuafu_jax")
+os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") +
+                           " --xla_gpu_enable_cuda_graphs=true")
 
 import jax
 import torch
@@ -166,8 +170,9 @@ def main():
                                           fallback_avg_survival=600.0, fallback_fall_rate=0.5)
             self._difficulty = jax.numpy.float32(self._curriculum.d)  # d_max (课程上界)
 
-            self._reset_vmapped = jax.jit(jax.vmap(env.reset, in_axes=(0, 0)))
-            self._step_vmapped = jax.jit(jax.vmap(env.step))
+            self._reset_vmapped = jax.jit(
+                jax.vmap(env.reset, in_axes=(0, 0)), donate_argnums=(0, 1))
+            self._step_vmapped = jax.jit(jax.vmap(env.step), donate_argnums=(0,))
 
             self._rng = jax_key if jax_key is not None else jax.random.PRNGKey(seed)
             self._rng, diff_rng = jax.random.split(self._rng)
