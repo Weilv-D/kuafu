@@ -230,7 +230,7 @@ def main():
         d6.ctrl[1] = tau_p
         # roll PD: 左右 D0 差
         d_d0_mm = -(P.ROLL_KP * roll + P.ROLL_KD * omega_x)
-        d_d0_rad = d_d0_mm / (P.D0_MAX - P.D0_MIN) * 2 * P.HIP_STROKE
+        d_d0_rad = d_d0_mm / (P.D0_MAX - P.D0_MIN) * P.HIP_STROKE
         d6.ctrl[2] = d_d0_rad / 2.0   # hip_A_l
         d6.ctrl[3] = -d_d0_rad / 2.0  # hip_A_r
         d6.ctrl[4] = d_d0_rad / 2.0   # hip_B_l
