@@ -10,14 +10,14 @@
 | 仿真模型 `kuafu.xml` | ✅ | 闭链残差 0mm, 轮挂 Q 点, armature=0; 轮改 capsule 兼容 MJX 地形碰撞; 4 舵机独立 |
 | 物理验证（阶段 0） | ✅ | **13/13**, LQR pitch 0.1s 恢复 5° + yaw 条件阻尼 + roll PD 调平 0.1s 恢复 3° |
 | MJX 环境 `kuafu_mjx_env.py` | ✅ | 三轴基层(pitch LQR+yaw阻尼+roll PD) + RL残差; 接触obs; 地形(斜坡+台阶); 延迟DR; 烟测通过 |
-| Teacher PPO 训练 `train.py` | ✅ | RSL-RL 2.x + DLPack; actor 157(proprio148+z9), critic 160; 双向课程(≥80%升/≤40%降)+per-env Uniform(0,d_max)采样; 烟测通过 |
+| Teacher PPO 训练 `train.py` | ✅ | RSL-RL 2.x + DLPack; actor 157(proprio148+z9), critic 160; 双向课程(≥80%升/≤40%降)+per-env Uniform(0,d_max)采样; reset/step 闭包 donate_argnums 回收 state/rng 缓冲降显存峰值; 烟测通过 |
 | Student 蒸馏 `distill.py` | ✅ | DAgger + z 回归 (MSE), teacher actor 157 维对齐, 待 teacher 训练后跑 |
 | ONNX 导出 `export_policy.py` | ✅ | teacher (含 normalizer) / student 两种模式 |
-| 显存测算 `probe_envs.py` | ✅ | RTX 4070: 2048 envs 可行, 推荐 1024 |
+| 显存测算 `probe_envs.py` | ✅ | RTX 4070 8GB: 3072 envs×72步峰值 ~4.3GB (donate_argnums + preallocate=false); 1024≈2.0GB; 线性外推上限 ~5000 |
 | 原生 MuJoCo 回放 `playback.py` | ✅ | viewer 可视化; 三轴基层+RL残差控制律与训练一致 |
 | 课程地形 `terrain.py` | ✅ 已接入 | 斜坡(倾斜平面)+台阶(step box) 由 `KuafuMjxEnv._apply_terrain` 按 difficulty 生成; `terrain.py` 留作课程参数参考 |
 | 遥控仲裁 `teleop/` | ✅ | 多源仲裁+急停+ramp+D0高速门控; poll 缓存(每周期1次) |
-| **正式训练** | ⏳ 待启动 | `rl/.venv/bin/python rl/train/train.py --run_name <代号> --num_envs 1024` |
+| **正式训练** | ⏳ 待启动（性能优化就绪后跑 3072 收敛 run） | `rl/.venv/bin/python rl/train/train.py --run_name <代号> --num_envs 3072` |
 
 ## 目录结构
 
@@ -75,12 +75,12 @@ python3 rl/verify/verify_model.py           # 11/11 通过
 python3 rl/verify/launch_viewer.py
 
 # 4. Teacher PPO 训练（--run_name 必填，代号如 garlic）
-rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 1024  # 默认 72 步/rollout; 可选 --num_steps_per_env 调整 (3000 iter ≈ 221M steps)
+rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 3072  # 默认 72 步/rollout; 可选 --num_steps_per_env 调整 (3000 iter ≈ 663M steps); 显存受限可降 1024
 # 推荐后台运行:
-nohup rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 1024 > train.log 2>&1 &
+nohup rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 3072 > train.log 2>&1 &
 tail -f train.log
 # 续训（从已有 checkpoint 恢复）:
-rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 1024 \
+rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 3072 \
   --resume rl/checkpoints/garlic/teacher/model_3999.pt
 
 # 5. Student 蒸馏（teacher 训练后，--run_name 须与 teacher 一致）
@@ -147,13 +147,23 @@ JAX 0.10.2 (cuda13)  ←→  DLPack 零拷贝  ←→  PyTorch 2.12.1 (cu130)
 - **Teacher**：RSL-RL 内置 ActorCritic [512,512,512]，**actor 以本体感受 148(含接触标志) + 静态 latent z 9 = 157 维为条件**（RMA, Kumar 2021），critic 额外吃瞬态推力 3 维共 160 维
 - **Student**：StudentPolicy(主干 [512,512,512] + RMA adapter [32,64,32]→z 9)，部署时 adapter 从 50 步历史在线推断 z，参数量随隐藏层同步 scaling
 - **基层控制**：三轴兜底 — pitch LQR(K 已验证) + yaw 条件阻尼 + roll 腿 PD; RL 残差叠其上; RL 挂掉 → pitch+roll 安全 (见 design.md §5.4)
-- **LQR 底层**：永远在环，RL 挂掉时兜底（K=[-4.47,-61.18,-5.82,-4.02]，LP=56mm）
+  - **LQR 底层**：永远在环，RL 挂掉时兜底（K=[-4.47,-61.18,-5.82,-4.02]，LP=56mm）
+
+## 显存与编译优化
+
+RTX 4070 单卡 8GB 须同时承载 MJX GPU 物理、PPO rollout 缓冲与 JAX/PyTorch 编译开销，env 规模的主要约束是峰值显存。管线从三方面控制：
+
+- **缓冲区回收（donate_argnums）**：`reset`/`step` 的 `jit(vmap(...))` 闭包对 `state` 与 `rng`/`difficulty` 输入启用 `donate_argnums`，让 XLA 原地复用上一步缓冲而非分配新张量，显著降低 rollout 峰值。约定是**只捐纯 JAX 缓冲（state/rng/difficulty），不捐从 torch 经 DLPack 借入的 `action` 张量**——否则会触发 torch 缓冲 aliasing 被 XLA 误回收；该约定与 `mujoco/mjx/viewer.py` 一致。
+- **关闭预分配（XLA_PYTHON_CLIENT_PREALLOCATE=false）**：在 `import jax` 前设置，避免 JAX 启动即吞整卡显存，给 MJX 状态与 rollout 缓冲留弹性（实测 3072 envs × 72 步峰值约 4.3GB，占 8GB 一半有余量）。
+- **编译缓存（JAX_COMPILATION_CACHE_DIR）**：同样在 `import jax` 前指向 `.jax_cache/`，跨 run 复用已编译的 XLA 计算图，resume / 调参重启免重编译；`.jax_cache/` 不入 git。
+
+可选 `XLA_FLAGS=--xla_gpu_force_compilation_parallelism=1` 限制编译并行度（编译期更稳，代价是编译更慢），按需开启。
+
+实测显存（RTX 4070 8GB）：1024 envs ≈ 2.0GB，3072 envs ≈ 4.3GB；按线性外推 8GB 上限约可支撑到 ~5000 envs，留余量建议 ≤ 5000。
 
 ## 已知遗留
 
 | 项 | 状态 | 影响 | 计划 |
 |----|------|------|------|
-| `terrain.py` 课程参数 | 参考规格; 活跃课程由 `train.py` 的 `Curriculum` 类(双向: ≥80%升/≤40%降, per-env Uniform(0,d_max))驱动, 地形由 `KuafuMjxEnv._apply_terrain` 生成 | 不影响训练 | 真实地形已接入(斜坡+台阶), `terrain.py` 保留作阶段参数参考 |
-| 轮 geom 改 capsule | 为兼容 MJX 地形碰撞(动态圆柱不与 box/heightfield 碰撞) | 接触模型与原 cylinder 略有差异(圆端) | 落地前复跑 `verify_model.py` 11/11 确认物理无回归 |
-| 延迟鲁棒性对拍 | `eval_policy.py` / `playback.py` `--latency` 复现训练 latency DR (索引已修正: delay=k 取 k 步前) | 落地前建议带延迟跑一遍 | 真机/带延迟 sim 对拍 |
-| history_len 4 vs 50 | 环境用 4 步堆叠(140 维), RMA adapter 需 50 步 | 不影响训练（actor 吃 149 维）, 蒸馏时已处理 | distill.py 从 50 步序列取 base_obs(35) 喂给 adapter |
+| 轮 geom 改 capsule | 为兼容 MJX 地形碰撞(动态圆柱不与 box/heightfield 碰撞)的刻意改动; 接触模型与原 cylinder 略有差异(圆端) | 物理一致性待确认 | 落地前复跑 `verify_model.py` 11/11 确认无回归 |
+| 延迟鲁棒性对拍 | 训练 latency DR 索引已对齐(`kuafu_mjx_env.py` `_delayed_obs`: delay=k 取 k 步前), `eval_policy.py`/`playback.py` 支持 `--latency` 复现 | 落地前建议带延迟验证 | 真机 / 带延迟 sim 对拍 |

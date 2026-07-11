@@ -26,6 +26,7 @@ analysis/output/
 
 # ---- RL 训练产物(大文件, 不进库)----
 rl/checkpoints/
+rl/.jax_cache/
 rl/wandb/
 rl/runs/
 *.onnx
