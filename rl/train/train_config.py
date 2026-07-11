@@ -38,8 +38,8 @@ ALGORITHM = {
     "clip_param": 0.2,
     "gamma": 0.99,
     "lam": 0.95,
-    "value_loss_coef": 0.5,
-    "entropy_coef": 0.03,    # 探索bonus: 高于 0.01(防σ坍缩) 但低于 0.06(避免过度随机), d_max 升级后仍保有探索能力
+    "value_loss_coef": 1.0,    # RSL-RL 标准值; 价值估计权重, 1.0 比 0.5 更稳
+    "entropy_coef": 0.01,     # RSL-RL 标准默认; 配合 adaptive KL(desired_kl=0.01) 自动控熵, 3072 envs 强正则下无需高探索bonus
     "learning_rate": 3e-4,
     "max_grad_norm": 1.0,
     "schedule": "adaptive",   # 按 KL 自适应调学习率
