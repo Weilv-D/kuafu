@@ -159,7 +159,7 @@ def distill(
 
     # ---- 环境 (teacher 模式, 获取特权 obs 供 teacher 推理) ----
     env = KuafuMjxEnv(teacher=True, num_envs=num_envs)
-    reset_fn = jax.jit(jax.vmap(env.reset), donate_argnums=(0, 1))
+    reset_fn = jax.jit(jax.vmap(env.reset), donate_argnums=(0,))
     step_fn = jax.jit(jax.vmap(env.step), donate_argnums=(0,))
 
     rng = jax_key if jax_key is not None else jax.random.PRNGKey(seed)
@@ -206,6 +206,14 @@ def distill(
         # 快照本次执行所用的历史 (独立于后续 done-reset 的就地清零), 保证回放 (s,a*) 配对正确
         hist_sample = roll_history.detach().clone()
 
+        # 2. Teacher 给参考动作 (Teacher actor 吃 proprio+z = 157)
+        with torch.no_grad():
+            teacher_action = teacher(dlu.to_torch(actor_obs_jax))
+
+        # 3. 聚合本 iter 样本到回放缓冲 (跨 iter 累积)
+        replay.add(proprio_torch.detach(), hist_sample,
+                   teacher_action.detach(), static_z_torch.detach())
+
         # 环境物理步进
         jax_action = dlu.to_jax(student_action)
         state = step_fn(state, jax_action)
@@ -225,14 +233,6 @@ def distill(
             # 同步重置 done 环境的滚动历史 (避免跨 episode 污染)
             done_mask_torch = dlu.to_torch(done_jax).bool()
             roll_history[done_mask_torch] = 0.0
-
-        # 2. Teacher 给参考动作 (Teacher actor 吃 proprio+z = 157)
-        with torch.no_grad():
-            teacher_action = teacher(dlu.to_torch(actor_obs_jax))
-
-        # 3. 聚合本 iter 样本到回放缓冲 (跨 iter 累积)
-        replay.add(proprio_torch.detach(), hist_sample,
-                   teacher_action.detach(), static_z_torch.detach())
 
         # 4. 从回放缓冲分片采样训练 (DataLoader + 每 iter 固定种子保证可复现)
         student.train()

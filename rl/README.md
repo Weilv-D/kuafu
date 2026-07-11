@@ -221,7 +221,7 @@ RTX 4070 单卡 8GB 须同时承载 MJX GPU 物理、PPO rollout 缓冲与 JAX/P
 
 - **缓冲区回收（donate_argnums）**：`reset`/`step` 的 `jit(vmap(...))` 闭包对 `state` 与 `rng`/`difficulty` 输入启用 `donate_argnums`，让 XLA 原地复用上一步缓冲而非分配新张量，显著降低 rollout 峰值。约定是**只捐纯 JAX 缓冲（state/rng/difficulty），不捐从 torch 经 DLPack 借入的 `action` 张量**——否则会触发 torch 缓冲 aliasing 被 XLA 误回收；该约定与 `mujoco/mjx/viewer.py` 一致。
 - **关闭预分配（XLA_PYTHON_CLIENT_PREALLOCATE=false）**：在 `import jax` 前设置，避免 JAX 启动即吞整卡显存，给 MJX 状态与 rollout 缓冲留弹性（实测 3072 envs × 72 步峰值约 4.3GB，占 8GB 一半有余量）。
-- **编译缓存（JAX_COMPILATION_CACHE_DIR）**：同样在 `import jax` 前指向 `.jax_cache/`，跨 run 复用已编译的 XLA 计算图，resume / 调参重启免重编译；`.jax_cache/` 不入 git。
+- **编译缓存（JAX_COMPILATION_CACHE_DIR）**：同样在 `import jax` 前指向 `~/.cache/kuafu_jax/`，跨 run 复用已编译的 XLA 计算图，resume / 调参重启免重编译。
 
 可选 `XLA_FLAGS=--xla_gpu_force_compilation_parallelism=1` 限制编译并行度（编译期更稳，代价是编译更慢），按需开启。
 
