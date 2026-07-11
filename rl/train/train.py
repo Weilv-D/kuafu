@@ -27,13 +27,18 @@ sys.path.insert(0, PROJ_ROOT)
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["JAX_COMPILATION_CACHE_DIR"] = os.path.join(
     os.path.expanduser("~"), ".cache", "kuafu_jax")
-os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") +
-                           " --xla_gpu_enable_cuda_graphs=true")
+# CUDA graphs 加速采集 (jax 0.10 用 JAX_ENABLE_CUDA_GRAPHS 环境变量,
+# 旧的 XLA 级 --xla_gpu_enable_cuda_graphs 标志在本机 jax 构建已被移除)
+os.environ["JAX_ENABLE_CUDA_GRAPHS"] = "1"
 
 import jax
 import torch
 from rl.train.seed_utils import seed_all, capture_provenance
 from rl.train import dlpack_utils as dlu
+from rl.env.kuafu_mjx_env import (
+    KuafuMjxEnv, OBS_DIM, PRIVILEGED_DIM, RMA_STATIC_DIM, TRANSIENT_DIM,
+    ACTOR_OBS_DIM, CRITIC_PRIV_DIM, CRITIC_OBS_DIM,
+)
 
 
 def make_train_cfg() -> dict:
@@ -103,6 +108,157 @@ class Curriculum:
                 self.d = max(self.min_d, self.d - self.step)
 
 
+class DirectVecEnv:
+    """JAX vmap 环境到 rsl_rl 2.x VecEnv 的直接适配器.
+
+    绕过 playground 的 BraxAutoResetWrapper (其 auto-reset 会修改 info 结构导致
+    scan pytree 不匹配), 直接用 JAX vmap + jax.lax.cond 做 auto-reset,
+    通过 DLPack 与 PyTorch 零拷贝交换 GPU 张量。
+    """
+    def __init__(self, env, num_envs, seed, device="cuda", jax_key=None):
+        self.env = env
+        self.num_envs = num_envs
+        self.num_actions = env.action_size
+        self.num_obs = ACTOR_OBS_DIM                             # actor = proprio(148) + z(9)
+        # critic 输入 = actor(157) + 瞬态特权(3) = 160 (RSL-RL 实际从 extras 取此维,
+        # 但此处显式声明以免未来版本误读 env.num_privileged_obs 而建错 critic)。
+        self.num_privileged_obs = CRITIC_OBS_DIM if env._teacher else None
+        self.device = device
+        self.cfg = {"env_name": "kuafu", "num_envs": num_envs}
+        self.max_episode_length = env._episode_length
+        self.episode_length_buf = torch.zeros(num_envs, device=device, dtype=torch.long)
+
+        # 课程: d_max 由高难度环境平均存活步数 + 摔倒率双向调节, per-env 采样 Uniform(0, d_max)
+        # 训练初期即注入 DR + 随机推力, 防过拟合标称参数, ETH legged_gym 实践
+        self._curriculum = Curriculum(start=0.1, max_d=1.0, step=0.05, window=200,
+                                      upgrade_avg_survival=800.0, upgrade_fall_rate=0.3,
+                                      fallback_avg_survival=600.0, fallback_fall_rate=0.5)
+        self._difficulty = jax.numpy.float32(self._curriculum.d)  # d_max (课程上界)
+
+        self._reset_vmapped = jax.jit(
+            jax.vmap(env.reset, in_axes=(0, 0)), donate_argnums=(0, 1))
+        self._step_vmapped = jax.jit(jax.vmap(env.step), donate_argnums=(0,))
+
+        self._rng = jax_key if jax_key is not None else jax.random.PRNGKey(seed)
+        self._rng, diff_rng = jax.random.split(self._rng)
+        diff_vec = jax.random.uniform(diff_rng, (num_envs,),
+                                      minval=0.0, maxval=self._difficulty)
+        self._state = self._reset_vmapped(jax.random.split(self._rng, num_envs), diff_vec)
+
+    def _to_torch(self, x):
+        """JAX DeviceArray → torch.Tensor (DLPack 零拷贝契约)."""
+        return dlu.to_torch(x, device=self.device)
+
+    def _to_jax(self, t):
+        """torch.Tensor → JAX DeviceArray (DLPack 零拷贝契约)."""
+        return dlu.to_jax(t, device=None)
+
+    def get_observations(self):
+        obs = self._state.obs
+        state_obs = self._to_torch(obs["state"]) if isinstance(obs, dict) else self._to_torch(obs)
+        extras = {"observations": {}}
+        if isinstance(obs, dict) and "privileged_state" in obs:
+            # critic 吃 actor obs (157) + 瞬态特权 (3) = 160
+            priv_obs = self._to_torch(obs["privileged_state"])
+            extras["observations"]["critic"] = torch.cat([state_obs, priv_obs], dim=-1)
+        return state_obs, extras
+
+    def reset(self):
+        """VecEnv 接口要求: 重置所有环境."""
+        self._rng, reset_rng, diff_rng = jax.random.split(self._rng, 3)
+        # per-env 独立采样难度 Uniform(0, d_max), 策略同时面对简单与困难场景
+        diff_vec = jax.random.uniform(diff_rng, (self.num_envs,),
+                                      minval=0.0, maxval=self._difficulty)
+        self._state = self._reset_vmapped(jax.random.split(reset_rng, self.num_envs), diff_vec)
+        self.episode_length_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+        return self.get_observations()
+
+    def step(self, action):
+        jax_action = self._to_jax(action)
+        self._state = self._step_vmapped(self._state, jax_action)
+
+        # 在 auto-reset 前读取 done/reward/metrics (reset 后会清零)
+        done_jax = self._state.done
+        reward_jax = self._state.reward
+        metrics_jax = self._state.metrics
+        fallen_jax = metrics_jax.get("fallen", jax.numpy.zeros_like(done_jax))
+
+        # auto-reset done 环境 (保持 JAX array 在 GPU 上)
+        done_any = jax.device_get(done_jax.any())
+        if done_any:
+            self._rng, reset_rng, diff_rng = jax.random.split(self._rng, 3)
+
+            # 课程: 仅统计 done 且高难度 (difficulty > d_max×0.7) 环境的存活步数与摔倒率
+            # 避免低难度虚高 + 非 done 稀释; 升级条件 avg_survival>800 且 fall_rate<0.3
+            cur_env_state = self._state.info["env_state"]
+            high_diff = cur_env_state.difficulty > (self._difficulty * 0.7)
+            relevant = done_jax & high_diff
+            relevant_np = jax.device_get(relevant)
+            if relevant_np.any():
+                survival_np = jax.device_get(cur_env_state.step_count)
+                fallen_np = jax.device_get(fallen_jax)
+                self._curriculum.update(survival_np[relevant_np], fallen_np[relevant_np])
+            self._difficulty = jax.numpy.float32(self._curriculum.d)
+
+            # per-env 独立采样难度 Uniform(0, d_max)
+            diff_vec = jax.random.uniform(diff_rng, (self.num_envs,),
+                                          minval=0.0, maxval=self._difficulty)
+            reset_state = self._reset_vmapped(
+                jax.random.split(reset_rng, self.num_envs), diff_vec)
+            done_mask = done_jax.astype(jax.numpy.bool_)
+            self._state = jax.tree_util.tree_map(
+                lambda cur, new: jax.numpy.where(
+                    done_mask.reshape((-1,) + (1,) * (cur.ndim - 1)), new, cur),
+                self._state, reset_state)
+
+        # done 帧返回 reset 后的初始观测 (PPO 新 episode 首步用初始 obs)
+        state_obs, extras = self.get_observations()
+        reward = self._to_torch(reward_jax)
+        done = self._to_torch(done_jax)
+
+        self.episode_length_buf += 1
+
+        # 收集 episode 级指标到 info["log"] (RSL-RL 自动写入 TensorBoard)
+        # episode 级指标仅在有环境 done 时才填充, 其余步留空 {} - RSL-RL 收集器遇空 dict 自动跳过,
+        # 避免中途帧的 0.0 被计入均值导致指标被稀释趋零
+        log = {}
+        if done_any:
+            done_mask = (done > 0)
+            n_done = done_mask.sum().clamp(min=1)
+            # episode_length 在清零前读取 (上面 +1 后, done 帧的值即该 episode 总长)
+            log["episode_length"] = (self.episode_length_buf * done_mask).sum().item() / n_done.item()
+            for key in ["orientation", "lin_vel_tracking"]:
+                if key in metrics_jax:
+                    val = self._to_torch(metrics_jax[key])
+                    log[key] = (val * done_mask).sum().item() / n_done.item()
+            # 课程高难度窗口指标: 平均存活步数 + 摔倒率 (驱动 d_max 升降)
+            log["curriculum_avg_survival"] = self._curriculum._last_avg_survival
+            log["curriculum_fall_rate"] = self._curriculum._last_fall_rate
+        # difficulty 每步记录 (d_max 课程标量 + per-env 实际均值)
+        log["difficulty"] = self._to_torch(self._difficulty).mean().item()
+        log["difficulty_mean"] = self._to_torch(
+            self._state.info["env_state"].difficulty).mean().item()
+
+        self.episode_length_buf = torch.where(
+            done > 0, torch.zeros_like(self.episode_length_buf), self.episode_length_buf)
+
+        # time_outs: 仅 timeout(非倒下) 时为 True, 用于 value bootstrap
+        # 倒下 (fallen) 的 episode 不做 bootstrap (终止态 value=0)
+        fallen = self._to_torch(fallen_jax)
+        time_outs = (done > 0) & (fallen < 0.5)  # done 但未倒下 = 超时
+        info = {"time_outs": time_outs.float(),
+                "observations": extras.get("observations", {}), "log": log}
+        return state_obs, reward, done, info
+
+    @property
+    def unwrapped(self):
+        return self.env
+
+    @property
+    def step_dt(self):
+        return self.env.dt
+
+
 def main():
     parser = argparse.ArgumentParser(description="KUAFU Teacher PPO Training")
     from rl.train.train_config import RUN
@@ -115,6 +271,8 @@ def main():
                         help="训练代号(如 garlic),产物存至 rl/checkpoints/<run_name>/teacher/")
     parser.add_argument("--log_dir", type=str, default="rl/checkpoints", help="checkpoint 根目录")
     parser.add_argument("--smoke_test", action="store_true", help="烟测模式 (5 iteration)")
+    parser.add_argument("--jax_scan_rollout", action="store_true",
+                        help="用一次性 jax lax.scan 采集替换逐步采集 (KuafuOnPolicyRunner)")
     parser.add_argument("--resume", type=str, default=None,
                         help="从 checkpoint 恢复训练(传 .pt 路径,如 rl/checkpoints/garlic/teacher/model_3999.pt)")
     args = parser.parse_args()
@@ -131,9 +289,6 @@ def main():
     # ---- 创建环境 ----
     # 课程: 双向滑动窗口调节 d_max (Curriculum 类, 初始 0.1 即注入 DR+扰动),
     # per-env 采样 Uniform(0, d_max); 地形(斜坡+台阶)由 KuafuMjxEnv._apply_terrain 按 difficulty 生成。
-    from rl.env.kuafu_mjx_env import (
-        KuafuMjxEnv, OBS_DIM, PRIVILEGED_DIM, RMA_STATIC_DIM, TRANSIENT_DIM,
-        ACTOR_OBS_DIM, CRITIC_PRIV_DIM, CRITIC_OBS_DIM)
 
     env = KuafuMjxEnv(teacher=True, num_envs=args.num_envs)
 
@@ -143,156 +298,6 @@ def main():
     dlu.verify_dlpack_zero_copy(device)
 
     # ---- 直接适配 rsl_rl 2.x (绕过 playground brax wrapper 的 info 结构限制) ----
-    class DirectVecEnv:
-        """JAX vmap 环境到 rsl_rl 2.x VecEnv 的直接适配器.
-
-        绕过 playground 的 BraxAutoResetWrapper (其 auto-reset 会修改 info 结构导致
-        scan pytree 不匹配), 直接用 JAX vmap + jax.lax.cond 做 auto-reset,
-        通过 DLPack 与 PyTorch 零拷贝交换 GPU 张量。
-        """
-        def __init__(self, env, num_envs, seed, device="cuda", jax_key=None):
-            self.env = env
-            self.num_envs = num_envs
-            self.num_actions = env.action_size
-            self.num_obs = ACTOR_OBS_DIM                             # actor = proprio(148) + z(9)
-            # critic 输入 = actor(157) + 瞬态特权(3) = 160 (RSL-RL 实际从 extras 取此维,
-            # 但此处显式声明以免未来版本误读 env.num_privileged_obs 而建错 critic)。
-            self.num_privileged_obs = CRITIC_OBS_DIM if env._teacher else None
-            self.device = device
-            self.cfg = {"env_name": "kuafu", "num_envs": num_envs}
-            self.max_episode_length = env._episode_length
-            self.episode_length_buf = torch.zeros(num_envs, device=device, dtype=torch.long)
-
-            # 课程: d_max 由高难度环境平均存活步数 + 摔倒率双向调节, per-env 采样 Uniform(0, d_max)
-            # 训练初期即注入 DR + 随机推力, 防过拟合标称参数, ETH legged_gym 实践
-            self._curriculum = Curriculum(start=0.1, max_d=1.0, step=0.05, window=200,
-                                          upgrade_avg_survival=800.0, upgrade_fall_rate=0.3,
-                                          fallback_avg_survival=600.0, fallback_fall_rate=0.5)
-            self._difficulty = jax.numpy.float32(self._curriculum.d)  # d_max (课程上界)
-
-            self._reset_vmapped = jax.jit(
-                jax.vmap(env.reset, in_axes=(0, 0)), donate_argnums=(0, 1))
-            self._step_vmapped = jax.jit(jax.vmap(env.step), donate_argnums=(0,))
-
-            self._rng = jax_key if jax_key is not None else jax.random.PRNGKey(seed)
-            self._rng, diff_rng = jax.random.split(self._rng)
-            diff_vec = jax.random.uniform(diff_rng, (num_envs,),
-                                          minval=0.0, maxval=self._difficulty)
-            self._state = self._reset_vmapped(jax.random.split(self._rng, num_envs), diff_vec)
-
-        def _to_torch(self, x):
-            """JAX DeviceArray → torch.Tensor (DLPack 零拷贝契约)."""
-            return dlu.to_torch(x, device=self.device)
-
-        def _to_jax(self, t):
-            """torch.Tensor → JAX DeviceArray (DLPack 零拷贝契约)."""
-            return dlu.to_jax(t, device=None)
-
-        def get_observations(self):
-            obs = self._state.obs
-            state_obs = self._to_torch(obs["state"]) if isinstance(obs, dict) else self._to_torch(obs)
-            extras = {"observations": {}}
-            if isinstance(obs, dict) and "privileged_state" in obs:
-                # critic 吃 actor obs (157) + 瞬态特权 (3) = 160
-                priv_obs = self._to_torch(obs["privileged_state"])
-                extras["observations"]["critic"] = torch.cat([state_obs, priv_obs], dim=-1)
-            return state_obs, extras
-
-        def reset(self):
-            """VecEnv 接口要求: 重置所有环境."""
-            self._rng, reset_rng, diff_rng = jax.random.split(self._rng, 3)
-            # per-env 独立采样难度 Uniform(0, d_max), 策略同时面对简单与困难场景
-            diff_vec = jax.random.uniform(diff_rng, (self.num_envs,),
-                                          minval=0.0, maxval=self._difficulty)
-            self._state = self._reset_vmapped(jax.random.split(reset_rng, self.num_envs), diff_vec)
-            self.episode_length_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
-            return self.get_observations()
-
-        def step(self, action):
-            jax_action = self._to_jax(action)
-            self._state = self._step_vmapped(self._state, jax_action)
-
-            # 在 auto-reset 前读取 done/reward/metrics (reset 后会清零)
-            done_jax = self._state.done
-            reward_jax = self._state.reward
-            metrics_jax = self._state.metrics
-            fallen_jax = metrics_jax.get("fallen", jax.numpy.zeros_like(done_jax))
-
-            # auto-reset done 环境 (保持 JAX array 在 GPU 上)
-            done_any = jax.device_get(done_jax.any())
-            if done_any:
-                self._rng, reset_rng, diff_rng = jax.random.split(self._rng, 3)
-
-                # 课程: 仅统计 done 且高难度 (difficulty > d_max×0.7) 环境的存活步数与摔倒率
-                # 避免低难度虚高 + 非 done 稀释; 升级条件 avg_survival>800 且 fall_rate<0.3
-                cur_env_state = self._state.info["env_state"]
-                high_diff = cur_env_state.difficulty > (self._difficulty * 0.7)
-                relevant = done_jax & high_diff
-                relevant_np = jax.device_get(relevant)
-                if relevant_np.any():
-                    survival_np = jax.device_get(cur_env_state.step_count)
-                    fallen_np = jax.device_get(fallen_jax)
-                    self._curriculum.update(survival_np[relevant_np], fallen_np[relevant_np])
-                self._difficulty = jax.numpy.float32(self._curriculum.d)
-
-                # per-env 独立采样难度 Uniform(0, d_max)
-                diff_vec = jax.random.uniform(diff_rng, (self.num_envs,),
-                                              minval=0.0, maxval=self._difficulty)
-                reset_state = self._reset_vmapped(
-                    jax.random.split(reset_rng, self.num_envs), diff_vec)
-                done_mask = done_jax.astype(jax.numpy.bool_)
-                self._state = jax.tree_util.tree_map(
-                    lambda cur, new: jax.numpy.where(
-                        done_mask.reshape((-1,) + (1,) * (cur.ndim - 1)), new, cur),
-                    self._state, reset_state)
-
-            # done 帧返回 reset 后的初始观测 (PPO 新 episode 首步用初始 obs)
-            state_obs, extras = self.get_observations()
-            reward = self._to_torch(reward_jax)
-            done = self._to_torch(done_jax)
-
-            self.episode_length_buf += 1
-
-            # 收集 episode 级指标到 info["log"] (RSL-RL 自动写入 TensorBoard)
-            # episode 级指标仅在有环境 done 时才填充, 其余步留空 {} - RSL-RL 收集器遇空 dict 自动跳过,
-            # 避免中途帧的 0.0 被计入均值导致指标被稀释趋零
-            log = {}
-            if done_any:
-                done_mask = (done > 0)
-                n_done = done_mask.sum().clamp(min=1)
-                # episode_length 在清零前读取 (上面 +1 后, done 帧的值即该 episode 总长)
-                log["episode_length"] = (self.episode_length_buf * done_mask).sum().item() / n_done.item()
-                for key in ["orientation", "lin_vel_tracking"]:
-                    if key in metrics_jax:
-                        val = self._to_torch(metrics_jax[key])
-                        log[key] = (val * done_mask).sum().item() / n_done.item()
-                # 课程高难度窗口指标: 平均存活步数 + 摔倒率 (驱动 d_max 升降)
-                log["curriculum_avg_survival"] = self._curriculum._last_avg_survival
-                log["curriculum_fall_rate"] = self._curriculum._last_fall_rate
-            # difficulty 每步记录 (d_max 课程标量 + per-env 实际均值)
-            log["difficulty"] = self._to_torch(self._difficulty).mean().item()
-            log["difficulty_mean"] = self._to_torch(
-                self._state.info["env_state"].difficulty).mean().item()
-
-            self.episode_length_buf = torch.where(
-                done > 0, torch.zeros_like(self.episode_length_buf), self.episode_length_buf)
-
-            # time_outs: 仅 timeout(非倒下) 时为 True, 用于 value bootstrap
-            # 倒下 (fallen) 的 episode 不做 bootstrap (终止态 value=0)
-            fallen = self._to_torch(fallen_jax)
-            time_outs = (done > 0) & (fallen < 0.5)  # done 但未倒下 = 超时
-            info = {"time_outs": time_outs.float(),
-                    "observations": extras.get("observations", {}), "log": log}
-            return state_obs, reward, done, info
-
-        @property
-        def unwrapped(self):
-            return self.env
-
-        @property
-        def step_dt(self):
-            return self.env.dt
-
     torch_env = DirectVecEnv(env, args.num_envs, args.seed, device=device, jax_key=jax_key)
     print(f"  obs={torch_env.num_obs}, privileged={torch_env.num_privileged_obs}, "
           f"action={torch_env.num_actions}")
@@ -342,8 +347,13 @@ def main():
         json.dump(run_meta, f, indent=2, ensure_ascii=False)
 
     # ---- RSL-RL Runner ----
-    from rsl_rl.runners import OnPolicyRunner
-    runner = OnPolicyRunner(torch_env, train_cfg, log_dir=log_dir, device=device)
+    if args.jax_scan_rollout:
+        from rl.train.runner_scan import KuafuOnPolicyRunner
+        runner = KuafuOnPolicyRunner(torch_env, train_cfg, log_dir=log_dir, device=device)
+        print("  采集模式: jax lax.scan (KuafuOnPolicyRunner)")
+    else:
+        from rsl_rl.runners import OnPolicyRunner
+        runner = OnPolicyRunner(torch_env, train_cfg, log_dir=log_dir, device=device)
     print(f"  日志: {log_dir}")
 
     # ---- 载入 Checkpoint 恢复训练 ----
