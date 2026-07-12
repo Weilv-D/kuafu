@@ -92,14 +92,18 @@ class Curriculum:
             self._fall_buf.append(float(f))
         if len(self._surv_buf) > self.window:
             del self._surv_buf[: len(self._surv_buf) - self.window]
-        if len(self._surv_buf) < self.window:
+        # 窗口未满时仍记录真实(部分)统计, 避免 resume 首轮 NaN 污染 TB 曲线;
+        # 但 d_max 的升降仅在窗口填满后决策, 防止部分样本误判。
+        if self._surv_buf:
+            self._last_avg_survival = sum(self._surv_buf) / len(self._surv_buf)
+            self._last_fall_rate = sum(self._fall_buf) / len(self._fall_buf)
+        else:
             self._last_avg_survival = float("nan")
             self._last_fall_rate = float("nan")
+        if len(self._surv_buf) < self.window:
             return
-        avg_survival = sum(self._surv_buf) / len(self._surv_buf)
-        fall_rate = sum(self._fall_buf) / len(self._fall_buf)
-        self._last_avg_survival = avg_survival
-        self._last_fall_rate = fall_rate
+        avg_survival = self._last_avg_survival
+        fall_rate = self._last_fall_rate
         if avg_survival >= self.upgrade_avg_survival and fall_rate <= self.upgrade_fall_rate:
             if self.d < self.max_d:
                 self.d = min(self.max_d, self.d + self.step)
@@ -270,8 +274,15 @@ class _CurriculumPersistMixin:
         try:
             cur = self.env._curriculum
             sidecar = path.replace("model_", "curriculum_")
-            torch.save({"d": float(cur.d),
-                        "difficulty": float(self.env._difficulty)}, sidecar)
+            torch.save({
+                "d": float(cur.d),
+                "difficulty": float(self.env._difficulty),
+                # 持久化滑动窗口缓冲与最近统计, 避免 resume 后课程冷启动 / TB NaN
+                "surv_buf": list(cur._surv_buf),
+                "fall_buf": list(cur._fall_buf),
+                "last_avg_survival": float(cur._last_avg_survival),
+                "last_fall_rate": float(cur._last_fall_rate),
+            }, sidecar)
         except Exception:
             pass
 
@@ -283,6 +294,11 @@ class _CurriculumPersistMixin:
                 sd = torch.load(sidecar, weights_only=False)
                 self.env._curriculum.d = float(sd["d"])
                 self.env._difficulty = jax.numpy.float32(sd["d"])
+                cur = self.env._curriculum
+                cur._surv_buf = list(sd.get("surv_buf", []))
+                cur._fall_buf = list(sd.get("fall_buf", []))
+                cur._last_avg_survival = float(sd.get("last_avg_survival", float("nan")))
+                cur._last_fall_rate = float(sd.get("last_fall_rate", float("nan")))
             except Exception:
                 pass
         return infos
