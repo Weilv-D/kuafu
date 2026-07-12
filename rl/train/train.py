@@ -300,8 +300,6 @@ def main():
                         help="训练代号(如 garlic),产物存至 rl/checkpoints/<run_name>/teacher/")
     parser.add_argument("--log_dir", type=str, default="rl/checkpoints", help="checkpoint 根目录")
     parser.add_argument("--smoke_test", action="store_true", help="烟测模式 (5 iteration)")
-    parser.add_argument("--jax_scan_rollout", action="store_true",
-                        help="用一次性 jax lax.scan 采集替换逐步采集 (KuafuOnPolicyRunner)")
     parser.add_argument("--resume", type=str, default=None,
                         help="从 checkpoint 恢复训练(传 .pt 路径,如 rl/checkpoints/garlic/teacher/model_3999.pt)")
     args = parser.parse_args()
@@ -376,17 +374,10 @@ def main():
         json.dump(run_meta, f, indent=2, ensure_ascii=False)
 
     # ---- RSL-RL Runner ----
-    if args.jax_scan_rollout:
-        from rl.train.runner_scan import KuafuOnPolicyRunner
-        class _ScanRunner(_CurriculumPersistMixin, KuafuOnPolicyRunner):
-            pass
-        runner = _ScanRunner(torch_env, train_cfg, log_dir=log_dir, device=device)
-        print("  采集模式: jax lax.scan (KuafuOnPolicyRunner)")
-    else:
-        from rsl_rl.runners import OnPolicyRunner
-        class _StepRunner(_CurriculumPersistMixin, OnPolicyRunner):
-            pass
-        runner = _StepRunner(torch_env, train_cfg, log_dir=log_dir, device=device)
+    from rsl_rl.runners import OnPolicyRunner
+    class _StepRunner(_CurriculumPersistMixin, OnPolicyRunner):
+        pass
+    runner = _StepRunner(torch_env, train_cfg, log_dir=log_dir, device=device)
     print(f"  日志: {log_dir}")
 
     # ---- 载入 Checkpoint 恢复训练 ----

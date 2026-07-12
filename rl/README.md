@@ -11,7 +11,6 @@
 | 物理验证（阶段 0） | ✅ | **13/13**, LQR pitch 0.1s 恢复 5° + yaw 条件阻尼 + roll PD 调平 0.1s 恢复 3° |
 | MJX 环境 `kuafu_mjx_env.py` | ✅ | 三轴基层(pitch LQR+yaw阻尼+roll PD) + RL残差; 接触obs; 地形(斜坡+台阶); 延迟DR; 烟测通过 |
 | Teacher PPO 训练 `train.py` | ✅ | RSL-RL 2.x + DLPack; actor 157(proprio148+z9), critic 160; 双向课程(≥80%升/≤40%降)+per-env Uniform(0,d_max)采样; reset/step 闭包 donate_argnums 回收 state/rng 缓冲降显存峰值; 烟测通过 |
-| 一次性 scan 采集 `jax_rollout.py`+`runner_scan.py` | ✅ | 单 rollout 用 `jax.lax.scan` 整段塞入 GPU (actor+归一器在 jax 内, 单 DLPack 回 torch → RolloutStorage → PPO.update 不变); 逐位复刻采集语义; 训练采集 ~1.95× 提速; S0 权重对齐护栏 PASS |
 | Student 蒸馏 `distill.py` | ✅ | DAgger + z 回归 (MSE), teacher actor 157 维对齐, 待 teacher 训练后跑 |
 | ONNX 导出 `export_policy.py` | ✅ | teacher (含 normalizer) / student 两种模式 |
 | 显存测算 `probe_envs.py` | ✅ | RTX 4070 8GB: 3072 envs×72步峰值 ~4.3GB (donate_argnums + preallocate=false); 1024≈2.0GB; 线性外推上限 ~5000 |
@@ -35,8 +34,7 @@ rl/
 │
 ├── train/
 │   ├── train.py               Teacher PPO 训练入口（RSL-RL 2.x + DLPack）
-│   ├── jax_rollout.py         一次性 scan 采集 (lax.scan): jax actor/归一器 + 静态形状全量张量输出
-│   ├── runner_scan.py         KuafuOnPolicyRunner: 复用 PPO storage/compute_returns/update, 整段轨迹一次性更新课程
+│   ├── jax_rollout.py         jax actor/critic MLP 前向与权重映射（S0 对齐护栏用）
 │   ├── distill.py             Student 规范 DAgger 蒸馏（回放缓冲 + DataLoader + 梯度裁剪 + TensorBoard）
 │   ├── networks.py            StudentPolicy + RMAAdapter（部署用 PyTorch 网络）
 │   ├── train_config.py        PPO / 蒸馏 超参 + 课程 + 收敛判据（单一真相源）
@@ -87,14 +85,7 @@ tail -f train.log
 rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 3072 \
   --resume rl/checkpoints/garlic/teacher/model_3999.pt
 
-# 4b. 一次性 scan 采集模式 (JaxRollout): 采集提速 ~1.95×, 数值与逐步采集逐位一致
-#     --jax_scan_rollout 切换 KuafuOnPolicyRunner, 其余参数/checkpoint 格式完全不变
-rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 3072 --jax_scan_rollout
-#     续训同样可叠加该 flag (PPO 权重/归一器/课程均逐位兼容):
-rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 3072 \
-  --jax_scan_rollout --resume rl/checkpoints/garlic/teacher/model_3999.pt
-
-# 4c. S0 回归护栏: jax actor/critic 前向 与 torch ActorCritic 对齐
+# 4b. S0 回归护栏: jax actor/critic 前向 与 torch ActorCritic 对齐
 #     (任何权重键映射或 mlp_forward 的改动都会在此暴露: f64 结构性 <1e-5, f32 <2e-3)
 rl/.venv/bin/python rl/verify/s0_parity.py
 
@@ -122,7 +113,7 @@ rl/.venv/bin/python rl/verify/playback.py --ckpt rl/checkpoints/garlic/teacher/m
 ```
 阶段0  LQR baseline 验证 ──── ✅ verify_model.py 11/11
   ↓
-阶段1  Teacher PPO ────────── ✅ 代码就绪, 烟测通过; 采集支持 --jax_scan_rollout 一次性 lax.scan (提速 ~1.95×, 数值逐位一致), 待正式训练
+阶段1  Teacher PPO ────────── ✅ 代码就绪, 烟测通过, 待正式训练
   ↓                              收敛: 恢复时间 < LQR×0.85
 阶段2  Student 蒸馏 ──────── ✅ 代码就绪 (规范 DAgger: 回放缓冲 + DataLoader + 梯度裁剪 + TensorBoard), 待 teacher checkpoint
   ↓                              student ≥ teacher×0.9
@@ -132,57 +123,6 @@ rl/.venv/bin/python rl/verify/playback.py --ckpt rl/checkpoints/garlic/teacher/m
   ↓
 阶段5  实机部署 ──────────── ⏳ 待硬件就绪
 ```
-
-## JaxRollout：一次性 scan 采集（采集提速）
-
-标准 RSL-RL 训练在 `learn` 里对每个环境、每步调用 `env.step` → `alg.act` → `alg.process_env_step`，
-单 rollout（3072 envs × 72 步 ≈ 22 万次）触发海量 Python/内核发射，是采集瓶颈。JaxRollout 把
-**整段 rollout 塞进单个 `jax.lax.scan`**，在 GPU 上一次性跑完，再把结果以单次 DLPack 零拷贝回 torch。
-PPO 的 `storage` / `compute_returns` / `update` **完全不变**，因此训练循环语义与逐步采集逐位一致，
-仅采集实现替换。RTX 4070 实测采集**提速约 1.95×**（同 step 数、同 env 数，returns/长度首步一致）。
-
-### 设计要点
-
-- **单 rollout 内固定 `d_max`**：课程上界在 rollout 内不变，避免 scan 长度动态化；rollout 结束后才更新课程。
-- **jax actor + jax 归一器在 scan 内完成**：`mlp_forward` 复刻 RSL-RL actor/critic `[512,512,512] elu`；
-  `EmpiricalNormalization` 用 Welford 递推在 scan 内增量更新（与 `rsl_rl` 逐批更新数学等价，并行合并与顺序无关）。
-  归一顺序（t=0 用原始 obs、t>0 用归一后 obs）与基线 `obs_normalizer(obs)` 调用时序逐位对齐。
-- **静态形状全量张量**：scan 输出 `obs_norm / priv_norm / actions / rewards / dones / time_outs / values /
-  log_prob / mean / sigma / fallen / step_count / difficulty / orientation / lin_vel_tracking`，
-  形状固定 `[T, N, ...]`（无 `arr[mask]` 动态形状，满足 jit 静态形状禁令）。
-- **单 DLPack 回 torch → RolloutStorage**：`out` 经 `to_torch_trajectory` 一次性转 torch，逐条喂入
-  `PPO.process_env_step`（内部完成 timeout 的 value bootstrap `r += γ·V·time_out`），再 `compute_returns`
-  + `update` 复用原生实现。jax 终态归一化统计回写 torch 归一器（`normalizer_state_to_torch`），
-  保证跨迭代 / 导出 / 续训一致。
-- **课程（Option a）**：scan 只吐静态形状张量，Python 端按 `dones & (difficulty > d_max×0.7)` mask+gather+reduce，
-  整段轨迹一次性调 `Curriculum.update`（窗口 200、Welford 与逐步追加顺序无关，窗口统计量相同）。
-- **探索噪声与基线一致**：`act = actor_mean + std·noise`，noise 由 jax rng 生成，每迭代 rng 独立推进。
-
-### 数值对齐护栏
-
-| 层 | 内容 | 断言 | 状态 |
-|----|------|------|------|
-| S0 | jax actor/critic 前向 vs torch `ActorCritic` | f64 结构性 <1e-5；f32 后端噪声 <2e-3；std 逐位相等 | ✅ `rl/verify/s0_parity.py` |
-| S1 | scan rollout vs 逐步 `DirectVecEnv.step` 轨迹 | obs/act/reward/done 逐元素一致（mjx 数值容差内） | ✅ |
-| S2 | `KuafuOnPolicyRunner` vs `OnPolicyRunner` 首步 PPO 更新 | returns / episode 长度逐位一致 | ✅ `--resume model_600` 对拍 |
-
-S0 护栏入仓常驻；S1/S2 为对拍脚本（同 step 0 下 returns/长度无差异，确认训练循环语义不变）。
-
-### 运行
-
-```bash
-# 切换 KuafuOnPolicyRunner, 其余参数/checkpoint 格式完全不变
-rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 3072 --jax_scan_rollout
-# 续训同样叠加 flag (PPO 权重/归一器/课程逐位兼容)
-rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 3072 \
-  --jax_scan_rollout --resume rl/checkpoints/garlic/teacher/model_3999.pt
-```
-
-### 已知近似（对训练无实质影响）
-
-课程调整在 scan 模式每迭代至多一次（基线为逐步追加、每步至多一次）。窗口统计量因 Welford 顺序无关
-而完全相同；`d_max` 仅在窗口首次填满后随难度缓慢移动，单迭代一次调整足够。其余采集语义
-（归一顺序、auto-reset、timeout bootstrap、探索噪声）与基线逐位一致。
 
 ## 实机部署：硬实时调度（0 代码改动）
 

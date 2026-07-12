@@ -6,7 +6,7 @@
   - float32 后端噪声容差:           actor/critic/std max diff < 2e-3
   - std 逐位相等 (init_noise_std 常量): diff == 0.0
 
-这是 JaxRollout 的"权重映射 + MLP 前向"层护栏, 不依赖环境/物理; 任何
+这是 actor/critic 的"权重映射 + MLP 前向"层护栏, 不依赖环境/物理; 任何
 权重键映射或 mlp_forward 的改动都会在此暴露。运行:
 
   rl/.venv/bin/python rl/verify/s0_parity.py
