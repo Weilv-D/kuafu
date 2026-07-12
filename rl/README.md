@@ -10,7 +10,7 @@
 | 仿真模型 `kuafu.xml` | ✅ | 闭链残差 0mm, 轮挂 Q 点, armature=0; 轮改 capsule 兼容 MJX 地形碰撞; 4 舵机独立 |
 | 物理验证（阶段 0） | ✅ | **13/13**, LQR pitch 0.1s 恢复 5° + yaw 条件阻尼 + roll PD 调平 0.1s 恢复 3° |
 | MJX 环境 `kuafu_mjx_env.py` | ✅ | 三轴基层(pitch LQR+yaw阻尼+roll PD) + RL残差; 接触obs; 地形(斜坡+台阶); 延迟DR; 烟测通过 |
-| Teacher PPO 训练 `train.py` | ✅ | RSL-RL 2.x + DLPack; actor 157(proprio148+z9), critic 160; 双向课程(≥80%升/≤40%降)+per-env Uniform(0,d_max)采样; reset/step 闭包 donate_argnums 回收 state/rng 缓冲降显存峰值; 烟测通过 |
+| Teacher PPO 训练 `train.py` | ✅ | RSL-RL 2.x + DLPack; actor 157(proprio148+z9), critic 160; 双向滑动窗口课程(d_max 随高难度平均存活≥800且摔倒率≤0.3升、≤600或≥0.5降)+per-env Uniform(0,d_max)采样; reset/step 闭包 donate_argnums 回收 state/rng 缓冲降显存峰值; 烟测通过 |
 | Student 蒸馏 `distill.py` | ✅ | DAgger + z 回归 (MSE), teacher actor 157 维对齐, 待 teacher 训练后跑 |
 | ONNX 导出 `export_policy.py` | ✅ | teacher (含 normalizer) / student 两种模式 |
 | 显存测算 `probe_envs.py` | ✅ | RTX 4070 8GB: 3072 envs×72步峰值 ~4.3GB (donate_argnums + preallocate=false); 1024≈2.0GB; 线性外推上限 ~5000 |
@@ -30,7 +30,7 @@ rl/
 ├── env/
 │   ├── kuafu_env.py            观测/动作/reward/DR 规格（design.md §2.1-2.4）
 │   ├── kuafu_mjx_env.py        MJX GPU 向量化环境实现（JAX, ~400 行）
-│   └── terrain.py              课程地形系统 [⏳ 未接入训练]
+│   └── terrain.py              课程地形系统（_apply_terrain 按 difficulty 生成斜坡+台阶）
 │
 ├── train/
 │   ├── train.py               Teacher PPO 训练入口（RSL-RL 2.x + DLPack）

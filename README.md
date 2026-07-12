@@ -15,7 +15,7 @@ KuaFu/
     ├── kuafu.xml                   ← MJCF 仿真模型（五杆闭链 + 混合执行器）
     ├── verify/                     ← 物理验证 + 可视化 viewer + S0 对齐护栏
     ├── env/                        ← RL 环境（obs/act/reward/域随机化）
-    ├── train/                      ← PPO 训练配置 + 课程 + JaxRollout 一次性 scan 采集
+    ├── train/                      ← PPO 训练配置 + 课程 + S0 对齐护栏
     └── export/                     ← ONNX 导出（PyTorch → 部署）
 ```
 
@@ -26,7 +26,6 @@ KuaFu/
 
 ---
 
-RL 训练见 `rl/README.md`：Teacher PPO（RSL-RL 2.x + DLPack）支持逐步采集与 `--jax_scan_rollout`
-一次性 `jax.lax.scan` 采集（提速约 1.95×，数值逐位一致）；物理参数真源在 `kuafu_physics.py`。
+RL 训练见 `rl/README.md`：Teacher PPO（RSL-RL 2.x + DLPack 零拷贝）逐步采集；物理参数真源在 `kuafu_physics.py`。
 
 v2.6 / 2026-07-11

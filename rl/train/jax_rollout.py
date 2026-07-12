@@ -2,12 +2,8 @@
 """jax 侧 actor/critic MLP 前向与权重映射工具。
 
 仅供 `rl/verify/s0_parity.py` 使用: 把 teacher `.pt` 的权重映射到 jax 的
-{w0,b0,w2,b2,w4,b4,w6,b6} 约定, 并用 `mlp_forward` 复刻 RSL-RL actor/critic
+{`w0`,`b0`,`w2`,`b2`,`w4`,`b4`,`w6`,`b6`} 约定, 并用 `mlp_forward` 复刻 RSL-RL actor/critic
 `[512,512,512] elu` 前向, 与 torch `ActorCritic` 做数值对齐 (S0 护栏)。
-
-采集路径 (jax.lax.scan 一次性 rollout) 已移除: 逐步采集在 RTX 4070 8GB 上实测
-反而更快、更省显存, 且 scan 在 jax 内跑 MLP 慢于 torch 的 cuDNN 路径; 等价性
-验证由 S0 护栏覆盖, 无需保留第二套采集实现。
 """
 
 import os

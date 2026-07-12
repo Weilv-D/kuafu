@@ -1,27 +1,19 @@
 # CHANGELOG
 
-## [Unreleased] JaxRollout：一次性 scan 采集
+## [Unreleased] RL 训练管线
 
-采集管线性能优化，不改变训练语义。
+### 训练
 
-### 新增
+- Teacher PPO（RSL-RL 2.x + DLPack 零拷贝）逐步采集；actor 以本体感受 148(含接触标志) + 静态 latent z 9 = 157 维为条件，critic 额外吃瞬态推力 3 维共 160 维。
+- 双向滑动窗口课程学习：`d_max` 随高难度环境平均存活步数与摔倒率升降（升 ≥800 且 ≤0.3，降 ≤600 或 ≥0.5），per-env 采样 `Uniform(0, d_max)`；`d_max` 与窗口统计量经 `curriculum_{it}.pt` 跨 resume 持久化。
+- 默认 72 步/rollout；`--num_envs` 在 RTX 4070 8GB 下单卡可跑至 4096（峰值显存约 4.6GB）。
 
-- `rl/train/jax_rollout.py`：把整段 PPO rollout 塞进单个 `jax.lax.scan`。
-  - jax actor/critic `mlp_forward` 复刻 RSL-RL `[512,512,512] elu`；`EmpiricalNormalization` 用 Welford 递推在 scan 内增量更新。
-  - 静态形状全量张量输出 `[T, N, ...]`（obs_norm / priv_norm / actions / rewards / dones / time_outs / values / log_prob / mean / sigma / fallen / step_count / difficulty / orientation / lin_vel_tracking）。
-  - 归一顺序（t=0 原始、t>0 归一）与基线 `obs_normalizer(obs)` 调用时序逐位一致；探索噪声、auto-reset、timeout bootstrap 一致。
-- `rl/train/runner_scan.py`：`KuafuOnPolicyRunner`，复用 PPO 的 `storage` / `compute_returns` / `update`。
-  - 单 DLPack 零拷贝回 torch 后逐条喂入 `PPO.process_env_step`（含 timeout 的 value bootstrap）；jax 终态归一化统计回写 torch 归一器。
-  - 课程采用 Option (a)：整段轨迹一次性 mask+gather+reduce 后调 `Curriculum.update`（窗口 200，Welford 顺序无关）。
-- `rl/verify/s0_parity.py`：S0 回归护栏（jax actor/critic 前向 vs torch `ActorCritic`，f64 结构性 <1e-5、f32 <2e-3、std 逐位相等）。
-- `rl/train/train.py`：`--jax_scan_rollout` 开关（切换 `KuafuOnPolicyRunner`），checkpoint 格式 / 权重 / 归一器 / 课程与逐步采集完全兼容。
+### 护栏与导出
 
-### 验证
+- S0 对齐护栏（`rl/verify/s0_parity.py`）：jax actor/critic 前向与 torch `ActorCritic` 数值对齐（f64 结构性 <1e-5、f32 <2e-3、std 逐位相等），覆盖权重映射与 `mlp_forward` 的改动。
+- ONNX 导出（`rl/export/export_policy.py`）：teacher（含 normalizer）/ student 两种模式。
 
-- 物理验证 `verify_model.py`：13/13。
-- S0 权重对齐：`s0_parity.py` PASS（f64 结构性 max diff 1.78e-15）。
-- A/B 对拍（`--resume model_600`，step 0）：scan 与逐步采集 returns / episode 长度逐位一致；采集 ~1.95× 提速（RTX 4070，3072 envs × 72 步）。
+### 显存与编译优化
 
-### 已知近似（对训练无实质影响）
-
-课程调整在 scan 模式每迭代至多一次（基线逐步追加、每步至多一次）；窗口统计量因 Welford 顺序无关而完全相同，`d_max` 单迭代一次调整足够。
+- `reset`/`step` 闭包对 `state`/`rng`/`difficulty` 启用 `donate_argnums` 原地回收 JAX 缓冲；不捐经 DLPack 借入的 `action` 张量（避免 torch 缓冲被 XLA 误回收）。
+- 关闭 XLA 预分配（`XLA_PYTHON_CLIENT_PREALLOCATE=false`）+ 编译缓存（`JAX_COMPILATION_CACHE_DIR`）跨 run 复用 XLA 计算图。
