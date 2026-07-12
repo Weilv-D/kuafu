@@ -86,7 +86,10 @@ class Curriculum:
         self._last_fall_rate = float("nan")
 
     def update(self, survival_steps, fell):
-        """survival_steps / fell: 本批高难度 done 环境的存活步数与摔倒标志 (numpy 数组)."""
+        """survival_steps / fell: 本批高难度 done 环境的存活步数与摔倒标志 (numpy 数组).
+
+        返回 "up" / "down" / None, 供调用方在难度跳变时重注探索噪声.
+        """
         for s, f in zip(survival_steps, fell):
             self._surv_buf.append(float(s))
             self._fall_buf.append(float(f))
@@ -101,15 +104,20 @@ class Curriculum:
             self._last_avg_survival = float("nan")
             self._last_fall_rate = float("nan")
         if len(self._surv_buf) < self.window:
-            return
+            return None
         avg_survival = self._last_avg_survival
         fall_rate = self._last_fall_rate
         if avg_survival >= self.upgrade_avg_survival and fall_rate <= self.upgrade_fall_rate:
             if self.d < self.max_d:
                 self.d = min(self.max_d, self.d + self.step)
+                return "up"
+            return None
         elif avg_survival <= self.fallback_avg_survival or fall_rate >= self.fallback_fall_rate:
             if self.d > self.min_d:
                 self.d = max(self.min_d, self.d - self.step)
+                return "down"
+            return None
+        return None
 
 
 class DirectVecEnv:
@@ -138,6 +146,16 @@ class DirectVecEnv:
                                       upgrade_avg_survival=800.0, upgrade_fall_rate=0.3,
                                       fallback_avg_survival=600.0, fallback_fall_rate=0.5)
         self._difficulty = jax.numpy.float32(self._curriculum.d)  # d_max (课程上界)
+
+        # 探索护栏 (防熵坍塌): 课程升级时重注噪声 std, noise_std 跌破地板时抬高 entropy_coef.
+        # 引用由 train.py 在 runner 建好后注入 (self._actor_critic / self._alg); 未注入则护栏静默关闭.
+        self._actor_critic = None
+        self._alg = None
+        self.noise_std_floor = 0.03     # 低于此值 -> 抬高 entropy_coef
+        self.noise_std_recover = 0.06   # 高于此值 -> 恢复基线 entropy_coef
+        self.entropy_coef_base = 0.01   # 与 train_config 默认一致
+        self.entropy_coef_boost = 0.04  # 熵地板触发时的临时系数
+        self.std_bump_on_upgrade = 0.15  # 课程升级时把 std 抬回此值 (仅抬高, 不降低) 重开探索
 
         self._reset_vmapped = jax.jit(
             jax.vmap(env.reset, in_axes=(0, 0)), donate_argnums=(0, 1))
@@ -201,7 +219,10 @@ class DirectVecEnv:
             if relevant_np.any():
                 survival_np = jax.device_get(cur_env_state.step_count)
                 fallen_np = jax.device_get(fallen_jax)
-                self._curriculum.update(survival_np[relevant_np], fallen_np[relevant_np])
+                changed = self._curriculum.update(survival_np[relevant_np], fallen_np[relevant_np])
+                if changed == "up":
+                    self._reopen_exploration()
+            self._adjust_entropy_floor()
             self._difficulty = jax.numpy.float32(self._curriculum.d)
 
             # per-env 独立采样难度 Uniform(0, d_max)
@@ -238,6 +259,10 @@ class DirectVecEnv:
             # 课程高难度窗口指标: 平均存活步数 + 摔倒率 (驱动 d_max 升降)
             log["curriculum_avg_survival"] = self._curriculum._last_avg_survival
             log["curriculum_fall_rate"] = self._curriculum._last_fall_rate
+            # 探索护栏可观测量 (entropy_coef 实时值 + 当前 noise_std)
+            log["entropy_coef"] = self._alg.entropy_coef if self._alg is not None else float("nan")
+            if self._actor_critic is not None and hasattr(self._actor_critic, "std"):
+                log["noise_std_guard"] = float(self._actor_critic.std.data.mean().item())
         # difficulty 每步记录 (d_max 课程标量 + per-env 实际均值)
         log["difficulty"] = self._to_torch(self._difficulty).mean().item()
         log["difficulty_mean"] = self._to_torch(
@@ -253,6 +278,30 @@ class DirectVecEnv:
         info = {"time_outs": time_outs.float(),
                 "observations": extras.get("observations", {}), "log": log}
         return state_obs, reward, done, info
+
+    def _reopen_exploration(self):
+        """课程升级时把策略噪声 std 抬回下限, 重开探索.
+
+        仅抬高 (clamp_min), 绝不降低: 课程升级发生在已 mastery (fall_rate≤0.3) 时,
+        彼时 std 已偏低, 抬回可让策略重新采样恢复动作以扛住更强扰动; 若 std 本就偏高则不动.
+        假定 noise_std_type="scalar" (ActorCritic.std 为可学习参数).
+        """
+        if self._actor_critic is None or not hasattr(self._actor_critic, "std"):
+            return
+        with torch.no_grad():
+            self._actor_critic.std.data.clamp_(min=self.std_bump_on_upgrade)
+
+    def _adjust_entropy_floor(self):
+        """熵地板 (AE-PPO target-entropy 简化版): noise_std 跌破下限则抬高 entropy_coef,
+        回升过恢复阈值则回基线, 滞回避免抖动. 防长程课程推到强扰动难度时策略熵坍塌、丧失可塑性.
+        """
+        if self._alg is None or self._actor_critic is None or not hasattr(self._actor_critic, "std"):
+            return
+        noise_std = float(self._actor_critic.std.data.mean().item())
+        if noise_std < self.noise_std_floor:
+            self._alg.entropy_coef = self.entropy_coef_boost
+        elif noise_std > self.noise_std_recover:
+            self._alg.entropy_coef = self.entropy_coef_base
 
     @property
     def unwrapped(self):
@@ -400,6 +449,11 @@ def main():
     if args.resume:
         print(f"  载入 Checkpoint 恢复训练: {args.resume}")
         runner.load(args.resume)
+
+    # 注入探索护栏引用 (Curriculum 升级 bump std / noise_std 地板抬 entropy_coef).
+    # DirectVecEnv 内部据此在难度跳变与熵跌破地板时介入; 不注入则护栏静默关闭.
+    torch_env._actor_critic = runner.alg.policy
+    torch_env._alg = runner.alg
 
     # ---- 训练 ----
     start_iter = runner.current_learning_iteration

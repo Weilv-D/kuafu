@@ -28,6 +28,10 @@ rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 3072 \
 - 维度约定: actor 157 = proprio 148 + z 9; critic 160 = actor 157 + 瞬态推力 3。
 - 课程: 双向滑动窗口调 `d_max`（初始 0.1，上限 1.0），per-env 采样 `Uniform(0, d_max)`；
   `Curriculum` 在 `train.py`，`DirectVecEnv._curriculum` 持有。
+- 探索护栏（防熵坍塌）: 课程升级（`d_max` 上调）时把策略噪声 `std` 抬回下限重开探索；
+  `noise_std` 跌破地板（0.03）则抬高 `entropy_coef`（0.01→0.04），回升过 0.06 回基线。
+  二者由 `DirectVecEnv` 在 `runner.alg.policy` / `runner.alg` 注入引用后生效，未注入则静默关闭。
+  TensorBoard 见 `entropy_coef` 与 `noise_std_guard`。
 
 ## 验证（改代码前后必跑）
 
