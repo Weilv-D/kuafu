@@ -59,8 +59,8 @@ class Curriculum:
     仅统计 per-env 采样中 difficulty > d_max×0.7 的高难度环境 (避免低难度虚高),
     以滑动窗口统计其平均存活步数与摔倒率:
 
-      - 升级: avg_survival ≥ 800 且 fall_rate ≤ 0.3 → d_max += step (直到 1.0)
-      - 降级: avg_survival ≤ 600 或 fall_rate ≥ 0.5 → d_max -= step (下限 0.1)
+      - 升级: avg_survival ≥ 800 且 fall_rate ≤ 0.5 → d_max += step (直到 1.0)
+      - 降级: avg_survival ≤ 600 或 fall_rate ≥ 0.65 → d_max -= step (下限 0.1)
 
     设计参考 ETH legged_gym: 以"能否稳定存活 + 不倒"驱动难度渐进, 而非要求活满
     固定时长; 训练初期即注入 DR + 随机推力, 防过拟合标称参数。双向调节让策略
@@ -69,8 +69,8 @@ class Curriculum:
 
     def __init__(self, start: float = 0.1, max_d: float = 1.0, step: float = 0.05,
                  window: int = 200, min_d: float = 0.1,
-                 upgrade_avg_survival: float = 800.0, upgrade_fall_rate: float = 0.3,
-                 fallback_avg_survival: float = 600.0, fallback_fall_rate: float = 0.5):
+                 upgrade_avg_survival: float = 800.0, upgrade_fall_rate: float = 0.5,
+                 fallback_avg_survival: float = 600.0, fallback_fall_rate: float = 0.65):
         self.d = start
         self.max_d = max_d
         self.min_d = min_d
@@ -143,8 +143,8 @@ class DirectVecEnv:
         # 课程: d_max 由高难度环境平均存活步数 + 摔倒率双向调节, per-env 采样 Uniform(0, d_max)
         # 训练初期即注入 DR + 随机推力, 防过拟合标称参数, ETH legged_gym 实践
         self._curriculum = Curriculum(start=0.1, max_d=1.0, step=0.05, window=200,
-                                      upgrade_avg_survival=800.0, upgrade_fall_rate=0.3,
-                                      fallback_avg_survival=600.0, fallback_fall_rate=0.5)
+                                      upgrade_avg_survival=800.0, upgrade_fall_rate=0.5,
+                                      fallback_avg_survival=600.0, fallback_fall_rate=0.65)
         self._difficulty = jax.numpy.float32(self._curriculum.d)  # d_max (课程上界)
 
         # 探索护栏 (防熵坍塌): 课程升级时重注噪声 std, noise_std 跌破地板时抬高 entropy_coef.
@@ -211,7 +211,7 @@ class DirectVecEnv:
             self._rng, reset_rng, diff_rng = jax.random.split(self._rng, 3)
 
             # 课程: 仅统计 done 且高难度 (difficulty > d_max×0.7) 环境的存活步数与摔倒率
-            # 避免低难度虚高 + 非 done 稀释; 升级条件 avg_survival>800 且 fall_rate<0.3
+            # 避免低难度虚高 + 非 done 稀释; 升级条件 avg_survival>800 且 fall_rate<0.5
             cur_env_state = self._state.info["env_state"]
             high_diff = cur_env_state.difficulty > (self._difficulty * 0.7)
             relevant = done_jax & high_diff
@@ -282,7 +282,7 @@ class DirectVecEnv:
     def _reopen_exploration(self):
         """课程升级时把策略噪声 std 抬回下限, 重开探索.
 
-        仅抬高 (clamp_min), 绝不降低: 课程升级发生在已 mastery (fall_rate≤0.3) 时,
+        仅抬高 (clamp_min), 绝不降低: 课程升级发生在已 mastery (fall_rate≤0.5) 时,
         彼时 std 已偏低, 抬回可让策略重新采样恢复动作以扛住更强扰动; 若 std 本就偏高则不动.
         假定 noise_std_type="scalar" (ActorCritic.std 为可学习参数).
         """
