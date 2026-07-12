@@ -259,6 +259,35 @@ class DirectVecEnv:
         return self.env.dt
 
 
+class _CurriculumPersistMixin:
+    """让 checkpoint 同时保存/恢复 Curriculum 的 d_max, 避免 --resume 把课程重置回 0.1。
+
+    rsl_rl 的 save/load 不存 Curriculum 状态; 本 mixin 在同名 sidecar
+    curriculum_{it}.pt 中额外持久化 d_max, resume 时回写 env._curriculum.d。
+    """
+    def save(self, path, infos=None):
+        super().save(path, infos)
+        try:
+            cur = self.env._curriculum
+            sidecar = path.replace("model_", "curriculum_")
+            torch.save({"d": float(cur.d),
+                        "difficulty": float(self.env._difficulty)}, sidecar)
+        except Exception:
+            pass
+
+    def load(self, path, load_optimizer=True):
+        infos = super().load(path, load_optimizer)
+        sidecar = path.replace("model_", "curriculum_")
+        if os.path.exists(sidecar):
+            try:
+                sd = torch.load(sidecar, weights_only=False)
+                self.env._curriculum.d = float(sd["d"])
+                self.env._difficulty = jax.numpy.float32(sd["d"])
+            except Exception:
+                pass
+        return infos
+
+
 def main():
     parser = argparse.ArgumentParser(description="KUAFU Teacher PPO Training")
     from rl.train.train_config import RUN
@@ -349,11 +378,15 @@ def main():
     # ---- RSL-RL Runner ----
     if args.jax_scan_rollout:
         from rl.train.runner_scan import KuafuOnPolicyRunner
-        runner = KuafuOnPolicyRunner(torch_env, train_cfg, log_dir=log_dir, device=device)
+        class _ScanRunner(_CurriculumPersistMixin, KuafuOnPolicyRunner):
+            pass
+        runner = _ScanRunner(torch_env, train_cfg, log_dir=log_dir, device=device)
         print("  采集模式: jax lax.scan (KuafuOnPolicyRunner)")
     else:
         from rsl_rl.runners import OnPolicyRunner
-        runner = OnPolicyRunner(torch_env, train_cfg, log_dir=log_dir, device=device)
+        class _StepRunner(_CurriculumPersistMixin, OnPolicyRunner):
+            pass
+        runner = _StepRunner(torch_env, train_cfg, log_dir=log_dir, device=device)
     print(f"  日志: {log_dir}")
 
     # ---- 载入 Checkpoint 恢复训练 ----
