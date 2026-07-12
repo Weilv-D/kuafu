@@ -83,23 +83,31 @@ def norm_forward(state, x):
     return (x - state["mean"]) / (std + 1e-2)
 
 
-def norm_update(state, x, until=1.0e8):
+def _welford_update(state, x):
     mean = state["mean"]
     var = state["var"]
     count = state["count"]
 
-    def do():
-        count_x = x.shape[0]
-        count2 = count + count_x
-        rate = count_x / count2
-        var_x = jnp.var(x, axis=0, keepdims=True)
-        mean_x = jnp.mean(x, axis=0, keepdims=True)
-        delta = mean_x - mean
-        mean2 = mean + rate * delta
-        var2 = var + rate * (var_x - var + delta * (mean_x - mean2))
-        return {"mean": mean2, "var": var2, "std": jnp.sqrt(var2), "count": count2}
+    count_x = x.shape[0]
+    count2 = count + count_x
+    rate = count_x / count2
 
-    return jax.lax.cond(count >= until, lambda: state, do)
+    var_x = jnp.var(x, axis=0, keepdims=True)
+    mean_x = jnp.mean(x, axis=0, keepdims=True)
+
+    delta = mean_x - mean
+    mean2 = mean + rate * delta
+    var2 = var + rate * (var_x - var + delta * (mean_x - mean2))
+    return {"mean": mean2, "var": var2, "std": jnp.sqrt(var2), "count": count2}
+
+
+def norm_update(state, x, until=1.0e8):
+    # until=None 表示始终更新 (与 torch EmpiricalNormalization 默认行为一致);
+    # 否则到达 count>=until 后冻结. until 为静态标量, 用 Python if 分流,
+    # 避免 state["count"](traced) 与 None 比较导致 jax 报错.
+    if until is None:
+        return _welford_update(state, x)
+    return jax.lax.cond(state["count"] >= until, lambda: state, lambda: _welford_update(state, x))
 
 
 def _auto_reset(state, reset_state, done):
@@ -118,8 +126,14 @@ def make_body(step_fn, reset_fn, until, n_envs):
         raw_state = S.obs["state"]
         raw_priv = S.obs["privileged_state"]
         critic_in = jnp.concatenate([raw_state, raw_priv], axis=-1)
-        obs_norm = jnp.where(t == 0, raw_state, norm_forward(on, raw_state))
-        priv_norm = jnp.where(t == 0, critic_in, norm_forward(pn, critic_in))
+        # 更新顺序对齐 torch EmpiricalNormalization: 先 update(obs_t) 再用含 obs_t 的新
+        # stats 做 normalize (torch forward 先 update 后返回归一结果). 否则 jax 比 torch
+        # 滞后一步, 产生可累积的 1-step 残差. 首步 (t==0) 同样归一, 不能跳过, 否则每轮
+        # rollout 第 0 步动作全错, 导致 episode 在 rollout 边界崩溃.
+        on2 = norm_update(on, raw_state, until)
+        pn2 = norm_update(pn, critic_in, until)
+        obs_norm = norm_forward(on2, raw_state)
+        priv_norm = norm_forward(pn2, critic_in)
 
         mean = mlp_forward(actor_params, obs_norm)
         action = mean + std * noise_t
@@ -137,13 +151,6 @@ def make_body(step_fn, reset_fn, until, n_envs):
         diff_vec = jax.random.uniform(rrng, (n_envs,), minval=0.0, maxval=d_max)
         S_reset = reset_fn(jax.random.split(rrng, n_envs), diff_vec)
         S_next = _auto_reset(S_pre, S_reset, done)
-
-        on2 = norm_update(on, S_next.obs["state"], until)
-        pn2 = norm_update(
-            pn,
-            jnp.concatenate([S_next.obs["state"], S_next.obs["privileged_state"]], axis=-1),
-            until,
-        )
 
         value = mlp_forward(critic_params, priv_norm).reshape(-1)
         log_std = jnp.log(std)

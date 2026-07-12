@@ -69,7 +69,7 @@ class KuafuOnPolicyRunner(OnPolicyRunner):
                 (out, on_final, pn_final, last_critic_obs, carry_state, rng) = (
                     jr.collect_rollout_from_policy(
                         self.env.env, self.num_steps_per_env, carry_state, on, pn,
-                        d_max, rng, self.alg.policy, until=1.0e8))
+                        d_max, rng, self.alg.policy, until=None))
                 # 保持 DirectVecEnv 的 jax 状态与 scan 终态一致 (环境若被外部访问如 eval)
                 self.env._state = carry_state
 
