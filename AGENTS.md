@@ -19,7 +19,7 @@
 ```bash
 # Teacher PPO（逐步采集，默认）
 rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 3072
-# 一次性 scan 采集 (JaxRollout, 采集 ~1.95× 提速, 语义逐位一致)
+# 一次性 scan 采集 (JaxRollout, 语义与逐步采集逐位一致 — 见下方说明)
 rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 3072 --jax_scan_rollout
 # 续训 (两种采集模式 checkpoint 格式与权重/归一器/课程完全兼容)
 rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 3072 \
@@ -54,4 +54,10 @@ rl/.venv/bin/python rl/export/export_policy.py --ckpt <student>.pt --mode studen
 - 单 rollout 用 `jax.lax.scan` 整段塞 GPU；jax actor + jax `EmpiricalNormalization` 在 scan 内完成。
 - scan 输出静态形状 `[T, N, ...]`；单 DLPack 回 torch → `PPO.process_env_step` → `compute_returns` → `update`。
 - 归一顺序 / auto-reset / timeout bootstrap / 探索噪声 与逐步采集逐位一致（见 `rl/README.md` JaxRollout 节）。
+- **归一必须每步生效且顺序对齐 torch**：`make_body` 首步 (t==0) 不能跳过 `norm_forward`
+  (否则 RAW obs 喂 actor，每轮 rollout 第 0 步动作全错 → 72 步边界必崩，reward 塌方)；
+  `norm_update` 用 `until=None` 始终更新 (checkpoint count 已 ≫1e8，用 1e8 会冻结归一器
+  致 obs_norm 发散)；顺序为「先 update 再 normalize」。改这些后必跑 `scan_parity`。
+- 性能：在 RTX 4070 8GB @4096 envs 实测 scan **不快于**逐步采集 (显存/耗时略高)；
+  scan 的价值是逐位一致的整段 GPU 采集，而非提速。大显存多卡场景收益可能不同。
 - 改 `mlp_forward`、`weights_from_torch_policy`、`norm_update` 后必须过 `s0_parity.py`。
