@@ -23,7 +23,7 @@ from typing import List, Tuple
 # 契约版本
 # ============================================================
 # 破坏性修改（维度/符号/单位/协议变化）时递增次版本号或主版本号。
-SCHEMA_VERSION = "v1.0.0"
+SCHEMA_VERSION = "v1.1.0"
 
 # ============================================================
 # 坐标系 / 符号约定（单一真源，禁止各层各自推导）
@@ -105,15 +105,15 @@ OBS_FIELDS: List[Tuple[str, int, str, str]] = [
     ("command_d0", 1, "mm", "当前 D0 命令（已门控）"),
     ("proj_gravity", 3, "1", "机体坐标系重力投影 (gx,gy,gz)"),
     ("body_gyro", 3, "rad/s", "机体角速度 (wx,wy,wz)"),
-    ("est_vx", 1, "m/s", "轮速/IMU 估计的前向速度"),
+    ("est_vx", 1, "m/s", "轮速里程计估计的前向速度（非仿真 root truth）"),
     ("est_wz", 1, "rad/s", "估计偏航角速度"),
     ("est_d0", 1, "mm", "估计平均 D0"),
-    ("est_roll", 1, "rad", "估计 roll（左右 D0 差推算）"),
+    ("est_roll", 1, "rad", "估计 roll"),
     ("wheel_speed", 2, "rad/s", "左右轮角速度（硬件可得）"),
     ("hip_pos", 4, "rad", "4 舵机位置（A_l,B_l,A_r,B_r）"),
     ("hip_vel", 4, "rad/s", "4 舵机速度"),
-    ("prev_action", 6, "1", "上一帧实际施加的 6 维动作"),
-    ("sensor_age", 6, "ms", "各传感器年龄/有效位（imu/d0/enc...）"),
+    ("prev_applied_action", 6, "1", "上一帧实际施加的 6 维动作（延迟后）"),
+    ("sensor_age", 6, "ms", "IMU age(3) + joint age(3)"),
     ("hidden_state", 0, "1", "GRU 隐藏态（因果历史，不在 obs 向量内）"),
 ]
 

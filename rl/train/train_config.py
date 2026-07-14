@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 NUM_ENVS = 4096              # 并行环境数 (RTX 4070 8GB 实测 3.3GiB@3072; 4096≈4.0GiB/50%, 余量充足)
 ITERATIONS = 5000            # 训练迭代数
 SEED = 42
-NUM_STEPS_PER_ENV = 72       # 每次 rollout 的步数 (72×0.02s=1.44s, 覆盖完整步态+越障周期)
+NUM_STEPS_PER_ENV = 96       # 每次 rollout 的步数 (96×0.02s=1.92s, 覆盖完整步态+越障周期)
 
 # ============================================================
 # PPO 超参 (RSL-RL legged locomotion 事实标准, design.md §2.6)
@@ -34,9 +34,9 @@ NUM_STEPS_PER_ENV = 72       # 每次 rollout 的步数 (72×0.02s=1.44s, 覆盖
 ALGORITHM = {
     "class_name": "PPO",
     "num_learning_epochs": 5,
-    "num_mini_batches": 4,
+    "num_mini_batches": 8,
     "clip_param": 0.2,
-    "gamma": 0.99,
+    "gamma": 0.995,
     "lam": 0.95,
     "value_loss_coef": 1.0,    # RSL-RL 标准值; 价值估计权重, 1.0 比 0.5 更稳
     "entropy_coef": 0.01,     # RSL-RL 标准默认; 配合 adaptive KL(desired_kl=0.01) 自动控熵, 3072 envs 强正则下无需高探索bonus
@@ -54,7 +54,8 @@ ALGORITHM = {
 # ============================================================
 POLICY = {
     "class_name": "ActorCritic",
-    "init_noise_std": 1.0,
+    "init_noise_std": 0.4,
+    "noise_std_type": "scalar",
     "actor_hidden_dims": [512, 512, 512],   # 主干 MLP: actor obs 140 → action 6
     "critic_hidden_dims": [512, 512, 512],  # value head: actor 140 + privileged 12 = 152
     "activation": "elu",

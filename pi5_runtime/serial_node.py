@@ -94,8 +94,8 @@ class SerialPolicyNode:
         gravity = projected_gravity_from_euler(roll, pitch, yaw)
         joint = self.joints
         wheel_speed = np.asarray([joint[1], joint[4]], dtype=np.float32)
-        hip_pos = np.asarray([joint[6], joint[12], joint[9], joint[15]], dtype=np.float32) / 1000.0
-        hip_vel = np.asarray([joint[7], joint[13], joint[10], joint[16]], dtype=np.float32) / 1000.0
+        hip_pos = np.asarray([joint[6], joint[12], joint[9], joint[15]], dtype=np.float32)
+        hip_vel = np.asarray([joint[7], joint[13], joint[10], joint[16]], dtype=np.float32)
         left = P.fivebar_fk_relative(float(hip_pos[0]), float(hip_pos[1]))
         right = P.fivebar_fk_relative(float(hip_pos[2]), float(hip_pos[3]))
         return Telemetry(

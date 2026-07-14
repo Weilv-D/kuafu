@@ -2,8 +2,8 @@
 #define KUAFU_GENERATED_H
 
 /* AUTO-GENERATED from kuafu_physics.py. Regenerate with rl/verify/generate_artifacts.py. */
-#define KUAFU_MODEL_SCHEMA_VERSION "v1.0.0"
-#define KUAFU_MODEL_HASH "5c7347b64cc27437"
+#define KUAFU_MODEL_SCHEMA_VERSION "v1.1.0"
+#define KUAFU_MODEL_HASH "99d23dcd606e19f0"
 #define BASE_DT 0.004000f
 #define PHYS_DT 0.002000f
 #define RL_DT 0.020000f
@@ -22,8 +22,8 @@
 #define WHEEL_WIDTH_MM 34.8f
 #define QX_RESIDUAL_SCALE_MM 20.0f
 #define D0_RESIDUAL_SCALE_MM 30.0f
-#define KUAFU_ROLL_KP 0.150000f
-#define KUAFU_ROLL_KD 0.030000f
+#define KUAFU_ROLL_KP 190.000000f
+#define KUAFU_ROLL_KD 5.000000f
 #define KUAFU_SERVO_MAX_SPEED 4.700000f
 #define KUAFU_OMEGA_NOLOAD 32.986723f
 #define D0_GATE_V_THRESH 0.300000f

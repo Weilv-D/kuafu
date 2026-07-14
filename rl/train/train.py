@@ -218,13 +218,14 @@ class DirectVecEnv:
         metrics_jax = self._state.metrics
         fallen_jax = metrics_jax.get("fallen", jax.numpy.zeros_like(done_jax))
 
-        # auto-reset done 环境 (保持 JAX array 在 GPU 上)
-        done_any = jax.device_get(done_jax.any())
+        # auto-reset done environments using JAX-side selective reset.
+        # Avoids host sync for done_any when possible; only sync for curriculum stats.
+        done_jax_bool = done_jax.astype(jax.numpy.bool_)
+        done_any = bool(jax.device_get(done_jax.any()))
         if done_any:
             self._rng, reset_rng, diff_rng = jax.random.split(self._rng, 3)
 
-            # 课程: 仅统计 done 且高难度 (difficulty > d_max×0.7) 环境的存活步数与摔倒率
-            # 避免低难度虚高 + 非 done 稀释; 升级条件 avg_survival>800 且 fall_rate<0.5
+            # Curriculum: only count done + high-difficulty envs
             cur_env_state = self._state.info["env_state"]
             high_diff = jax.numpy.mean(cur_env_state.difficulty, axis=-1) > (self._difficulty * 0.7)
             relevant = done_jax & high_diff
@@ -232,10 +233,8 @@ class DirectVecEnv:
             if relevant_np.any():
                 survival_np = jax.device_get(cur_env_state.step_count)
                 fallen_np = jax.device_get(fallen_jax)
-                # P4: gate uses full-episode MAE and requires nonzero-command
-                # exposure.  A stationary policy cannot upgrade from one lucky
-                # terminal frame or an all-zero command episode.
                 count_np = jax.device_get(cur_env_state.track_count)[relevant_np]
+                count_np = np.maximum(count_np, 1)
                 lin_vel_err_np = jax.device_get(cur_env_state.track_v_abs_sum)[relevant_np] / count_np
                 yaw_err_np = jax.device_get(cur_env_state.track_w_abs_sum)[relevant_np] / count_np
                 d0_err_np = jax.device_get(cur_env_state.track_d0_abs_sum)[relevant_np] / count_np
@@ -253,15 +252,14 @@ class DirectVecEnv:
             self._adjust_entropy_floor()
             self._difficulty = jax.numpy.float32(self._curriculum.d)
 
-            # per-env 独立采样难度 Uniform(0, d_max)
+            # Selective reset: compute reset for ALL envs (JAX-fast on GPU) then select
             diff_vec = jax.random.uniform(diff_rng, (self.num_envs, DIFFICULTY_DIM),
                                           minval=0.0, maxval=self._difficulty)
             reset_state = self._reset_vmapped(
                 jax.random.split(reset_rng, self.num_envs), diff_vec)
-            done_mask = done_jax.astype(jax.numpy.bool_)
             self._state = jax.tree_util.tree_map(
                 lambda cur, new: jax.numpy.where(
-                    done_mask.reshape((-1,) + (1,) * (cur.ndim - 1)), new, cur),
+                    done_jax_bool.reshape((-1,) + (1,) * (cur.ndim - 1)), new, cur),
                 self._state, reset_state)
 
         # done 帧返回 reset 后的初始观测 (PPO 新 episode 首步用初始 obs)
@@ -410,9 +408,10 @@ class _CurriculumPersistMixin:
                 os.unlink(temporary)
 
     def load(self, path, load_optimizer=True):
-        # RSL-RL loads without map_location; use the runner device so a CUDA
-        # checkpoint can be resumed on CPU for audit/smoke runs as well.
-        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        # Load the full checkpoint on CPU first.  load_state_dict transfers
+        # model/optimizer tensors to the runner device automatically, and CPU
+        # RNG state must be restored on CPU regardless of the runner device.
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         state = checkpoint.get("kuafu_state")
         if state is None:
             raise RuntimeError("checkpoint lacks KUAFU resume state; legacy checkpoints cannot resume")
@@ -420,11 +419,15 @@ class _CurriculumPersistMixin:
         import kuafu_physics as P
         if state["schema_version"] != SCHEMA_VERSION or state["model_hash"] != P.model_hash():
             raise RuntimeError("checkpoint schema/model hash does not match this run")
-        self.alg.policy.load_state_dict(checkpoint["model_state_dict"])
+        # Move model state dict to runner device before loading
+        model_state = {k: v.to(self.device) for k, v in checkpoint["model_state_dict"].items()}
+        self.alg.policy.load_state_dict(model_state)
         if self.alg.rnd and checkpoint.get("rnd_state_dict") is not None:
             self.alg.rnd.load_state_dict(checkpoint["rnd_state_dict"])
         if load_optimizer:
-            self.alg.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            opt_state = checkpoint["optimizer_state_dict"]
+            self.alg.optimizer.load_state_dict(opt_state)
+            self.alg.optimizer.zero_grad()
         self.current_learning_iteration = checkpoint["iter"]
         cur_state = state["curriculum"]
         cur = self.env._curriculum
@@ -439,6 +442,7 @@ class _CurriculumPersistMixin:
         self.alg.learning_rate = float(state["learning_rate"])
         for group in self.alg.optimizer.param_groups:
             group["lr"] = self.alg.learning_rate
+        # CPU RNG stays on CPU (must not use map_location=device)
         torch.set_rng_state(state["torch_rng"])
         np.random.set_state(state["numpy_rng"])
         random.setstate(state["python_rng"])
@@ -446,6 +450,7 @@ class _CurriculumPersistMixin:
         if state.get("environment") is None:
             raise RuntimeError("checkpoint lacks exact vectorized environment state")
         self.env.restore_checkpoint_state(state["environment"])
+        # Only restore CUDA RNG if CUDA is available
         if state.get("torch_cuda_rng") is not None and torch.cuda.is_available():
             torch.cuda.set_rng_state_all(state["torch_cuda_rng"])
         return checkpoint["infos"]
@@ -585,6 +590,12 @@ def main():
     t0 = time.time()
     runner.learn(num_learning_iterations=run_iter, init_at_random_ep_len=not bool(args.resume))
     elapsed = time.time() - t0
+
+    # Fail-fast: check for NaN in model parameters
+    for name, param in runner.alg.policy.named_parameters():
+        if not torch.isfinite(param).all():
+            print(f"FATAL: NaN detected in parameter {name}")
+            sys.exit(1)
 
     print(f"\n✅ 训练完成: {elapsed:.1f}s, {total_steps:,} steps, {total_steps/elapsed:,.0f} steps/s")
     if not args.smoke_test:

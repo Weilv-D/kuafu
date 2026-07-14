@@ -51,13 +51,15 @@ def rotate_vector_by_quaternion_conj(q, v):
     return v + 2 * (w * uv + uuv)
 
 
-def _build_obs(data, last_action, command, step, model=None):
-    """35 维固定尺度 Actor frame，与 MJX ``_base_observation`` 同序。"""
+def _build_obs(data, applied_action, command, step, model=None):
+    """35 维固定尺度 Actor frame，与 MJX ``_base_observation`` 同序。
+
+    applied_action: 实际施加（延迟后）的动作，与训练 env applied_action=delayed_action 一致。
+    """
     qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
     roll = np.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
     q = np.array([qw, qx, qy, qz])
     ang_vel = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
-    lin_vel = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
     gravity = rotate_vector_by_quaternion_conj(q, np.array([0.0, 0.0, -1.0]))
     q_l = P.fivebar_fk_relative(data.qpos[7], data.qpos[10])
     q_r = P.fivebar_fk_relative(data.qpos[12], data.qpos[15])
@@ -65,15 +67,19 @@ def _build_obs(data, last_action, command, step, model=None):
     wheel_speed = np.array([data.qvel[8], data.qvel[13]])
     hip_pos = np.array([data.qpos[7], data.qpos[10], data.qpos[12], data.qpos[15]])
     hip_vel = np.array([data.qvel[6], data.qvel[9], data.qvel[11], data.qvel[14]])
+    est_vx = float(np.mean(wheel_speed) * P.R)
+    d0_cmd = command[2]
+    if abs(command[0]) > P.D0_GATE_V_THRESH or abs(command[1]) > P.D0_GATE_W_THRESH:
+        d0_cmd = min(d0_cmd, P.D0_GATE_MAX_HIGH)
     return np.concatenate([
-        np.array([command[0] / 0.5, command[1], (command[2] - 132.5) / 74.5]),
+        np.array([command[0] / 0.5, command[1], (d0_cmd - 132.5) / 74.5]),
         gravity,
         ang_vel / 10.0,
-        np.array([lin_vel[0] / 0.5, ang_vel[2], (d0 - 132.5) / 74.5, roll]),
+        np.array([est_vx / 0.5, ang_vel[2], (d0 - 132.5) / 74.5, roll]),
         wheel_speed / 33.0,
         hip_pos / 3.3,
         hip_vel / P.SERVO_MAX_SPEED,
-        last_action,
+        applied_action,
         np.zeros(6),
     ])
 
@@ -236,10 +242,10 @@ def run_episode(model, data, teacher, command, max_steps, rng=None, dr=False,
         applied = act_delay_buf[-(latency + 1)] if latency > 0 else action
         action_delta = action - last_action
         baseline.step(model, data, applied, command)
-        last_action = action  # 注意: obs 里的 last_action 用 policy 原始输出 (与 env 一致)
+        last_action = action  # raw policy output, for action_smoothness metric
 
         # 推理后才更新 history (与训练 step() 顺序一致: step 后 append base_obs)
-        base_obs = _build_obs(data, last_action, command, step, model)
+        base_obs = _build_obs(data, applied, command, step, model)
         obs_history = np.roll(obs_history, -1, axis=0)
         obs_history[-1] = base_obs
 

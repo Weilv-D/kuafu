@@ -201,7 +201,7 @@ class EnvState:
     v_accel: jax.Array
     w_ref: jax.Array
     w_accel: jax.Array
-    # 上一步动作 (action_rate reward)
+    # 上一步实际施加的动作 (延迟后, 用于 obs prev_applied_action 和 action_rate reward)
     prev_action: jax.Array
     prev_prev_action: jax.Array
     # 历史观测缓冲 (HISTORY_STEPS × OBS_DIM_BASE)
@@ -232,6 +232,9 @@ class EnvState:
     push_force: jax.Array
     # 实际施加的推力向量 (3,)
     active_push: jax.Array
+    # 推力随机时序: 下次重采样步数 & 推力窗口结束步数
+    next_push_step: jax.Array
+    push_end_step: jax.Array
     # Episode aggregates used by curriculum gates; terminal-frame metrics cannot
     # distinguish a policy that tracked for two seconds from one that got lucky.
     track_v_abs_sum: jax.Array
@@ -339,9 +342,8 @@ class KuafuMjxEnv(MjxEnv):
         rng, friction_rng = jax.random.split(rng)
         friction_raw = jax.random.uniform(
             friction_rng, minval=DR["friction"][0], maxval=DR["friction"][1])
-        friction_multiplier = 1.0 + dr_difficulty * (friction_raw - 1.0)
-        geom_friction = model.geom_friction.at[:, 0].set(
-            model.geom_friction[:, 0] * friction_multiplier)
+        friction_actual = 1.0 + dr_difficulty * (friction_raw - 1.0)
+        geom_friction = model.geom_friction.at[:, 0].set(friction_actual)
         model = model.replace(geom_friction=geom_friction)
 
         # inertia ×[0.5, 2.0] (与 difficulty 缩放)
@@ -388,7 +390,7 @@ class KuafuMjxEnv(MjxEnv):
             biasprm = biasprm.at[i, 2].set(biasprm[i, 2] * pd_scale)  # -kv
         model = model.replace(actuator_gainprm=gainprm, actuator_biasprm=biasprm)
 
-        return model, friction_multiplier, mass_scale, inertia_scale, com_bias
+        return model, friction_actual, mass_scale, inertia_scale, com_bias
 
     # ---- 地形 (M4 台阶/斜坡) ----
     def _apply_terrain(self, model: mjx.Model, difficulty: jax.Array, rng: jax.Array) -> mjx.Model:
@@ -402,7 +404,9 @@ class KuafuMjxEnv(MjxEnv):
         """
         # 斜坡: 绕 Y 轴旋转 ground plane, 角度 = difficulty × 10°
         terrain_difficulty = difficulty[DIFF_TERRAIN]
-        ang = terrain_difficulty * jp.radians(10.0)
+        rng, slope_rng = jax.random.split(rng)
+        slope_sign = jax.random.bernoulli(slope_rng, p=0.5) * 2.0 - 1.0
+        ang = slope_sign * terrain_difficulty * jp.radians(10.0)
         c, s = jp.cos(ang / 2.0), jp.sin(ang / 2.0)
         floor_quat = jp.array([c, 0.0, s, 0.0])  # (w, x, y, z), 绕 Y
         geom_quat = model.geom_quat.at[self._floor_geom_id].set(floor_quat)
@@ -411,8 +415,10 @@ class KuafuMjxEnv(MjxEnv):
         # 台阶: 逐级高度 (i+1)×30mm × difficulty (最小 0.5mm 避免退化)
         for i, gid in enumerate(self._step_geom_ids):
             h = jp.maximum((i + 1) * 0.03 * terrain_difficulty, 1e-3)
+            x_pos = 0.60 + i * 0.60  # non-overlapping (0.6m = 2 × half-length)
             size = model.geom_size.at[gid, 2].set(h / 2.0)      # box 半高
-            pos = model.geom_pos.at[gid, 2].set(h / 2.0)        # 底面贴地 (bottom z=0)
+            pos = model.geom_pos.at[gid, 0].set(x_pos)          # x 位置 (不重叠)
+            pos = pos.at[gid, 2].set(h / 2.0)                   # 底面贴地 (bottom z=0)
             model = model.replace(geom_size=size, geom_pos=pos)
         return model
 
@@ -426,38 +432,41 @@ class KuafuMjxEnv(MjxEnv):
         w_cmd = jax.random.uniform(k2, minval=-w_limit, maxval=w_limit)
         d0_upper = P.D0_MIN + (P.D0_MAX - P.D0_MIN) * difficulty[DIFF_D0]
         d0_cmd = jax.random.uniform(k3, minval=D0_CMD_RANGE[0], maxval=d0_upper)
-        # 10% 概率零命令 (静支平衡)
+        # 10% 概率零命令 (静支平衡, D0 也回到驻留)
         rng, k_zero = jax.random.split(rng)
         is_zero = jax.random.bernoulli(k_zero, p=0.1)
         v_cmd = jp.where(is_zero, 0.0, v_cmd)
         w_cmd = jp.where(is_zero, 0.0, w_cmd)
+        d0_cmd = jp.where(is_zero, P.D0_MIN, d0_cmd)
+        # 部署 D0 高速门控: |v|>0.3 或 |w|>0.6 时 D0 上限 120mm
+        d0_gate_max = jp.where(
+            (jp.abs(v_cmd) > P.D0_GATE_V_THRESH) | (jp.abs(w_cmd) > P.D0_GATE_W_THRESH),
+            P.D0_GATE_MAX_HIGH, P.D0_MAX)
+        d0_cmd = jp.minimum(d0_cmd, d0_gate_max)
         return rng, v_cmd, w_cmd, d0_cmd
 
     # ---- 规范基层控制器（pitch LQR/LQI + yaw 命令跟踪，三轴兜底）----
     def _wheel_torque(self, data: mjx.Data, x_ref: jax.Array, x_int: jax.Array,
                        yaw_ref: jax.Array, v_ref: jax.Array, w_ref: jax.Array,
-                      delayed_action: jax.Array, torque_scale: jax.Array):
+                      delayed_action: jax.Array, torque_scale: jax.Array,
+                      x_est: jax.Array):
         """基层轮扭矩（每 base 步重算）。返回 (tau_wheel_l, tau_wheel_r)。
 
-        规范控制律（kuafu_physics 单源）：
-          pitch: 离散 LQR_K_DT4 状态 e=[x-x_ref, θ, ẋ-v_cmd, θ̇] → 地面力 F, 两轮等分
-                 τ_pitch = F·R/2。叠加 LQI 积分项 -Ki·∫(x-x_ref) 消除位置稳态漂移。
-          yaw:   命令跟踪 τ_yaw = YAW_KP·(w_cmd-ωz) - YAW_KD·ωz；
-                 轮映射 τL=τ_pitch-τ_yaw, τR=τ_pitch+τ_yaw（=> τR>τL ⇒ +wz 左转）。
-         RL 残差（合约动作 [dtau_common, dtau_yaw]·τ_rated）叠加在基层之上：
-           τL += dtau_common - dtau_yaw,  τR += dtau_common + dtau_yaw
-         """
+        x_est: 轮速积分的前向路程估计 (m)，与固件 x_est 同源。
+        """
         qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
         q = jp.stack([qw, qx, qy, qz])
 
-        lin_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
-        xdot = lin_vel_local[0]
         ang_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
         thetadot = ang_vel_local[1]  # wy = pitch rate
         yaw_rate = ang_vel_local[2]  # wz = yaw rate
 
+        # 前向速度用轮速估计 (与硬件一致), 不用 root qvel
+        wheel_vel_avg = (data.qvel[QVEL_WHEEL_L] + data.qvel[QVEL_WHEEL_R]) * 0.5
+        xdot = wheel_vel_avg * WHEEL_R
+
         theta = jp.arcsin(jp.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
-        state = jp.stack([data.qpos[0] - x_ref, theta, xdot - v_ref, thetadot])
+        state = jp.stack([x_est - x_ref, theta, xdot - v_ref, thetadot])
         F = -(LQR_K_DT4 @ state) - LQI_KI * x_int
         tau_pitch = F * WHEEL_R / 2.0 * torque_scale
 
@@ -556,15 +565,21 @@ class KuafuMjxEnv(MjxEnv):
         contact_r = jp.any(r_mask).astype(jp.float32)
         return jp.stack([contact_l, contact_r])
 
-    def _base_observation(self, data: mjx.Data, env_state: EnvState) -> jax.Array:
-        """35 维、固定物理尺度的实机可观测 Actor 帧。"""
+    def _base_observation(self, data: mjx.Data, env_state: EnvState,
+                          applied_action: jax.Array | None = None) -> jax.Array:
+        """35 维、固定物理尺度的实机可观测 Actor 帧。
+
+        applied_action: 实际施加（延迟后）的动作。在 step() 中传入 delayed_action；
+        在 reset() 中传入 None（默认零向量），与硬件首帧一致。
+        """
         qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
         q = jp.stack([qw, qx, qy, qz])
         roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
         grav_local = rotate_vector_by_quaternion_conj(q, jp.array([0.0, 0.0, -1.0]))
         ang_vel = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
-        lin_vel = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
         wheel_vel = jp.stack([data.qvel[QVEL_WHEEL_L], data.qvel[QVEL_WHEEL_R]])
+        est_vx = jp.mean(wheel_vel) * WHEEL_R
+        est_wz = ang_vel[2]
         d0_est = (
             self._d0_from_hips(data.qpos[QPOS_HIP_A_L], data.qpos[QPOS_HIP_B_L])
             + self._d0_from_hips(data.qpos[QPOS_HIP_A_R], data.qpos[QPOS_HIP_B_R])
@@ -575,17 +590,19 @@ class KuafuMjxEnv(MjxEnv):
         hip_vel = jp.stack([
             data.qvel[QVEL_HIP_A_L], data.qvel[QVEL_HIP_B_L],
             data.qvel[QVEL_HIP_A_R], data.qvel[QVEL_HIP_B_R]])
-        sensor_age_ms = jp.ones(6) * env_state.sense_delay_steps.astype(jp.float32) * CTRL_DT * 1000.0
+        prev_applied = applied_action if applied_action is not None else jp.zeros(ACTION_DIM)
+        imu_age = jp.ones(3) * env_state.sense_delay_steps.astype(jp.float32) * CTRL_DT * 1000.0
+        joint_age = jp.ones(3) * env_state.sense_delay_steps.astype(jp.float32) * CTRL_DT * 1000.0
         return jp.concatenate([
             jp.stack([env_state.v_cmd / 0.5, env_state.w_cmd, (env_state.d0_cmd - 132.5) / 74.5]),
             grav_local,
             ang_vel / 10.0,
-            jp.stack([lin_vel[0] / 0.5, ang_vel[2], (d0_est - 132.5) / 74.5, roll]),
+            jp.stack([est_vx / 0.5, est_wz, (d0_est - 132.5) / 74.5, roll]),
             wheel_vel / 33.0,
             hip_pos / HIP_RANGE,
             hip_vel / P.SERVO_MAX_SPEED,
-            env_state.prev_action,
-            sensor_age_ms / 100.0,
+            prev_applied,
+            jp.concatenate([imu_age, joint_age]) / 100.0,
         ])
 
     def _static_privileged_observation(self, env_state: EnvState) -> jax.Array:
@@ -601,14 +618,15 @@ class KuafuMjxEnv(MjxEnv):
         ])
 
     def _delayed_obs(self, env_state: EnvState) -> jax.Array:
-        """对喂给 policy 的本体感受观测施加观测延迟 (sensor/compute latency).
+        """Apply sensor delay to the full 4-frame Actor observation history.
 
-        缓冲填充顺序为 [丢弃最旧, 追加最新] (step 中 new_obs_delay_buffer),
-        故 obs_delay_buffer[0]=2步前(最旧), [1]=1步前, [2]=当前。
-        delay_steps>=2 取 2 步前(buf[0]), >=1 取 1 步前(buf[1]), 否则当前。
-        reset 时缓冲为 0(与 obs_history 初始全 0 一致, 无回归)。
+        The obs_delay_buffer stores full 140-dim snapshots. When sensor delay is
+        active, the actor sees the entire history from N steps ago. Command and
+        prev_action within that history are also from N steps ago, which is
+        acceptable because commands change slowly and prev_action is already
+        delayed by the action buffer.
         """
-        cur = env_state.obs_history.reshape(-1)
+        cur = env_state.obs_history.reshape(-1)  # (140,)
         buf = env_state.obs_delay_buffer
         return jp.where(
             env_state.sense_delay_steps >= 2,
@@ -655,9 +673,9 @@ class KuafuMjxEnv(MjxEnv):
         # (perturbation recovery, legged_gym/ETH 实践)。grav_local[:2] 模长≈sin(tilt)。
         tilt_cost = -jp.sqrt(grav_local[0] ** 2 + grav_local[1] ** 2)
 
-        # lin_vel_tracking: 跟踪 v_cmd (本体系前向速度 xdot)
-        lin_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
-        xdot = lin_vel_local[0]
+        # lin_vel_tracking: 跟踪 v_cmd (轮速估计前向速度, 与硬件一致)
+        wheel_vel_avg = (data.qvel[QVEL_WHEEL_L] + data.qvel[QVEL_WHEEL_R]) * 0.5
+        xdot = wheel_vel_avg * WHEEL_R
         lin_vel_error = (xdot - env_state.v_cmd) ** 2
         lin_vel_tracking = jp.exp(-lin_vel_error / 0.15)
 
@@ -824,10 +842,18 @@ class KuafuMjxEnv(MjxEnv):
         data = mjx.make_data(model)
         qpos0 = jp.asarray(self._keyframe_qpos)
         rng, noise_rng = jax.random.split(rng)
-        # 关节角小噪声 (±0.05 rad ≈ ±3°)
-        joint_noise = jax.random.uniform(
-            noise_rng, (model.nq - 7,), minval=-0.05, maxval=0.05)
-        qpos0 = qpos0.at[7:].set(qpos0[7:] + joint_noise)
+        # 仅扰动驱动髋关节 (QPOS_HIP_A_L/B_L/A_R/B_R), 不扰动被动膝/轮
+        # (扰动被动膝会破坏闭链几何, 导致 mjx.forward 求解器发散)
+        hip_indices = jp.array([QPOS_HIP_A_L, QPOS_HIP_B_L, QPOS_HIP_A_R, QPOS_HIP_B_R])
+        hip_noise = jax.random.uniform(
+            noise_rng, (4,), minval=-0.05, maxval=0.05)
+        qpos0 = qpos0.at[hip_indices].set(qpos0[hip_indices] + hip_noise)
+        # 小幅 root pitch 扰动 (±2°), 绕 Y 轴四元数 (qw,qx,qy,qz)
+        rng, pose_rng = jax.random.split(rng)
+        pitch_noise = jax.random.uniform(pose_rng, minval=-0.035, maxval=0.035)  # ±2°
+        qpos0 = qpos0.at[3:7].set(jp.array([
+            jp.cos(pitch_noise / 2), 0.0, jp.sin(pitch_noise / 2), 0.0]))  # pitch about Y
+        rng, push_timing_rng = jax.random.split(rng)
         data = data.replace(qpos=qpos0)
         data = mjx.forward(model, data)
 
@@ -839,7 +865,7 @@ class KuafuMjxEnv(MjxEnv):
             d0_cmd=d0_cmd,
             prev_action=jp.zeros(ACTION_DIM),
             prev_prev_action=jp.zeros(ACTION_DIM),
-            obs_history=jp.zeros((HISTORY_STEPS, OBS_DIM_BASE)),  # 初始全 0, 首帧 step 后填充
+            obs_history=jp.zeros((HISTORY_STEPS, OBS_DIM_BASE)),  # 首帧前填充零
 
             step_count=jp.int32(0),
             friction=friction,
@@ -856,6 +882,8 @@ class KuafuMjxEnv(MjxEnv):
             difficulty=difficulty,
             push_force=jp.zeros(3),
             active_push=jp.zeros(3),
+            next_push_step=jax.random.randint(push_timing_rng, (), minval=100, maxval=301),
+            push_end_step=jp.int32(0),
             track_v_abs_sum=jp.float32(0.0),
             track_w_abs_sum=jp.float32(0.0),
             track_d0_abs_sum=jp.float32(0.0),
@@ -869,6 +897,12 @@ class KuafuMjxEnv(MjxEnv):
             w_ref=jp.float32(0.0),
             w_accel=jp.float32(0.0),
         )
+
+        # 生成有效首帧观测并预填充历史: [0, 0, 0, current]
+        first_frame = self._base_observation(data, env_state)
+        obs_history_init = jp.zeros((HISTORY_STEPS, OBS_DIM_BASE))
+        obs_history_init = obs_history_init.at[HISTORY_STEPS - 1].set(first_frame)
+        env_state = env_state.replace(obs_history=obs_history_init)
 
         obs = self._observation(data, env_state)
         reward = jp.float32(0.0)
@@ -919,21 +953,30 @@ class KuafuMjxEnv(MjxEnv):
             action[jp.newaxis, :],
         ], axis=0)
 
-        # ---- 瞬时推力扰动 (velocity kick) 注入（须在物理步进前设置 xfrc）----
-        # 每 200 步 (4 秒) 重采样一个推力方向与强度 (最大 15N)
+        # ---- 瞬时推力扰动 (impulse kick) 注入（须在物理步进前设置 xfrc）----
+        # 随机间隔 (2-6s) 重采样推力方向与冲量 (最大 2 N·s -> 20N × 100ms)
         rng, push_rng = jax.random.split(env_state.rng)
-        is_push_resample = (env_state.step_count % 200 == 0)
-        k_force, k_dir = jax.random.split(push_rng)
-        push_mag = jax.random.uniform(k_force, minval=0.0, maxval=15.0)
+        is_push_resample = env_state.step_count >= env_state.next_push_step
+        k_force, k_dir, k_interval = jax.random.split(push_rng, 3)
+        push_impulse = jax.random.uniform(k_force, minval=0.0, maxval=2.0)  # N·s
+        push_duration = 0.1  # 100ms
+        push_mag = push_impulse / push_duration  # N
         push_angle = jax.random.uniform(k_dir, minval=0.0, maxval=2.0 * jp.pi)
+        new_next_push_step = env_state.step_count + jax.random.randint(
+            k_interval, (), minval=100, maxval=301)
+        new_push_end_step = env_state.step_count + 5
         new_push_force = jp.stack([
             push_mag * jp.cos(push_angle),
             push_mag * jp.sin(push_angle),
             jp.float32(0.0)
         ])
         push_force = jp.where(is_push_resample, new_push_force, env_state.push_force)
-        # 仅在每个 4s 周期的前 5 步（100ms）施加推力，且在刚 reset 的前几步不施加
-        is_push_active = ((env_state.step_count % 200) < 5) & (env_state.step_count > 5)
+        next_push_step = jp.where(
+            is_push_resample, new_next_push_step, env_state.next_push_step)
+        push_end_step = jp.where(
+            is_push_resample, new_push_end_step, env_state.push_end_step)
+        # 仅在推力窗口（5 步 = 100ms）内施加推力，reset 后前几步不施加
+        is_push_active = (env_state.step_count < push_end_step) & (env_state.step_count > 5)
         active_push = jp.where(is_push_active, push_force * env_state.difficulty[DIFF_PUSH], 0.0)
         # 注入推力到 chassis 质心 (xfrc_applied)
         xfrc_applied = data.xfrc_applied
@@ -953,6 +996,7 @@ class KuafuMjxEnv(MjxEnv):
         # 2-DOF 五杆: 闭链靠 <connect site1/site2> 物理铰接维持 (硬 solver)。
         x_ref = env_state.x_ref
         x_int = env_state.x_int
+        x_est = x_ref  # 轮速积分从当前参考点开始
         yaw_ref = env_state.yaw_ref
         v_ref = env_state.v_ref
         v_accel = env_state.v_accel
@@ -968,11 +1012,14 @@ class KuafuMjxEnv(MjxEnv):
             w_accel = jp.clip(w_accel + jp.clip(w_target_acc - w_accel, -16.0 * BASE_DT, 16.0 * BASE_DT), -4.0, 4.0)
             w_ref = w_ref + w_accel * BASE_DT
             x_ref = x_ref + v_ref * BASE_DT
+            # x_est: 轮速积分 (与固件一致)
+            wheel_vel_avg_step = (data.qvel[QVEL_WHEEL_L] + data.qvel[QVEL_WHEEL_R]) * 0.5
+            x_est = x_est + wheel_vel_avg_step * WHEEL_R * BASE_DT
             yaw_ref = yaw_ref + w_ref * BASE_DT
-            x_int = jp.clip(x_int + (data.qpos[0] - x_ref) * BASE_DT, -0.25, 0.25)
+            x_int = jp.clip(x_int + (x_est - x_ref) * BASE_DT, -0.25, 0.25)
             tau_wheel_l, tau_wheel_r = self._wheel_torque(
                 data, x_ref, x_int, yaw_ref, v_ref, w_ref,
-                delayed_action, env_state.torque_scale)
+                delayed_action, env_state.torque_scale, x_est)
             ctrl = jp.zeros(model.nu)
             ctrl = ctrl.at[ACT_TAU_L].set(tau_wheel_l)
             ctrl = ctrl.at[ACT_TAU_R].set(tau_wheel_r)
@@ -1008,7 +1055,8 @@ class KuafuMjxEnv(MjxEnv):
 
         # Episode tracking aggregates use the command that controlled this step.
         q_metric = jp.stack([data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]])
-        metric_lin_vel = rotate_vector_by_quaternion_conj(q_metric, data.qvel[0:3])[0]
+        metric_wheel_avg = (data.qvel[QVEL_WHEEL_L] + data.qvel[QVEL_WHEEL_R]) * 0.5
+        metric_lin_vel = metric_wheel_avg * WHEEL_R
         metric_ang_vel = rotate_vector_by_quaternion_conj(q_metric, data.qvel[3:6])
         metric_d0 = (
             self._d0_from_hips(data.qpos[QPOS_HIP_A_L], data.qpos[QPOS_HIP_B_L])
@@ -1025,12 +1073,14 @@ class KuafuMjxEnv(MjxEnv):
             w_cmd=w_cmd,
             d0_cmd=d0_cmd,
             prev_prev_action=env_state.prev_action,
-            prev_action=action,
+            prev_action=delayed_action,
             step_count=env_state.step_count + 1,
             action_buffer=new_action_buffer,
             fall_count=new_fall_count,
             push_force=push_force,
             active_push=active_push,
+            next_push_step=next_push_step,
+            push_end_step=push_end_step,
             x_ref=x_ref,
             x_int=x_int,
             yaw_ref=yaw_ref,
@@ -1046,7 +1096,7 @@ class KuafuMjxEnv(MjxEnv):
         )
 
         # 更新 obs history (append 当前帧, 丢弃最老帧)
-        base_obs = self._base_observation(data, env_state)
+        base_obs = self._base_observation(data, env_state, applied_action=delayed_action)
         new_history = jp.concatenate([
             env_state.obs_history[1:],
             base_obs[jp.newaxis, :],
@@ -1062,11 +1112,11 @@ class KuafuMjxEnv(MjxEnv):
 
         # lin_vel_tracking / orientation 实际值 (供 metric 记录)
         q = jp.stack([data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]])
-        lin_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
-        ang_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
-        xdot = lin_vel_local[0]
+        wheel_avg_metric = (data.qvel[QVEL_WHEEL_L] + data.qvel[QVEL_WHEEL_R]) * 0.5
+        xdot = wheel_avg_metric * WHEEL_R
         lin_vel_track_val = jp.exp(-((xdot - metric_v_cmd) ** 2) / 0.15)
         grav_local = rotate_vector_by_quaternion_conj(q, jp.array([0.0, 0.0, -1.0]))
+        ang_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
         orient_val = jp.exp(-ORIENT_ALPHA * jp.sum(grav_local[:2] ** 2))
 
         obs = self._observation(data, env_state)

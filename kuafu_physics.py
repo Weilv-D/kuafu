@@ -104,8 +104,9 @@ YAW_KP = 0.30           # heading error -> yaw torque (N m/rad)
 YAW_KD = 0.05           # yaw-rate error -> yaw torque (N m s/rad)
 
 # roll: ΔD0 = -Kp_r·roll - Kd_r·ωx，单位 mm
-ROLL_KP = 0.15
-ROLL_KD = 0.03
+# 保守初值, 首件台架标定: 几何 ~196mm 轮距, 3° roll 需 ~10mm 差, Kp ≈ 190 mm/rad
+ROLL_KP = 190.0
+ROLL_KD = 5.0
 
 # D0 高速门控阈值 (arbiter 遥控安全用)
 D0_GATE_V_THRESH = 0.3   # |v| > 此值时限制 D0_max

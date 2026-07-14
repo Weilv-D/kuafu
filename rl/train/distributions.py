@@ -12,6 +12,8 @@ KUAFU 动作分布 — 单一真相源。
 行列式 Jacobian 项 -log(1-a^2) 必须计入 log_prob，否则 PPO 的 ratio / 熵估计偏差。
 """
 
+import math
+
 import torch
 from torch.distributions import Normal
 
@@ -50,20 +52,19 @@ class TanhGaussian:
         return torch.tanh(u)
 
     def log_prob(self, actions: torch.Tensor) -> torch.Tensor:
-        # 逆变换 atanh，裁剪避免 |a|→1 时数值爆炸
         a = torch.clamp(actions, -0.999999, 0.999999)
         u = torch.atanh(a)
-        # 行列式 Jacobian: |da/du| = Π(1 - tanh^2(u)) = Π(1 - a^2)
-        jac = torch.log(1.0 - a.pow(2) + 1e-6)
-        return self.normal.log_prob(u) - jac
+        # Stable: log(1 - tanh^2(u)) = 2*(log(2) - u - softplus(-2u))
+        log_jac = 2.0 * (math.log(2.0) - u - torch.nn.functional.softplus(-2.0 * u))
+        return self.normal.log_prob(u) - log_jac
 
     def entropy(self) -> torch.Tensor:
-        # There is no closed-form entropy for a tanh-normal.  A detached Monte
-        # Carlo sample gives the correct transformed-policy estimator, including
-        # the Jacobian already used by log_prob, while preserving gradients to
-        # loc/scale for the PPO entropy coefficient.
-        sample = torch.tanh(self.normal.sample())
-        return -self.log_prob(sample)
+        u = self.normal.rsample()
+        log_jac = 2.0 * (math.log(2.0) - u - torch.nn.functional.softplus(-2.0 * u))
+        # H ≈ H[Normal] + E[log|det J|] = H[Normal] + log(1-tanh^2(u))
+        # log(1-tanh^2(u)) = 2*(log(2) - u - softplus(-2u))  (stable form)
+        normal_entropy = self.normal.entropy()
+        return normal_entropy + log_jac
 
     def mode(self) -> torch.Tensor:
         return self.squashed_mean
