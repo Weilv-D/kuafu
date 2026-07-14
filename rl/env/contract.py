@@ -114,16 +114,13 @@ OBS_FIELDS: List[Tuple[str, int, str, str]] = [
     ("hip_vel", 4, "rad/s", "4 舵机速度"),
     ("prev_applied_action", 6, "1", "上一帧实际施加的 6 维动作（延迟后）"),
     ("sensor_age", 6, "ms", "IMU age(3) + joint age(3)"),
-    ("hidden_state", 0, "1", "GRU 隐藏态（因果历史，不在 obs 向量内）"),
 ]
 
 
 def obs_dim(base_per_step: int = 1) -> int:
-    """纯向量观测维度（不含隐藏态）。base_per_step=1 表示当前帧，不含历史堆叠。"""
+    """Single-frame observation dimension (35 values)."""
     dim = 0
-    for name, d, _unit, _note in OBS_FIELDS:
-        if name == "hidden_state":
-            continue
+    for _name, d, _unit, _note in OBS_FIELDS:
         dim += d
     return dim
 

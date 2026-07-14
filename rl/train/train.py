@@ -39,7 +39,7 @@ import torch
 from rl.train.seed_utils import seed_all, capture_provenance
 from rl.train import dlpack_utils as dlu
 from rl.env.kuafu_mjx_env import (
-    KuafuMjxEnv, OBS_DIM, PRIVILEGED_DIM, RMA_STATIC_DIM, TRANSIENT_DIM,
+    KuafuMjxEnv, PRIVILEGED_DIM, RMA_STATIC_DIM, TRANSIENT_DIM,
     ACTOR_OBS_DIM, CRITIC_PRIV_DIM, CRITIC_OBS_DIM, DIFFICULTY_DIM,
 )
 
@@ -446,7 +446,6 @@ class _CurriculumPersistMixin:
         torch.set_rng_state(state["torch_rng"])
         np.random.set_state(state["numpy_rng"])
         random.setstate(state["python_rng"])
-        self.env._rng = jax.numpy.asarray(state["jax_rng"])
         if state.get("environment") is None:
             raise RuntimeError("checkpoint lacks exact vectorized environment state")
         self.env.restore_checkpoint_state(state["environment"])

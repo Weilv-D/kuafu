@@ -80,15 +80,19 @@ def _build_obs(data, applied_action, command, step, model=None):
         hip_pos / 3.3,
         hip_vel / P.SERVO_MAX_SPEED,
         applied_action,
-        np.zeros(6),
+        np.zeros(6),  # sensor_age: filled by caller if delay info available
     ])
 
 
 class NativeBaseline:
-    """Native-MuJoCo counterpart of the 500/250/50 Hz MJX baseline."""
+    """Native-MuJoCo counterpart of the 500/250/50 Hz MJX baseline.
+
+    Uses wheel-odometry for position/velocity state, matching MJX and firmware.
+    """
 
     def __init__(self, data, torque_scale=1.0, deadband=0.0):
-        self.x_ref = float(data.qpos[0])
+        self.x_est = 0.0
+        self.x_ref = 0.0
         self.x_int = 0.0
         self.v_ref = self.v_accel = 0.0
         self.w_ref = self.w_accel = 0.0
@@ -111,16 +115,19 @@ class NativeBaseline:
     def step(self, model, data, action, command):
         for _ in range(P.BASE_STEPS_PER_RL):
             q = data.qpos[3:7]
-            body_velocity = rotate_vector_by_quaternion_conj(q, data.qvel[:3])
             body_rate = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
             qw, qx, qy, qz = q
             pitch = np.arcsin(np.clip(2 * (qw * qy - qx * qz), -1.0, 1.0))
             self.v_ref, self.v_accel = self._jerk(command[0], self.v_ref, self.v_accel, 2.0, 8.0)
             self.w_ref, self.w_accel = self._jerk(command[1], self.w_ref, self.w_accel, 4.0, 16.0)
             self.x_ref += self.v_ref * P.BASE_DT
+            # Wheel-odometry integration (matches MJX and firmware)
+            wheel_vel_avg = (data.qvel[8] + data.qvel[13]) * 0.5
+            xdot = wheel_vel_avg * P.R
+            self.x_est += xdot * P.BASE_DT
             self.yaw_ref += self.w_ref * P.BASE_DT
-            self.x_int = np.clip(self.x_int + (data.qpos[0] - self.x_ref) * P.BASE_DT, -0.25, 0.25)
-            state = np.array([data.qpos[0] - self.x_ref, pitch, body_velocity[0] - self.v_ref, body_rate[1]])
+            self.x_int = np.clip(self.x_int + (self.x_est - self.x_ref) * P.BASE_DT, -0.25, 0.25)
+            state = np.array([self.x_est - self.x_ref, pitch, xdot - self.v_ref, body_rate[1]])
             force = -(P.LQR_K_DT4 @ state) - P.LQI_KI_DT4 * self.x_int
             tau_pitch = force * P.R / 2.0 * self.torque_scale
             yaw_error = np.arctan2(np.sin(self.yaw_ref - self._yaw(data)), np.cos(self.yaw_ref - self._yaw(data)))
@@ -133,10 +140,13 @@ class NativeBaseline:
                 data.qvel[13])
             roll = np.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx * qx + qy * qy))
             roll_d0 = -(P.ROLL_KP * roll + P.ROLL_KD * body_rate[0])
-            d0_l = np.clip(command[2] + roll_d0 / 2.0 + action[3] * 30.0, P.D0_MIN, P.D0_MAX)
-            d0_r = np.clip(command[2] - roll_d0 / 2.0 + action[5] * 30.0, P.D0_MIN, P.D0_MAX)
-            qA_l, qB_l = P.fivebar_ik_cmd_xy(action[2] * 20.0, d0_l)
-            qA_r, qB_r = P.fivebar_ik_cmd_xy(action[4] * 20.0, d0_r)
+            d0_max = P.D0_GATE_MAX_HIGH if abs(command[0]) > P.D0_GATE_V_THRESH or abs(command[1]) > P.D0_GATE_W_THRESH else P.D0_MAX
+            d0_l = np.clip(command[2] + roll_d0 / 2.0 + action[3] * P.D0_RESIDUAL_SCALE, P.D0_MIN, d0_max)
+            d0_r = np.clip(command[2] - roll_d0 / 2.0 + action[5] * P.D0_RESIDUAL_SCALE, P.D0_MIN, d0_max)
+            qx_l = np.clip(action[2] * P.QX_RESIDUAL_SCALE, -P.QX_RESIDUAL_SCALE, P.QX_RESIDUAL_SCALE)
+            qx_r = np.clip(action[4] * P.QX_RESIDUAL_SCALE, -P.QX_RESIDUAL_SCALE, P.QX_RESIDUAL_SCALE)
+            qA_l, qB_l = P.fivebar_ik_cmd_xy(qx_l, d0_l)
+            qA_r, qB_r = P.fivebar_ik_cmd_xy(qx_r, d0_r)
             goals = np.array([qA_l, qA_r, qB_l, qB_r])
             actual = data.qpos[[7, 12, 10, 15]]
             goals = np.where(np.abs(goals - actual) < self.deadband, actual, goals)

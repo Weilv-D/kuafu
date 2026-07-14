@@ -108,7 +108,7 @@ class SerialPolicyNode:
             wheel_speed=wheel_speed,
             hip_pos=hip_pos,
             hip_vel=hip_vel,
-            sensor_age_ms=(imu_age, joint_age, joint_age, joint_age, joint_age, joint_age),
+            sensor_age_ms=(imu_age, imu_age, imu_age, joint_age, joint_age, joint_age),
         )
 
     def tick(self) -> bool:

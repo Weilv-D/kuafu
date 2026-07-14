@@ -21,7 +21,7 @@ The Actor observes a 140-dimensional input built from four causal frames of 35 p
 
 The policy is a tanh-squashed diagonal Gaussian with a reparameterized entropy and a numerically stable log-prob that accounts for the Jacobian term. PPO uses `init_noise_std = 0.4`, `gamma = 0.995`, and `num_steps_per_env = 96`. Curriculum operates over seven independent axes: command, D0, domain randomization, latency/noise, slope, step, and push. Friction domain randomization samples actual coefficients in `[0.3, 1.2]`. Push perturbation uses impulse-based sampling of 0-2 N·s with random timing. Roll leveling gains are `ROLL_KP = 190 mm/rad` and `ROLL_KD = 5.0`.
 
-Checkpoints load CPU-first for cross-device resume compatibility. Schema `v1.0.0` checkpoints (157-dimensional RMA) are `legacy-v0` and cannot be resumed, exported, or deployed. Dependencies are version-pinned in `requirements.txt`.
+Checkpoints load CPU-first for cross-device resume compatibility. Schema `v1.0.0` checkpoints (157-dimensional RMA) are `legacy-v0` and cannot be resumed, exported, or deployed. Dependencies are version-pinned in `rl/requirements.txt`.
 
 ## Verification
 

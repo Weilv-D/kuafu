@@ -5,7 +5,7 @@
 - `kuafu_physics.py`: physical parameters, timing, LQR/LQI synthesis, five-bar geometry, roll/yaw gains, model hash, generated constants.
 - `rl/env/contract.py`: schema version, frame, units, signs, observation/action contract, protocol ranges. Current schema: `v1.1.0`.
 - `rl/train/train_config.py`: PPO hyperparameters, network architecture, training scale.
-- `rl/train/curriculum.py`: 7-axis independent curriculum state machine.
+- `rl/train/train.py`: scalar curriculum driving 5-axis difficulty via `d_max`; `rl/train/curriculum.py` provides the 7-axis independent curriculum data structures (planned for future integration).
 - `docs/contracts/interface.md`: readable contract; it must agree with the executable contract.
 
 Physical changes are made in `kuafu_physics.py`, followed by `rl/verify/calibrate_fivebar.py` and `rl/verify/generate_artifacts.py`. Do not hand-edit generated firmware constants.

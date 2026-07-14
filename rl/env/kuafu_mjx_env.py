@@ -121,7 +121,6 @@ PHYS_SUBSTEPS_PER_BASE = P.PHYS_SUBSTEPS_PER_BASE  # 2
 # 规范合成增益（禁止手填）：离散 LQR @250Hz + LQI 积分增益（消除位置稳态漂移）
 LQR_K_DT4 = P.LQR_K_DT4
 LQI_KI = float(P.LQI_KI_DT4)
-WHEEL_R = P.R_WHEEL * P.MM          # 轮半径 m
 # yaw 符号：τ_yaw=(τR-τL)/2 ⇒ 右轮>左轮 ⇒ +wz（左转），见 rl/env/contract.py
 
 # 物理常量 (JAX 数组)
@@ -195,6 +194,7 @@ class EnvState:
     d0_cmd: jax.Array
     # 基层位置跟踪参考（LQR/LQI）：x_ref 积分自 v_cmd；命令归零即冻结→原地位置保持
     x_ref: jax.Array
+    x_est: jax.Array
     x_int: jax.Array
     yaw_ref: jax.Array
     v_ref: jax.Array
@@ -890,6 +890,7 @@ class KuafuMjxEnv(MjxEnv):
             track_count=jp.int32(0),
             nonzero_command_count=jp.int32(0),
             x_ref=jp.float32(0.0),
+            x_est=jp.float32(0.0),
             x_int=jp.float32(0.0),
             yaw_ref=jp.float32(0.0),
             v_ref=jp.float32(0.0),
@@ -996,7 +997,7 @@ class KuafuMjxEnv(MjxEnv):
         # 2-DOF 五杆: 闭链靠 <connect site1/site2> 物理铰接维持 (硬 solver)。
         x_ref = env_state.x_ref
         x_int = env_state.x_int
-        x_est = x_ref  # 轮速积分从当前参考点开始
+        x_est = env_state.x_est  # 轮速积分 (跨 RL 步保持, 与固件一致)
         yaw_ref = env_state.yaw_ref
         v_ref = env_state.v_ref
         v_accel = env_state.v_accel
@@ -1082,6 +1083,7 @@ class KuafuMjxEnv(MjxEnv):
             next_push_step=next_push_step,
             push_end_step=push_end_step,
             x_ref=x_ref,
+            x_est=x_est,
             x_int=x_int,
             yaw_ref=yaw_ref,
             v_ref=v_ref,
