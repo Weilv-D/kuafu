@@ -55,8 +55,8 @@ ALGORITHM = {
 POLICY = {
     "class_name": "ActorCritic",
     "init_noise_std": 1.0,
-    "actor_hidden_dims": [512, 512, 512],   # 主干 MLP: obs(157=proprio148+z9) → 512×3 → action 6
-    "critic_hidden_dims": [512, 512, 512],  # value head (输入 actor obs 157 + 瞬态 3 = 160)
+    "actor_hidden_dims": [512, 512, 512],   # 主干 MLP: actor obs 140 → action 6
+    "critic_hidden_dims": [512, 512, 512],  # value head: actor 140 + privileged 12 = 152
     "activation": "elu",
 }
 
@@ -69,7 +69,7 @@ RUN = {
     "seed": SEED,
     "num_steps_per_env": NUM_STEPS_PER_ENV,
     "save_interval": 50,
-    "empirical_normalization": True,
+    "empirical_normalization": False,  # Actor 输入使用 contract 固定物理尺度
 }
 
 # ============================================================

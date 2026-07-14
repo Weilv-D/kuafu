@@ -1,52 +1,36 @@
-# AGENTS.md — KUAFU 强化学习开发速查
+# KUAFU Development Guide
 
-面向 Coding Agent 的 RL 模块操作约定。物理与代码修改的单一真相源见 `kuafu_physics.py`；
-完整设计与决策见 `docs/KUAFU.md` 与 `docs/plans/`。
+## Sources Of Truth
 
-## 环境
+- `kuafu_physics.py`: physical parameters, timing, LQR/LQI synthesis, five-bar geometry, model hash, generated constants.
+- `rl/env/contract.py`: schema, frame, units, signs, observation/action contract, protocol ranges.
+- `docs/contracts/interface.md`: readable contract; it must agree with the executable contract.
 
-- venv: `rl/.venv`（Python 3.12，JAX 0.10 cuda13 + MuJoCo MJX + RSL-RL 2.x + torch 2.12 cu130）
-- 安装: `rl/.venv/bin/pip install -r rl/requirements.txt`
-- 运行任何 rl 脚本前激活 venv: `rl/.venv/bin/python <script>`
+Physical changes are made in `kuafu_physics.py`, followed by `rl/verify/generate_artifacts.py`. Do not hand-edit generated firmware constants.
 
-## 物理常量真源
+## Environment
 
-`kuafu_physics.py`（顶层）是机构/物理参数单一真相源，被 `rl/` 仿真、训练、`export` 与部署共用。
-**改物理参数只改此处**，不要散落到 `.xml` 或 env 里。
+Use `rl/.venv/bin/python`. The Actor has 140 inputs (35 values × four causal frames); the Critic has 152 inputs. The policy is tanh-squashed in PPO, inference, ONNX, and Pi5. Old 157-dimensional RMA checkpoints are `legacy-v0`.
 
-## 训练
+## Required Checks
 
 ```bash
-# Teacher PPO（逐步采集）
-rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 3072
-# 续训 (checkpoint 格式与权重/归一器/课程完全兼容)
-rl/.venv/bin/python rl/train/train.py --run_name garlic --num_envs 3072 \
-  --resume rl/checkpoints/garlic/teacher/model_3999.pt
-# 默认 72 步/rollout; --num_steps_per_env 可调; 显存受限降 --num_envs (1024≈2.0GB, 3072≈4.3GB)
+rl/.venv/bin/python rl/verify/verify_physics_source.py
+rl/.venv/bin/python rl/verify/verify_controller_golden.py
+rl/.venv/bin/python rl/verify/calibrate_fivebar.py
+rl/.venv/bin/python rl/verify/generate_artifacts.py
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 rl/.venv/bin/python -m pytest rl/train/tests -q
 ```
 
-- 维度约定: actor 157 = proprio 148 + z 9; critic 160 = actor 157 + 瞬态推力 3。
-- 课程: 双向滑动窗口调 `d_max`（初始 0.1，上限 1.0），per-env 采样 `Uniform(0, d_max)`；
-  `Curriculum` 在 `train.py`，`DirectVecEnv._curriculum` 持有。
-- 探索护栏（防熵坍塌）: 课程升级（`d_max` 上调）时把策略噪声 `std` 抬回下限重开探索；
-  `noise_std` 跌破地板（0.03）则抬高 `entropy_coef`（0.01→0.04），回升过 0.06 回基线。
-  二者由 `DirectVecEnv` 在 `runner.alg.policy` / `runner.alg` 注入引用后生效，未注入则静默关闭。
-  TensorBoard 见 `entropy_coef` 与 `noise_std_guard`。
+For controller or environment changes, also run a JAX reset/step/auto-reset smoke. For firmware changes, run the host C syntax check where available and then a target build/HIL test.
 
-## 验证（改代码前后必跑）
+## Training And Export
 
 ```bash
-# 1. 物理验证 (CPU, 13/13) — 任何物理/机构改动
-rl/.venv/bin/python rl/verify/verify_model.py
-# 2. S0 权重对齐护栏 (jax actor/critic vs torch ActorCritic) — 权重映射/mlp_forward 改动
-rl/.venv/bin/python rl/verify/s0_parity.py
-# 3. 策略回放 (原生 MuJoCo CPU, 可视化行为) — 训练产出行为合理性
-rl/.venv/bin/python rl/verify/playback.py --ckpt rl/checkpoints/garlic/teacher/model_3999.pt
+rl/.venv/bin/python rl/train/train.py --run_name s0 --num_envs 3072
+rl/.venv/bin/python rl/train/train.py --run_name s1 --num_envs 3072 \
+  --resume rl/checkpoints/s0/teacher/model_1000.pt
+rl/.venv/bin/python rl/export/export_policy.py --ckpt <model.pt> --out <policy.onnx>
 ```
 
-## 导出与部署
-
-```bash
-rl/.venv/bin/python rl/export/export_policy.py --ckpt <model>.pt --mode teacher   # 含 normalizer
-rl/.venv/bin/python rl/export/export_policy.py --ckpt <student>.pt --mode student
-```
+Resume to a new run name. Checkpoints are immutable sources and carry optimizer, learning rate, entropy, curriculum, RNG, schema, and model hash. Follow the release gates in `docs/validation/acceptance.md`; simulation completion is not hardware acceptance.

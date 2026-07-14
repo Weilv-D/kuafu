@@ -5,12 +5,16 @@
 MJX 环境 (kuafu_mjx_env.py) 需 JAX/GPU, 按需导入避免链式加载。
 """
 from .kuafu_env import (
-    OBS_SPEC, OBS_DIM_BASE, OBS_DIM, HISTORY_STEPS,
-    PRIVILEGED_STATIC_SPEC, TRANSIENT_SPEC, RMA_LATENT_DIM,
-    ACTION_SPEC, ACTION_DIM, WHEEL_TAU_MAX, WHEEL_TAU_CLIP, HIP_RANGE,
-    REWARD_TASK, REWARD_STYLE, REWARD_SAFETY,
-    DOMAIN_RANDOMIZATION, LQR_K,
-    residual_wheel_torque, print_spec,
+    ACTION_DIM,
+    ACTION_SPEC,
+    ACTOR_OBS_DIM,
+    CRITIC_OBS_DIM,
+    HISTORY_STEPS,
+    OBS_DIM,
+    OBS_DIM_BASE,
+    OBS_SPEC,
+    PRIVILEGED_DIM,
+    print_spec,
 )
 
 # MJX 环境按需导入 (需 JAX/GPU, 不在 __init__ 链式加载)

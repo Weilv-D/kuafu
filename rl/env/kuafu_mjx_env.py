@@ -5,9 +5,7 @@ KUAFU 残差 RL 环境 — MuJoCo MJX 实现
 继承 MuJoCo Playground MjxEnv, JAX 全函数化, 向量化运行在 GPU 上。
 驻留态腿被动自锁, 整机降为轮式倒立摆; RL 输出残差叠加在 LQR 底层之上。
 
-design.md 对应章节:
-  §2.1 观测空间 / §2.2 动作空间 / §2.3 Reward / §2.4 域随机化
-  §2.5 Teacher-Student + RMA / §3.x MJCF 建模
+Architecture is defined by rl.env.contract and docs/architecture/system.md.
 
 通过 train.py 的 DirectVecEnv 适配器桥接到 PyTorch/RSL-RL 2.x:
   DLPack 零拷贝 (JAX DeviceArray ↔ torch.Tensor), JAX cuda13 与 torch cu130 共享 runtime。
@@ -17,6 +15,7 @@ design.md 对应章节:
 """
 import os
 import sys
+import json
 from typing import Any, Dict, Optional, Tuple
 
 import jax
@@ -33,12 +32,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import kuafu_physics as P
 
 XML_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "kuafu.xml")
+IK_TABLE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fivebar_ik_table.json")
 
 # ============================================================
 # 常量 (从 kuafu_physics 导入, 避免魔数)
 # ============================================================
-CTRL_DT = 0.02          # 50 Hz 控制频率
-SIM_DT = 0.002          # 500 Hz 物理子步
+CTRL_DT = P.RL_DT       # 50 Hz 控制频率
+SIM_DT = P.PHYS_DT      # 500 Hz 物理子步
 N_SUBSTEPS = int(CTRL_DT / SIM_DT)  # = 10
 EPISODE_LENGTH = 1000   # 50 Hz × 20s
 
@@ -81,51 +81,69 @@ ACT_HIP_A_R = 3
 ACT_HIP_B_L = 4
 ACT_HIP_B_R = 5
 
-# 五杆机构行程: 曲柄半行程 rad (2-DOF 五杆, 各曲柄独立 ±HIP_STROKE)
-HIP_STROKE = 1.52    # 曲柄半行程 rad
+# RL 腿残差的工作空间投影: action∈[-1,1] → 有界 Qx/D0 位移 (mm)。
+# 两个分量分别进入二维五杆 IK，禁止再相加后伪装成 D0 残差。
+D0_RESIDUAL_SCALE = P.D0_RESIDUAL_SCALE
+QX_RESIDUAL_SCALE = P.QX_RESIDUAL_SCALE
 
 # 观测维度
-# 训练用 4 步堆叠 → 148 维 proprio (RSL-RL ActorCritic 直接消费)
-# base 37 维: 3+3+4+8+2+4+6+3+2+2 (含左右轮接触标志 2 维, M2/M4 涌现关键)
-OBS_DIM_BASE = 37    # 全观测 4 舵机 + 接触标志
+# 35维实机可观测帧，四步因果历史。
+OBS_DIM_BASE = 35    # 仅实机可观测本体感受
 HISTORY_STEPS = 4
-OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS  # 148 本体感受 (4步堆叠)
+OBS_DIM = OBS_DIM_BASE * HISTORY_STEPS  # 140 本体感受 (4步因果历史)
 PRIVILEGED_DIM = 12    # teacher critic 特权 = 静态外因(9) + 瞬态扰动(3)
-# 特权观测拆分 (RMA 最佳实践, Kumar et al. RSS 2021):
-# - 静态环境外因 (RMA latent, 9 维): friction/mass/com/inertia/torque/deadband/delay
-#     episode 级常量, 由 adaptation module 从本体感受历史推断, 喂给 base policy
-# - 瞬态扰动 (3 维): active_push 每步变化的外部推力, 由 policy 本体感受
-#     (wheel_torque/hip_torque) 在线感知, 只留在 teacher critic 特权, 不进 RMA latent
+# Critic-only 特权：静态环境外因 9 维与瞬态推力 3 维。
 RMA_STATIC_DIM = 9    # friction(1)+mass_scale(1)+com_bias(3)+inertia_scale(1)+torque_scale(1)+deadband(1)+delay_steps(1)
 TRANSIENT_DIM = 3     # active_push(3) 瞬态外力
-ACTION_DIM = 6        # [dtau_L, dtau_R, hip_A_l, hip_A_r, hip_B_l, hip_B_r]
+ACTION_DIM = 6        # [dtau_common, dtau_yaw, dQx_L, dD0_L, dQx_R, dD0_R]
 DELAY_BUFFER_LEN = 3   # 最大延迟缓冲 (3步×20ms=60ms, 覆盖 DR_DELAY_ACT=30ms + DR_DELAY_SENSE=20ms)
+DIFF_COMMAND = 0
+DIFF_DR = 1
+DIFF_TERRAIN = 2
+DIFF_PUSH = 3
+DIFF_D0 = 4
+DIFFICULTY_DIM = 5
 
-# RMA actor 条件化 (Kumar et al. RSS 2021): 训练阶段 base policy 必须以静态特权
-# latent z(9) 为条件, 部署时由 adapter 从历史预测 z_hat 替代。故:
-#   actor obs  = proprio(148) + z(9)       = 157
-#   critic obs = actor obs(157) + 瞬态(3)  = 160
-# (瞬态 active_push 由本体感受在线感知, 仅 critic 额外特权, 不进 latent)
-PROPRIO_DIM = OBS_DIM                      # 148 本体感受 (4步堆叠)
-Z_DIM = RMA_STATIC_DIM                     # 9 静态环境外因 latent
-ACTOR_OBS_DIM = PROPRIO_DIM + Z_DIM        # 157 (actor 输入)
-CRITIC_PRIV_DIM = TRANSIENT_DIM            # 3 (critic 额外瞬态特权)
-CRITIC_OBS_DIM = ACTOR_OBS_DIM + CRITIC_PRIV_DIM  # 160 (critic 输入)
+# Actor 只消费本体感受；Critic 追加仿真特权。
+PROPRIO_DIM = OBS_DIM
+Z_DIM = 0
+ACTOR_OBS_DIM = PROPRIO_DIM
+CRITIC_PRIV_DIM = PRIVILEGED_DIM
+CRITIC_OBS_DIM = ACTOR_OBS_DIM + CRITIC_PRIV_DIM
+
+# ---- 规范基层控制常量（与 kuafu_physics 单源一致）----
+# 多速率：物理 500Hz / 基层 250Hz / RL 残差 50Hz
+BASE_DT = P.BASE_DT                 # 4ms 基层控制周期
+PHYS_DT = P.PHYS_DT                 # 2ms 物理周期
+RL_DT = P.RL_DT                     # 20ms RL 周期
+BASE_STEPS_PER_RL = P.BASE_STEPS_PER_RL      # 5
+PHYS_SUBSTEPS_PER_BASE = P.PHYS_SUBSTEPS_PER_BASE  # 2
+# 规范合成增益（禁止手填）：离散 LQR @250Hz + LQI 积分增益（消除位置稳态漂移）
+LQR_K_DT4 = P.LQR_K_DT4
+LQI_KI = float(P.LQI_KI_DT4)
+WHEEL_R = P.R_WHEEL * P.MM          # 轮半径 m
+# yaw 符号：τ_yaw=(τR-τL)/2 ⇒ 右轮>左轮 ⇒ +wz（左转），见 rl/env/contract.py
 
 # 物理常量 (JAX 数组)
-LQR_K = jp.array(P.LQR_K)          # [-4.47, -61.18, -5.82, -4.02]
 WHEEL_R = P.R                       # 0.03908 m
 TAU_WHEEL_RATED = P.TAU_WHEEL_RATED  # 0.55 Nm
 TAU_WHEEL_STALL = P.TAU_WHEEL_STALL  # 1.1 Nm
 TAU_CONT = P.TAU_CONT               # 1.0 Nm (腿连续安全)
 G = P.G                             # 9.81
 
+# P4 动作/工作空间惩罚 (防止对抗策略靠静止/饱和/顶限位通过, audit P0/P4)
+HIP_RANGE = 3.3                     # 髋关节硬限位 (rad, 已放宽以达 D0_MAX)
+WORKSPACE_SAFE = 2.8                # 工作空间安全边界 (rad): 超出即惩罚, 留余量给限位
+RESID_W = 0.02                      # 残差幅度惩罚权重 (鼓励贴近基层控制器)
+SAT_W = 0.1                         # tanh 饱和惩罚权重 (|a|>0.9 时)
+WORKSPACE_W = 0.05                  # 工作空间越界惩罚权重
+
 # DDSM back-EMF: 额定转速下力矩线性衰减
 OMEGA_NOLOAD = P.RPM_WHEEL_NOLOAD * 2 * jp.pi / 60  # 315 rpm → rad/s
 
-# 基层 yaw 条件阻尼 + roll 调平增益 (与 kuafu_physics 同源, STM32 1kHz 兜底层)
-YAW_KD = P.YAW_KD             # yaw 阻尼 (仅低 ωz 时生效)
-YAW_DAMP_THRESH = P.YAW_DAMP_THRESH  # yaw 阻尼阈值
+# 基层 heading/roll 增益（与 kuafu_physics/STM32 同源）
+YAW_KD = P.YAW_KD
+YAW_KP = P.YAW_KP
 ROLL_KP = P.ROLL_KP     # roll 调平比例 (mm/rad)
 ROLL_KD = P.ROLL_KD     # roll 阻尼
 
@@ -175,6 +193,14 @@ class EnvState:
     v_cmd: jax.Array
     w_cmd: jax.Array
     d0_cmd: jax.Array
+    # 基层位置跟踪参考（LQR/LQI）：x_ref 积分自 v_cmd；命令归零即冻结→原地位置保持
+    x_ref: jax.Array
+    x_int: jax.Array
+    yaw_ref: jax.Array
+    v_ref: jax.Array
+    v_accel: jax.Array
+    w_ref: jax.Array
+    w_accel: jax.Array
     # 上一步动作 (action_rate reward)
     prev_action: jax.Array
     prev_prev_action: jax.Array
@@ -192,6 +218,8 @@ class EnvState:
     deadband: jax.Array
     # delay (执行器延迟, 单位: 控制步数; 1步=20ms)
     delay_steps: jax.Array
+    # independent sensor/compute delay used by the Actor observation
+    sense_delay_steps: jax.Array
     # 动作延迟缓冲 (DELAY_BUFFER_LEN × ACTION_DIM)
     action_buffer: jax.Array
     # 观测延迟缓冲 (DELAY_BUFFER_LEN × OBS_DIM) — 传感器/计算延迟 DR (latency randomization)
@@ -204,6 +232,13 @@ class EnvState:
     push_force: jax.Array
     # 实际施加的推力向量 (3,)
     active_push: jax.Array
+    # Episode aggregates used by curriculum gates; terminal-frame metrics cannot
+    # distinguish a policy that tracked for two seconds from one that got lucky.
+    track_v_abs_sum: jax.Array
+    track_w_abs_sum: jax.Array
+    track_d0_abs_sum: jax.Array
+    track_count: jax.Array
+    nonzero_command_count: jax.Array
 
 
 class KuafuMjxEnv(MjxEnv):
@@ -231,6 +266,20 @@ class KuafuMjxEnv(MjxEnv):
         self._teacher = teacher
         self._num_envs = num_envs
         self._episode_length = episode_length
+
+        # 五杆二维 IK 查表 (JAX 安全)。校准 artifact 是部署契约的一部分，
+        # 不在环境构造时重新生成未校验的几何表。
+        with open(IK_TABLE_PATH, encoding="utf-8") as source:
+            _ik_grid = json.load(source)
+        if _ik_grid.get("model_hash") != P.model_hash():
+            raise RuntimeError("five-bar calibration table model hash mismatch")
+        self._ik_qx = jp.asarray(_ik_grid["qx"])
+        self._ik_d0 = jp.asarray(_ik_grid["d0"])
+        self._ik_qA = jp.asarray(_ik_grid["qA_grid"])
+        self._ik_qB = jp.asarray(_ik_grid["qB_grid"])
+        dwell = P.fivebar_ik(P.D0_MIN)
+        self._dwell_qA = jp.asarray(dwell[0])
+        self._dwell_qB = jp.asarray(dwell[1])
 
         # 加载模型
         self._mj_model = mujoco.MjModel.from_xml_path(XML_PATH)
@@ -279,17 +328,18 @@ class KuafuMjxEnv(MjxEnv):
 
         在 reset 时调用, 对 mass/friction/inertia/COM/wheel_radius/servo_pd 注入随机扰动。
         """
-        # mass ±15% (与 difficulty 缩放)
+        dr_difficulty = difficulty[DIFF_DR]
+        # mass ±15% (与独立 DR 难度缩放)
         mass_scale_raw = jax.random.uniform(
             rng, minval=DR["mass"][0], maxval=DR["mass"][1])
-        mass_scale = 1.0 + difficulty * (mass_scale_raw - 1.0)
+        mass_scale = 1.0 + dr_difficulty * (mass_scale_raw - 1.0)
         model = model.replace(body_mass=model.body_mass * mass_scale)
 
         # friction [0.3, 1.2] (与 difficulty 缩放)
         rng, friction_rng = jax.random.split(rng)
         friction_raw = jax.random.uniform(
             friction_rng, minval=DR["friction"][0], maxval=DR["friction"][1])
-        friction_multiplier = 1.0 + difficulty * (friction_raw - 1.0)
+        friction_multiplier = 1.0 + dr_difficulty * (friction_raw - 1.0)
         geom_friction = model.geom_friction.at[:, 0].set(
             model.geom_friction[:, 0] * friction_multiplier)
         model = model.replace(geom_friction=geom_friction)
@@ -298,7 +348,7 @@ class KuafuMjxEnv(MjxEnv):
         rng, inertia_rng = jax.random.split(rng)
         inertia_scale_raw = jax.random.uniform(
             inertia_rng, minval=DR["inertia"][0], maxval=DR["inertia"][1])
-        inertia_scale = 1.0 + difficulty * (inertia_scale_raw - 1.0)
+        inertia_scale = 1.0 + dr_difficulty * (inertia_scale_raw - 1.0)
         diaginertia = model.body_inertia * inertia_scale
         model = model.replace(body_inertia=diaginertia)
 
@@ -306,7 +356,7 @@ class KuafuMjxEnv(MjxEnv):
         rng, com_rng = jax.random.split(rng)
         com_bias_raw = jax.random.uniform(
             com_rng, (3,), minval=P.DR_COM[0], maxval=P.DR_COM[1])
-        com_bias = com_bias_raw * difficulty
+        com_bias = com_bias_raw * dr_difficulty
         # chassis, 修改其 inertial pos
         new_ipos = model.body_ipos.at[self._chassis_body_id].set(model.body_ipos[self._chassis_body_id] + com_bias)
         model = model.replace(body_ipos=new_ipos)
@@ -315,7 +365,7 @@ class KuafuMjxEnv(MjxEnv):
         rng, wr_rng = jax.random.split(rng)
         wheel_r_delta_raw = jax.random.uniform(
             wr_rng, minval=P.DR_WHEEL_R[0], maxval=P.DR_WHEEL_R[1])
-        wheel_r_delta = wheel_r_delta_raw * difficulty
+        wheel_r_delta = wheel_r_delta_raw * dr_difficulty
         # 轮 geom
         geom_size = model.geom_size
         geom_size = geom_size.at[self._wheel_l_geom_id, 0].set(geom_size[self._wheel_l_geom_id, 0] + wheel_r_delta)
@@ -326,7 +376,7 @@ class KuafuMjxEnv(MjxEnv):
         rng, pd_rng = jax.random.split(rng)
         pd_scale_raw = jax.random.uniform(
             pd_rng, minval=P.DR_SERVO_PD[0], maxval=P.DR_SERVO_PD[1])
-        pd_scale = 1.0 + difficulty * (pd_scale_raw - 1.0)
+        pd_scale = 1.0 + dr_difficulty * (pd_scale_raw - 1.0)
         # position actuator idx: 2,3,4,5 (q_hip_A_l/r, q_hip_B_l/r; 4 舵机全部独立驱动)
         # MuJoCo position actuator: biasprm = [0, -kp, -kv] (affine -kp*q0 -kv*vel);
         # 故 kp 缩放必须作用在 biasprm[1] (而非 [0] 常量项), 否则平衡位被偏移到 pd_scale×cmd。
@@ -351,7 +401,8 @@ class KuafuMjxEnv(MjxEnv):
         出生在原点 (x=0, y=0), 台阶位于 x≥0.6m, 斜坡在原点 z=0 通过, 起步安全。
         """
         # 斜坡: 绕 Y 轴旋转 ground plane, 角度 = difficulty × 10°
-        ang = difficulty * jp.radians(10.0)
+        terrain_difficulty = difficulty[DIFF_TERRAIN]
+        ang = terrain_difficulty * jp.radians(10.0)
         c, s = jp.cos(ang / 2.0), jp.sin(ang / 2.0)
         floor_quat = jp.array([c, 0.0, s, 0.0])  # (w, x, y, z), 绕 Y
         geom_quat = model.geom_quat.at[self._floor_geom_id].set(floor_quat)
@@ -359,7 +410,7 @@ class KuafuMjxEnv(MjxEnv):
 
         # 台阶: 逐级高度 (i+1)×30mm × difficulty (最小 0.5mm 避免退化)
         for i, gid in enumerate(self._step_geom_ids):
-            h = jp.maximum((i + 1) * 0.03 * difficulty, 1e-3)
+            h = jp.maximum((i + 1) * 0.03 * terrain_difficulty, 1e-3)
             size = model.geom_size.at[gid, 2].set(h / 2.0)      # box 半高
             pos = model.geom_pos.at[gid, 2].set(h / 2.0)        # 底面贴地 (bottom z=0)
             model = model.replace(geom_size=size, geom_pos=pos)
@@ -367,13 +418,14 @@ class KuafuMjxEnv(MjxEnv):
 
     # ---- 命令采样 ----
     def _sample_command(self, rng: jax.Array, difficulty: jax.Array):
-        """随机采样速度/角速度/D0 命令, 范围随 difficulty 缩放."""
+        """独立采样命令与 D0 工作空间难度。"""
         rng, k1, k2, k3 = jax.random.split(rng, 4)
-        v_limit = 0.05 + 0.45 * difficulty
-        w_limit = 0.1 + 0.9 * difficulty
+        v_limit = 0.05 + 0.45 * difficulty[DIFF_COMMAND]
+        w_limit = 0.1 + 0.9 * difficulty[DIFF_COMMAND]
         v_cmd = jax.random.uniform(k1, minval=-v_limit, maxval=v_limit)
         w_cmd = jax.random.uniform(k2, minval=-w_limit, maxval=w_limit)
-        d0_cmd = jax.random.uniform(k3, minval=D0_CMD_RANGE[0], maxval=D0_CMD_RANGE[1])
+        d0_upper = P.D0_MIN + (P.D0_MAX - P.D0_MIN) * difficulty[DIFF_D0]
+        d0_cmd = jax.random.uniform(k3, minval=D0_CMD_RANGE[0], maxval=d0_upper)
         # 10% 概率零命令 (静支平衡)
         rng, k_zero = jax.random.split(rng)
         is_zero = jax.random.bernoulli(k_zero, p=0.1)
@@ -381,41 +433,104 @@ class KuafuMjxEnv(MjxEnv):
         w_cmd = jp.where(is_zero, 0.0, w_cmd)
         return rng, v_cmd, w_cmd, d0_cmd
 
-    # ---- LQR-lite 基层 (pitch + conditional yaw 阻尼, 三轴兜底之二) ----
-    def _lqr_balance(self, data: mjx.Data, env_state: EnvState) -> Tuple[jax.Array, jax.Array]:
-        """基层轮式倒立摆: pitch LQR + 条件 yaw 阻尼。返回 (tau_pitch, tau_diff)。
+    # ---- 规范基层控制器（pitch LQR/LQI + yaw 命令跟踪，三轴兜底）----
+    def _wheel_torque(self, data: mjx.Data, x_ref: jax.Array, x_int: jax.Array,
+                       yaw_ref: jax.Array, v_ref: jax.Array, w_ref: jax.Array,
+                      delayed_action: jax.Array, torque_scale: jax.Array):
+        """基层轮扭矩（每 base 步重算）。返回 (tau_wheel_l, tau_wheel_r)。
 
-        pitch: LQR 状态 [x, θ, ẋ, θ̇] → 纵置力 F, 两轮等分 τ_pitch = F·R/2
-        yaw:   条件阻尼 — 仅在 |ωz| < YAW_DAMP_THRESH 时施加小阻尼抑制漂移;
-               |ωz| 大时关闭 (任何差速扭力在高 yaw_rate 下耦合 pitch 不稳定,
-               同轴轮 IP 物理特性, 见 verify_model 标定)。yaw 命令跟踪交 RL。
-        RL 挂掉时: pitch 稳 + yaw 不低频漂移 (高频 yaw 漂移属任务, 非安全)。
-        """
+        规范控制律（kuafu_physics 单源）：
+          pitch: 离散 LQR_K_DT4 状态 e=[x-x_ref, θ, ẋ-v_cmd, θ̇] → 地面力 F, 两轮等分
+                 τ_pitch = F·R/2。叠加 LQI 积分项 -Ki·∫(x-x_ref) 消除位置稳态漂移。
+          yaw:   命令跟踪 τ_yaw = YAW_KP·(w_cmd-ωz) - YAW_KD·ωz；
+                 轮映射 τL=τ_pitch-τ_yaw, τR=τ_pitch+τ_yaw（=> τR>τL ⇒ +wz 左转）。
+         RL 残差（合约动作 [dtau_common, dtau_yaw]·τ_rated）叠加在基层之上：
+           τL += dtau_common - dtau_yaw,  τR += dtau_common + dtau_yaw
+         """
         qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
         q = jp.stack([qw, qx, qy, qz])
 
-        # 本体系线速度
         lin_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
         xdot = lin_vel_local[0]
-
-        # 本体系角速度
         ang_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
         thetadot = ang_vel_local[1]  # wy = pitch rate
         yaw_rate = ang_vel_local[2]  # wz = yaw rate
 
-        # pitch LQR
         theta = jp.arcsin(jp.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
-        state = jp.stack([0.0, theta, xdot, thetadot])
-        F = -(LQR_K @ state)
-        tau_pitch = F * WHEEL_R / 2.0
+        state = jp.stack([data.qpos[0] - x_ref, theta, xdot - v_ref, thetadot])
+        F = -(LQR_K_DT4 @ state) - LQI_KI * x_int
+        tau_pitch = F * WHEEL_R / 2.0 * torque_scale
 
-        # 条件 yaw 阻尼: 仅低 yaw_rate 时抑制漂移; 高 yaw_rate 关闭防 pitch 耦合
-        tau_diff = jp.where(
-            jp.abs(yaw_rate) < YAW_DAMP_THRESH,
-            jp.clip(-YAW_KD * yaw_rate, -TAU_WHEEL_RATED, TAU_WHEEL_RATED),
-            0.0)
+        yaw = jp.arctan2(2 * (qw * qz + qx * qy), 1 - 2 * (qz ** 2 + qy ** 2))
+        yaw_error = jp.arctan2(jp.sin(yaw_ref - yaw), jp.cos(yaw_ref - yaw))
+        tau_yaw = (YAW_KP * yaw_error + YAW_KD * (w_ref - yaw_rate)) * torque_scale
+        # 合约残差: dtau_common (前向) / dtau_yaw (偏航), 经 wheels_from_tau 映射到轮
+        dtau_common = delayed_action[0] * TAU_WHEEL_RATED * torque_scale
+        dtau_yaw = delayed_action[1] * TAU_WHEEL_RATED * torque_scale
+        tau_wheel_l = tau_pitch - tau_yaw + dtau_common - dtau_yaw
+        tau_wheel_r = tau_pitch + tau_yaw + dtau_common + dtau_yaw
+        tau_wheel_l = self._limit_wheel_torque(
+            jp.clip(tau_wheel_l, -TAU_WHEEL_STALL, TAU_WHEEL_STALL),
+            data.qvel[QVEL_WHEEL_L])
+        tau_wheel_r = self._limit_wheel_torque(
+            jp.clip(tau_wheel_r, -TAU_WHEEL_STALL, TAU_WHEEL_STALL),
+            data.qvel[QVEL_WHEEL_R])
+        return tau_wheel_l, tau_wheel_r
 
-        return tau_pitch, tau_diff
+    def _leg_goals(self, data: mjx.Data, env_state: EnvState,
+                    delayed_action: jax.Array, d0_cmd: jax.Array) -> jax.Array:
+        """基层腿目标（每 RL 步一次）：D0 对称 + roll 调平 + RL 残差，经精确五杆 IK。
+
+        返回 4 维 hip 目标 [A_l, A_r, B_l, B_r]（rad）。
+        流程：d0_cmd ± roll 拆分 → 每侧 D0(mm) → fivebar_ik_cmd → (qA,qB)。
+        RL 残差（合约 [dQx_L, dD0_L, dQx_R, dD0_R]）作为每侧目标点
+        ``(Qx,D0)`` 的独立增量，经二维精确 IK。
+        审计约定：∂qA/∂D0<0, ∂qB/∂D0>0（fivebar_ik_cmd 已施加）。
+        """
+        qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
+        roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx ** 2 + qy ** 2))
+        q = jp.stack([qw, qx, qy, qz])
+        ang_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
+        omega_x = ang_vel_local[0]
+        # roll 调平: 正 roll → 左腿伸更多(+, 右腿 -, mm)
+        d_d0_mm = -(ROLL_KP * roll + ROLL_KD * omega_x)
+        # 每侧 D0: 命令 + roll 拆分 + 独立 D0 残差；Qx 独立投影，不能混入 D0。
+        d0_left = d0_cmd + d_d0_mm / 2.0 + delayed_action[3] * D0_RESIDUAL_SCALE
+        d0_right = d0_cmd - d_d0_mm / 2.0 + delayed_action[5] * D0_RESIDUAL_SCALE
+        d0_left = jp.clip(d0_left, P.D0_MIN, P.D0_MAX)
+        d0_right = jp.clip(d0_right, P.D0_MIN, P.D0_MAX)
+        qx_left = jp.clip(delayed_action[2] * QX_RESIDUAL_SCALE, self._ik_qx[0], self._ik_qx[-1])
+        qx_right = jp.clip(delayed_action[4] * QX_RESIDUAL_SCALE, self._ik_qx[0], self._ik_qx[-1])
+        qA_l, qB_l = self._interpolate_ik(qx_left, d0_left)
+        qA_r, qB_r = self._interpolate_ik(qx_right, d0_right)
+        return jp.stack([qA_l, qA_r, qB_l, qB_r])
+
+    def _interpolate_ik(self, qx_mm: jax.Array, d0_mm: jax.Array) -> Tuple[jax.Array, jax.Array]:
+        """Bilinear interpolation of the source-generated five-bar IK grid."""
+        qA_at_qx = jax.vmap(lambda row: jp.interp(d0_mm, self._ik_d0, row))(self._ik_qA)
+        qB_at_qx = jax.vmap(lambda row: jp.interp(d0_mm, self._ik_d0, row))(self._ik_qB)
+        return (jp.interp(qx_mm, self._ik_qx, qA_at_qx),
+                jp.interp(qx_mm, self._ik_qx, qB_at_qx))
+
+    def _fk_from_hips(self, qA: jax.Array, qB: jax.Array) -> jax.Array:
+        """JAX-safe closed-chain FK for dwell-relative actuator angles (mm)."""
+        angle_a = jp.asarray(P.AX) + P.A_LEN * jp.cos(self._dwell_qA - qA)
+        z_a = P.A_LEN * jp.sin(self._dwell_qA - qA)
+        angle_b = jp.asarray(P.BX) + P.A_LEN * jp.cos(self._dwell_qB - qB)
+        z_b = P.A_LEN * jp.sin(self._dwell_qB - qB)
+        midpoint = jp.stack([(angle_a + angle_b) / 2.0, (z_a + z_b) / 2.0])
+        dx = angle_b - angle_a
+        dz = z_b - z_a
+        distance = jp.maximum(jp.sqrt(dx * dx + dz * dz), 1e-6)
+        half = jp.sqrt(jp.maximum(P.B_LEN * P.B_LEN - (distance / 2.0) ** 2, 0.0))
+        perp = jp.stack([-dz / distance, dx / distance])
+        candidate_a = midpoint + perp * half
+        candidate_b = midpoint - perp * half
+        return jp.where(candidate_a[1] < candidate_b[1], candidate_a, candidate_b)
+
+    def _d0_from_hips(self, qA: jax.Array, qB: jax.Array) -> jax.Array:
+        """Return D0 from the full two-hip FK, preserving Qx residuals."""
+        return -self._fk_from_hips(qA, qB)[1]
 
     # ---- DDSM back-EMF 限制 ----
     def _limit_wheel_torque(self, tau: jax.Array, omega: jax.Array) -> jax.Array:
@@ -442,71 +557,39 @@ class KuafuMjxEnv(MjxEnv):
         return jp.stack([contact_l, contact_r])
 
     def _base_observation(self, data: mjx.Data, env_state: EnvState) -> jax.Array:
-        """37 维本体感受观测 (含左右轮接触标志, M2/M4 涌现关键)."""
-        # 机身姿态 (3): roll/pitch/yaw from quaternion (Pitch 采用 arcsin)
+        """35 维、固定物理尺度的实机可观测 Actor 帧。"""
         qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
-        roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
-        pitch = jp.arcsin(jp.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
-        yaw = jp.arctan2(2 * (qw * qz + qx * qy), 1 - 2 * (qz**2 + qy**2))
-        attitude = jp.stack([roll, pitch, yaw])
-
-        # 角速度 (3): 本体系下的 wx/wy/wz
         q = jp.stack([qw, qx, qy, qz])
+        roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
+        grav_local = rotate_vector_by_quaternion_conj(q, jp.array([0.0, 0.0, -1.0]))
         ang_vel = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
-
-        # 轮状态 (4): 左右轮位置+速度
-        wheel_pos = jp.stack([data.qpos[QPOS_WHEEL_L], data.qpos[QPOS_WHEEL_R]])
+        lin_vel = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
         wheel_vel = jp.stack([data.qvel[QVEL_WHEEL_L], data.qvel[QVEL_WHEEL_R]])
-        wheel_state = jp.concatenate([wheel_pos, wheel_vel])
-
-        # 髋关节状态 (8): 4 舵机位置+速度 (hip_A + hip_B 各左右, 2-DOF 独立)
+        d0_est = (
+            self._d0_from_hips(data.qpos[QPOS_HIP_A_L], data.qpos[QPOS_HIP_B_L])
+            + self._d0_from_hips(data.qpos[QPOS_HIP_A_R], data.qpos[QPOS_HIP_B_R])
+        ) / 2.0
         hip_pos = jp.stack([
-            data.qpos[QPOS_HIP_A_L], data.qpos[QPOS_HIP_A_R],
-            data.qpos[QPOS_HIP_B_L], data.qpos[QPOS_HIP_B_R]])
+            data.qpos[QPOS_HIP_A_L], data.qpos[QPOS_HIP_B_L],
+            data.qpos[QPOS_HIP_A_R], data.qpos[QPOS_HIP_B_R]])
         hip_vel = jp.stack([
-            data.qvel[QVEL_HIP_A_L], data.qvel[QVEL_HIP_A_R],
-            data.qvel[QVEL_HIP_B_L], data.qvel[QVEL_HIP_B_R]])
-        hip_state = jp.concatenate([hip_pos, hip_vel])
-
-        # 轮力矩观测 (2): 执行器力 (actuator_force)
-        wheel_torque = jp.array([
-            data.actuator_force[ACT_TAU_L], data.actuator_force[ACT_TAU_R]
-        ])
-
-        # 腿力矩观测 (4): 4 舵机电流→力矩代理
-        hip_torque = jp.array([
-            data.actuator_force[ACT_HIP_A_L], data.actuator_force[ACT_HIP_A_R],
-            data.actuator_force[ACT_HIP_B_L], data.actuator_force[ACT_HIP_B_R],
-        ])
-
-        # 上一步动作 (6)
-        last_action = env_state.prev_action
-
-        # 命令 (3): v_cmd, w_cmd, d0_cmd
-        command = jp.stack([env_state.v_cmd, env_state.w_cmd, env_state.d0_cmd])
-
-        # 相位时钟 (2): sin/cos (当前步数 / 周期)
-        phase = env_state.step_count.astype(jp.float32) / EPISODE_LENGTH
-        phase_clock = jp.stack([jp.sin(2 * jp.pi * phase), jp.cos(2 * jp.pi * phase)])
-
-        # 接触标志 (2): 左右轮是否接地 (M2/M4 涌现关键)
-        contact = self._wheel_contact(data)
-
+            data.qvel[QVEL_HIP_A_L], data.qvel[QVEL_HIP_B_L],
+            data.qvel[QVEL_HIP_A_R], data.qvel[QVEL_HIP_B_R]])
+        sensor_age_ms = jp.ones(6) * env_state.sense_delay_steps.astype(jp.float32) * CTRL_DT * 1000.0
         return jp.concatenate([
-            attitude,        # 3
-            ang_vel,         # 3
-            wheel_state,     # 4
-            hip_state,       # 8
-            wheel_torque,    # 2
-            hip_torque,      # 4
-            last_action,     # 6
-            command,         # 3
-            phase_clock,     # 2
-            contact,         # 2
-        ])                    # = 37
+            jp.stack([env_state.v_cmd / 0.5, env_state.w_cmd, (env_state.d0_cmd - 132.5) / 74.5]),
+            grav_local,
+            ang_vel / 10.0,
+            jp.stack([lin_vel[0] / 0.5, ang_vel[2], (d0_est - 132.5) / 74.5, roll]),
+            wheel_vel / 33.0,
+            hip_pos / HIP_RANGE,
+            hip_vel / P.SERVO_MAX_SPEED,
+            env_state.prev_action,
+            sensor_age_ms / 100.0,
+        ])
 
     def _static_privileged_observation(self, env_state: EnvState) -> jax.Array:
-        """9 维静态环境外因 (RMA latent 监督目标): 不含瞬态 active_push."""
+        """Critic-only 9 维静态环境外因，不含瞬态 active_push。"""
         return jp.concatenate([
             env_state.friction[jp.newaxis],      # 1
             env_state.mass_scale[jp.newaxis],     # 1
@@ -528,27 +611,24 @@ class KuafuMjxEnv(MjxEnv):
         cur = env_state.obs_history.reshape(-1)
         buf = env_state.obs_delay_buffer
         return jp.where(
-            env_state.delay_steps >= 2,
+            env_state.sense_delay_steps >= 2,
             buf[0],
-            jp.where(env_state.delay_steps >= 1, buf[1], cur))
+            jp.where(env_state.sense_delay_steps >= 1, buf[1], cur))
 
     def _observation(self, data: mjx.Data, env_state: EnvState):
         """构建观测: teacher 返回 dict, student 返回扁平数组.
 
         obs_history 已在 step() 中更新 (含最新帧); 此处对 policy 观测施加观测延迟。
 
-        RMA (Kumar 2021): teacher actor 以 proprio(148) + 静态特权 latent z(9) = 157
-        为条件 (训练时喂真值, 部署时由 adapter 预测 z_hat 替代); critic 额外吃瞬态
-        扰动 active_push(3) → 160。student 模式返扁平 proprio(148), 由外部 adapter
-        补 z_hat。
+        Actor always receives causal proprioception; the Critic receives privileged
+        simulation values only during PPO training.
         """
-        flat_obs = self._delayed_obs(env_state)    # (148,) 已含观测延迟
+        flat_obs = self._delayed_obs(env_state)    # (140,) 已含观测延迟
 
         if self._teacher:
-            static_z = self._static_privileged_observation(env_state)  # (9,)
-            actor_obs = jp.concatenate([flat_obs, static_z])          # (157,)
-            transient = env_state.active_push                        # (3,) critic 额外特权
-            return {"state": actor_obs, "privileged_state": transient}
+            privileged = jp.concatenate([
+                self._static_privileged_observation(env_state), env_state.active_push])
+            return {"state": flat_obs, "privileged_state": privileged}
         return flat_obs
 
     # ---- Reward ----
@@ -579,43 +659,33 @@ class KuafuMjxEnv(MjxEnv):
         lin_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
         xdot = lin_vel_local[0]
         lin_vel_error = (xdot - env_state.v_cmd) ** 2
-        lin_vel_tracking = jp.exp(-lin_vel_error / 0.25)
+        lin_vel_tracking = jp.exp(-lin_vel_error / 0.15)
 
         # ang_vel_tracking: 跟踪 w_cmd (yaw 角速度, 本体系 wz)
         ang_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
         yaw_rate = ang_vel_local[2]  # wz
         ang_vel_error = (yaw_rate - env_state.w_cmd) ** 2
-        ang_vel_tracking = jp.exp(-ang_vel_error / 0.25)
+        ang_vel_tracking = jp.exp(-ang_vel_error / 0.15)
 
-        # d0_avg_tracking: 关节正则, 只惩罚**左右平均** D0 偏离 d0_cmd (不惩罚左右差)
-        # → 允许左右 D0 不等用于 roll 调平 (原 default_pose 把 4 髋锁同一 d0_cmd, 抑制调平)
-        # 2-DOF 五杆: 左右平均 D0 目标: hip_A_target = -d0_norm×HIP_STROKE, hip_B 镜像
-        d0_norm = (env_state.d0_cmd - P.D0_MIN) / (P.D0_MAX - P.D0_MIN)
-        hip_A_target = -d0_norm * HIP_STROKE       # A 链目标 (伸展为负)
-        hip_B_target = d0_norm * HIP_STROKE        # B 链镜像 (对称构型 Q 在 X=0)
-        # 左右平均 (A_l+A_r)/2 等 → 只惩罚对称偏离, 不惩罚左右差
-        avg_A = (data.qpos[QPOS_HIP_A_L] + data.qpos[QPOS_HIP_A_R]) / 2.0
-        avg_B = (data.qpos[QPOS_HIP_B_L] + data.qpos[QPOS_HIP_B_R]) / 2.0
-        pose_err = (avg_A - hip_A_target) ** 2 + (avg_B - hip_B_target) ** 2
-        d0_avg_tracking = jp.exp(-pose_err / 0.1)
+        # d0_avg_tracking: measured hips 经 JAX 查表反插得到 D0 (mm)。
+        d0_l = self._d0_from_hips(data.qpos[QPOS_HIP_A_L], data.qpos[QPOS_HIP_B_L])
+        d0_r = self._d0_from_hips(data.qpos[QPOS_HIP_A_R], data.qpos[QPOS_HIP_B_R])
+        avg_d0 = (d0_l + d0_r) / 2.0
+        d0_err_sq = (avg_d0 - env_state.d0_cmd) ** 2
+        d0_avg_tracking = jp.exp(-d0_err_sq / 100.0)  # 100mm² ≈ (10mm)²
 
         # roll_leveling: 显式奖励机身水平 (roll→0)。机构支持左右 D0 不等调平,
         # 此项激活该能力 (原无, default_pose 反而抑制)。
-        roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
+        roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx ** 2 + qy ** 2))
         roll_leveling = jp.exp(-roll ** 2 / 0.05)  # σ=0.05 rad²≈(13°)²
 
         # contact_asymmetry_penalty: 抑制长时间单轮卸载 (限制 M4 为短暂轻抬)
         contact = self._wheel_contact(data)
         contact_asym = -jp.abs(contact[0] - contact[1])
 
-        # extension_cost: 仅惩罚超出 d0_cmd 的过度伸展 (不惩罚命令内的伸展,
-        # 避免与 d0_avg_tracking 奖励梯度互抵)。
-        target_ext = 4.0 * d0_norm * HIP_STROKE   # 命令伸展量 (4 髋 × d0_norm × stroke)
-        hip_ext = (
-            jp.abs(data.qpos[QPOS_HIP_A_L]) + jp.abs(data.qpos[QPOS_HIP_A_R])
-            + jp.abs(data.qpos[QPOS_HIP_B_L]) + jp.abs(data.qpos[QPOS_HIP_B_R])
-        )
-        extension_cost = -jp.maximum(hip_ext - target_ext, 0.0)
+        # extension_cost: 仅惩罚超出 d0_cmd 的过度伸展 (不惩罚命令内伸展,
+        # 避免与 d0_avg_tracking 梯度互抵); FK 自洽。
+        extension_cost = -jp.maximum(avg_d0 - env_state.d0_cmd, 0.0) / 1000.0
 
         # alive: 存活奖励, 对抗训练初期"一碰就死"的局部最优 (T1 轮式用 0.25, KUAFU 有
         # 坚实 orientation+tracking 故降至 0.1; 配合 FALL_GRACE_STEPS 软终止)
@@ -653,12 +723,25 @@ class KuafuMjxEnv(MjxEnv):
             + jp.maximum(jp.abs(data.actuator_force[ACT_HIP_B_R]) - TAU_CONT, 0))
         torque_limit = -tau_excess
 
+        # ---- P4 动作/工作空间惩罚 (audit P0/P4: 对抗策略不得靠静止/饱和/顶限位通过) ----
+        # residual_magnitude: 惩罚 RL 残差幅度, 鼓励贴近基层 LQR/LQI 控制器
+        residual_mag = -jp.sum(action ** 2)
+
+        # saturation: tanh 残差接近 ±1 饱和时惩罚 (残差已无梯度余量, 且逼近执行器极限)
+        sat = -jp.sum(jp.maximum(jp.abs(action) - 0.9, 0.0) ** 2)
+
+        # workspace: 髋关节逼近硬限位 (±3.3rad) 时惩罚, 保持机构在工作空间内
+        hip_q = jp.stack([
+            data.qpos[QPOS_HIP_A_L], data.qpos[QPOS_HIP_A_R],
+            data.qpos[QPOS_HIP_B_L], data.qpos[QPOS_HIP_B_R]])
+        workspace = -jp.sum(jp.maximum(jp.abs(hip_q) - WORKSPACE_SAFE, 0.0) ** 2)
+
         # termination_penalty: 倒下当步给负奖励, 配合 LQR 兜底, 引导尽快恢复/避免倒下
         fall_penalty = -1.0 * fallen_flag
 
         total = (
-            1.0 * lin_vel_tracking
-            + 0.5 * ang_vel_tracking
+            1.5 * lin_vel_tracking
+            + 1.0 * ang_vel_tracking
             + 1.0 * orientation
             + 0.5 * tilt_cost
             + 0.3 * d0_avg_tracking
@@ -671,6 +754,9 @@ class KuafuMjxEnv(MjxEnv):
             + 0.001 * energy
             + 0.5 * torque_limit
             + 1.0 * fall_penalty
+            + RESID_W * residual_mag
+            + SAT_W * sat
+            + WORKSPACE_W * workspace
         )
         return total
 
@@ -701,9 +787,9 @@ class KuafuMjxEnv(MjxEnv):
     # ============================================================
     # MjxEnv 接口实现
     # ============================================================
-    def reset(self, rng: jax.Array, difficulty: jax.Array = jp.float32(0.0)) -> State:
+    def reset(self, rng: jax.Array, difficulty: jax.Array = jp.zeros(DIFFICULTY_DIM)) -> State:
         """重置环境到驻留态 + 域随机化 + 命令采样."""
-        rng, cmd_rng, dr_rng, torque_rng, db_rng, delay_rng = jax.random.split(rng, 6)
+        rng, cmd_rng, dr_rng, torque_rng, db_rng, delay_rng, sense_delay_rng = jax.random.split(rng, 7)
 
         # 域随机化 (mass/friction/inertia/COM/wheel_r/servo_pd 注入物理, 与 difficulty 缩放)
         model, friction, mass_scale, inertia_scale, com_bias = self._randomize_model(
@@ -714,18 +800,22 @@ class KuafuMjxEnv(MjxEnv):
         # DDSM 力矩常数 DR (与 difficulty 缩放)
         torque_scale_raw = jax.random.uniform(
             torque_rng, minval=DR["torque_const"][0], maxval=DR["torque_const"][1])
-        torque_scale = 1.0 + difficulty * (torque_scale_raw - 1.0)
+        torque_scale = 1.0 + difficulty[DIFF_DR] * (torque_scale_raw - 1.0)
 
         # deadband [0, 2°] (舵机齿轮间隙, 与 difficulty 缩放)
         deadband_raw = jax.random.uniform(
             db_rng, minval=P.DR_DEADBAND[0], maxval=P.DR_DEADBAND[1])
-        deadband = deadband_raw * difficulty
+        deadband = deadband_raw * difficulty[DIFF_DR]
 
         # delay [0, 30ms] → 步数 (1步=20ms, 最大 1-2 步, 与 difficulty 缩放)
         delay_s_raw = jax.random.uniform(
             delay_rng, minval=P.DR_DELAY_ACT[0], maxval=P.DR_DELAY_ACT[1])
-        delay_s = delay_s_raw * difficulty
+        delay_s = delay_s_raw * difficulty[DIFF_DR]
         delay_steps = jp.round(delay_s / CTRL_DT).astype(jp.int32)
+        sense_delay_s_raw = jax.random.uniform(
+            sense_delay_rng, minval=P.DR_DELAY_SENSE[0], maxval=P.DR_DELAY_SENSE[1])
+        sense_delay_steps = jp.round(
+            sense_delay_s_raw * difficulty[DIFF_DR] / CTRL_DT).astype(jp.int32)
 
         # 命令 (范围与 difficulty 缩放)
         cmd_rng, v_cmd, w_cmd, d0_cmd = self._sample_command(cmd_rng, difficulty)
@@ -759,12 +849,25 @@ class KuafuMjxEnv(MjxEnv):
             torque_scale=torque_scale,
             deadband=deadband,
             delay_steps=delay_steps,
+            sense_delay_steps=sense_delay_steps,
             action_buffer=jp.zeros((DELAY_BUFFER_LEN, ACTION_DIM)),
             obs_delay_buffer=jp.zeros((DELAY_BUFFER_LEN, OBS_DIM)),
             fall_count=jp.int32(0),
             difficulty=difficulty,
             push_force=jp.zeros(3),
             active_push=jp.zeros(3),
+            track_v_abs_sum=jp.float32(0.0),
+            track_w_abs_sum=jp.float32(0.0),
+            track_d0_abs_sum=jp.float32(0.0),
+            track_count=jp.int32(0),
+            nonzero_command_count=jp.int32(0),
+            x_ref=jp.float32(0.0),
+            x_int=jp.float32(0.0),
+            yaw_ref=jp.float32(0.0),
+            v_ref=jp.float32(0.0),
+            v_accel=jp.float32(0.0),
+            w_ref=jp.float32(0.0),
+            w_accel=jp.float32(0.0),
         )
 
         obs = self._observation(data, env_state)
@@ -775,17 +878,27 @@ class KuafuMjxEnv(MjxEnv):
         metrics = {
             "orientation": jp.float32(0.0),
             "lin_vel_tracking": jp.float32(0.0),
+            "lin_vel_err": jp.float32(0.0),
+            "yaw_err": jp.float32(0.0),
+            "d0_err": jp.float32(0.0),
             "fallen": jp.float32(0.0),
-            "difficulty": difficulty,
+            "difficulty": jp.mean(difficulty),
+            "v_cmd": jp.float32(0.0),
+            "w_cmd": jp.float32(0.0),
+            "resid_norm": jp.float32(0.0),
         }
         info = {"env_state": env_state, "model": model}
         return State(data, obs, reward, done, metrics, info)
 
     def step(self, state: State, action: jax.Array) -> State:
         """执行一步控制: LQR + RL 残差叠加 → 10 子步物理 → reward/obs/done."""
+        action = jp.clip(action, -1.0, 1.0)
         data = state.data
         env_state = state.info["env_state"]
         model = state.info["model"]
+        metric_v_cmd = env_state.v_cmd
+        metric_w_cmd = env_state.w_cmd
+        metric_d0_cmd = env_state.d0_cmd
 
         # ---- 执行器延迟: 从 action_buffer 取延迟前的动作 ----
         # action_buffer 在 step 末尾填充 [丢弃最旧, 追加最新], 故 step 开始时缓冲为
@@ -806,73 +919,7 @@ class KuafuMjxEnv(MjxEnv):
             action[jp.newaxis, :],
         ], axis=0)
 
-        # ---- 基层 LQR-lite (pitch + yaw, torque_scale 模拟电机常数偏差) ----
-        tau_pitch, tau_diff = self._lqr_balance(data, env_state)
-        tau_pitch = tau_pitch * env_state.torque_scale
-        tau_diff = tau_diff * env_state.torque_scale
-
-        # ---- RL 残差叠加 (用延迟后的动作) ----
-        # 轮: τ_L = τ_pitch + τ_diff + Δτ_L·τ_rated, τ_R = τ_pitch - τ_diff + Δτ_R·τ_rated
-        tau_wheel_l = tau_pitch + tau_diff + delayed_action[0] * TAU_WHEEL_RATED * env_state.torque_scale
-        tau_wheel_r = tau_pitch - tau_diff + delayed_action[1] * TAU_WHEEL_RATED * env_state.torque_scale
-        tau_wheel_l = self._limit_wheel_torque(
-            jp.clip(tau_wheel_l, -TAU_WHEEL_STALL, TAU_WHEEL_STALL),
-            data.qvel[QVEL_WHEEL_L])
-        tau_wheel_r = self._limit_wheel_torque(
-            jp.clip(tau_wheel_r, -TAU_WHEEL_STALL, TAU_WHEEL_STALL),
-            data.qvel[QVEL_WHEEL_R])
-
-        # ---- 腿: 基层(D0对称 + roll 调平 PD) + RL 位置残差 ----
-        # 基层 D0 对称目标: d0_cmd → hip_A_target = -d0_norm·HIP_STROKE, hip_B 镜像
-        # roll 调平: ΔD0 = -Kp·roll - Kd·ωx → 左腿 += ΔD0/2, 右腿 -= ΔD0/2 (mm → rad)
-        # RL 残差: delayed_action[2:6]·HIP_STROKE 叠加在基层之上 (含轻量 M4 不对称)
-        qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
-        roll = jp.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
-        q = jp.stack([qw, qx, qy, qz])
-        ang_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
-        omega_x = ang_vel_local[0]  # roll rate
-        d0_norm = (env_state.d0_cmd - P.D0_MIN) / (P.D0_MAX - P.D0_MIN)
-        hip_A_base = -d0_norm * HIP_STROKE       # A 链对称目标 (伸展为负)
-        hip_B_base = d0_norm * HIP_STROKE        # B 链镜像
-
-        # roll 调平: 左右 D0 差 (mm → rad)。左右 D0 差 d_d0_mm 对应每侧位移 ±d_d0_mm/2,
-        # 故每侧 crank 增量 = (d_d0_mm/2) * HIP_STROKE/(D0_MAX-D0_MIN), 即 d_d0_rad = d_d0_mm*HIP_STROKE/range。
-        d_d0_mm = -(ROLL_KP * roll + ROLL_KD * omega_x)  # 正 roll → 缩左伸右 (符号待标定)
-        d_d0_rad = d_d0_mm / (P.D0_MAX - P.D0_MIN) * HIP_STROKE  # mm→归一化→rad(每侧 ±d_d0_rad/2)
-        hip_A_l_base = hip_A_base + d_d0_rad / 2.0
-        hip_A_r_base = hip_A_base - d_d0_rad / 2.0
-        hip_B_l_base = hip_B_base + d_d0_rad / 2.0
-        hip_B_r_base = hip_B_base - d_d0_rad / 2.0
-
-        # RL 残差叠加
-        hip_goal = jp.stack([
-            hip_A_l_base + delayed_action[2] * HIP_STROKE,
-            hip_A_r_base + delayed_action[3] * HIP_STROKE,
-            hip_B_l_base + delayed_action[4] * HIP_STROKE,
-            hip_B_r_base + delayed_action[5] * HIP_STROKE,
-        ])
-
-        # 舵机死区: 当目标与当前实际位置偏差小于 deadband 时，设置目标等于当前位置，输出 0 驱动力矩
-        actual_hips = jp.stack([
-            data.qpos[QPOS_HIP_A_L],
-            data.qpos[QPOS_HIP_A_R],
-            data.qpos[QPOS_HIP_B_L],
-            data.qpos[QPOS_HIP_B_R]
-        ])
-        hip_error = hip_goal - actual_hips
-        hip_goal = jp.where(jp.abs(hip_error) < env_state.deadband, actual_hips, hip_goal)
-
-        # 组装 ctrl (用随机化后的 model; nu=6: tau_l, tau_r, q_hip_A_l/r, q_hip_B_l/r)
-        ctrl = jp.zeros(model.nu)
-        ctrl = ctrl.at[ACT_TAU_L].set(tau_wheel_l)
-        ctrl = ctrl.at[ACT_TAU_R].set(tau_wheel_r)
-        ctrl = ctrl.at[ACT_HIP_A_L].set(hip_goal[0])
-        ctrl = ctrl.at[ACT_HIP_A_R].set(hip_goal[1])
-        ctrl = ctrl.at[ACT_HIP_B_L].set(hip_goal[2])
-        ctrl = ctrl.at[ACT_HIP_B_R].set(hip_goal[3])
-        data = data.replace(ctrl=ctrl)
-
-        # ---- 瞬时推力扰动 (velocity kick) 注入 ----
+        # ---- 瞬时推力扰动 (velocity kick) 注入（须在物理步进前设置 xfrc）----
         # 每 200 步 (4 秒) 重采样一个推力方向与强度 (最大 15N)
         rng, push_rng = jax.random.split(env_state.rng)
         is_push_resample = (env_state.step_count % 200 == 0)
@@ -885,21 +932,57 @@ class KuafuMjxEnv(MjxEnv):
             jp.float32(0.0)
         ])
         push_force = jp.where(is_push_resample, new_push_force, env_state.push_force)
-
         # 仅在每个 4s 周期的前 5 步（100ms）施加推力，且在刚 reset 的前几步不施加
         is_push_active = ((env_state.step_count % 200) < 5) & (env_state.step_count > 5)
-        active_push = jp.where(is_push_active, push_force * env_state.difficulty, 0.0)
-
+        active_push = jp.where(is_push_active, push_force * env_state.difficulty[DIFF_PUSH], 0.0)
         # 注入推力到 chassis 质心 (xfrc_applied)
         xfrc_applied = data.xfrc_applied
         xfrc_applied = xfrc_applied.at[self._chassis_body_id, :3].set(active_push)
         data = data.replace(xfrc_applied=xfrc_applied)
 
-        # ---- 物理步进 (10 子步) ----
-        # 2-DOF 五杆: 闭链靠 <connect site1/site2> 物理铰接维持 (硬 solver),
-        # 训练/eval/真机三者一致。
-        for _ in range(N_SUBSTEPS):
-            data = mjx.step(model, data)
+        # ---- 腿目标（每 RL 步一次）：D0 对称 + roll 调平 + RL 残差 ----
+        hip_goal = self._leg_goals(data, env_state, delayed_action, env_state.d0_cmd)
+        actual_hips = jp.stack([
+            data.qpos[QPOS_HIP_A_L], data.qpos[QPOS_HIP_A_R],
+            data.qpos[QPOS_HIP_B_L], data.qpos[QPOS_HIP_B_R]])
+        hip_error = hip_goal - actual_hips
+        hip_goal = jp.where(jp.abs(hip_error) < env_state.deadband, actual_hips, hip_goal)
+
+        # ---- 多速率基层控制：5 base 步(4ms) × 2 物理子步(2ms) = 10 物理子步 ----
+        # 物理 500Hz / 基层 250Hz / RL 残差 50Hz。RL 残差(delayed_action) 跨 5 base 步保持。
+        # 2-DOF 五杆: 闭链靠 <connect site1/site2> 物理铰接维持 (硬 solver)。
+        x_ref = env_state.x_ref
+        x_int = env_state.x_int
+        yaw_ref = env_state.yaw_ref
+        v_ref = env_state.v_ref
+        v_accel = env_state.v_accel
+        w_ref = env_state.w_ref
+        w_accel = env_state.w_accel
+        for _ in range(BASE_STEPS_PER_RL):
+            # Jerk-limited velocity/yaw references; as command reaches zero the
+            # integrated position and heading references freeze for hold control.
+            v_target_acc = jp.clip((env_state.v_cmd - v_ref) / BASE_DT, -2.0, 2.0)
+            v_accel = jp.clip(v_accel + jp.clip(v_target_acc - v_accel, -8.0 * BASE_DT, 8.0 * BASE_DT), -2.0, 2.0)
+            v_ref = v_ref + v_accel * BASE_DT
+            w_target_acc = jp.clip((env_state.w_cmd - w_ref) / BASE_DT, -4.0, 4.0)
+            w_accel = jp.clip(w_accel + jp.clip(w_target_acc - w_accel, -16.0 * BASE_DT, 16.0 * BASE_DT), -4.0, 4.0)
+            w_ref = w_ref + w_accel * BASE_DT
+            x_ref = x_ref + v_ref * BASE_DT
+            yaw_ref = yaw_ref + w_ref * BASE_DT
+            x_int = jp.clip(x_int + (data.qpos[0] - x_ref) * BASE_DT, -0.25, 0.25)
+            tau_wheel_l, tau_wheel_r = self._wheel_torque(
+                data, x_ref, x_int, yaw_ref, v_ref, w_ref,
+                delayed_action, env_state.torque_scale)
+            ctrl = jp.zeros(model.nu)
+            ctrl = ctrl.at[ACT_TAU_L].set(tau_wheel_l)
+            ctrl = ctrl.at[ACT_TAU_R].set(tau_wheel_r)
+            ctrl = ctrl.at[ACT_HIP_A_L].set(hip_goal[0])
+            ctrl = ctrl.at[ACT_HIP_A_R].set(hip_goal[1])
+            ctrl = ctrl.at[ACT_HIP_B_L].set(hip_goal[2])
+            ctrl = ctrl.at[ACT_HIP_B_R].set(hip_goal[3])
+            data = data.replace(ctrl=ctrl)
+            for _ in range(PHYS_SUBSTEPS_PER_BASE):
+                data = mjx.step(model, data)
 
         # ---- 更新状态 ----
         rng, resample_rng = jax.random.split(rng)
@@ -910,7 +993,7 @@ class KuafuMjxEnv(MjxEnv):
         w_cmd = jp.where(need_resample, new_w, env_state.w_cmd)
         d0_cmd = jp.where(need_resample, new_d0, env_state.d0_cmd)
 
-        # ---- reward / done / obs (用旧 env_state, 因 reward 需要 prev_action) ----
+        # ---- reward / done / obs (用旧命令状态；重采样命令从下一控制步才生效) ----
         raw_reward = self._compute_reward(data, env_state, action)
         fallen = self._is_fallen(data)
 
@@ -922,6 +1005,18 @@ class KuafuMjxEnv(MjxEnv):
         # reward × CTRL_DT (Go1/T1 标准: 每项 ×scale 后乘 dt, 保持 PPO value 尺度一致)
         # 软终止期间: alive=0 + fall_penalty=-1 双重抑制 (靠 episode 结束截断后续 reward)
         reward = raw_reward * CTRL_DT
+
+        # Episode tracking aggregates use the command that controlled this step.
+        q_metric = jp.stack([data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]])
+        metric_lin_vel = rotate_vector_by_quaternion_conj(q_metric, data.qvel[0:3])[0]
+        metric_ang_vel = rotate_vector_by_quaternion_conj(q_metric, data.qvel[3:6])
+        metric_d0 = (
+            self._d0_from_hips(data.qpos[QPOS_HIP_A_L], data.qpos[QPOS_HIP_B_L])
+            + self._d0_from_hips(data.qpos[QPOS_HIP_A_R], data.qpos[QPOS_HIP_B_R])
+        ) / 2.0
+        nonzero_command = ((jp.abs(env_state.v_cmd) > 0.05)
+                           | (jp.abs(env_state.w_cmd) > 0.10)
+                           | (jp.abs(env_state.d0_cmd - P.D0_MIN) > 5.0))
 
         # 更新 env_state (reward 算完后再更新 prev_action)
         env_state = env_state.replace(
@@ -936,6 +1031,18 @@ class KuafuMjxEnv(MjxEnv):
             fall_count=new_fall_count,
             push_force=push_force,
             active_push=active_push,
+            x_ref=x_ref,
+            x_int=x_int,
+            yaw_ref=yaw_ref,
+            v_ref=v_ref,
+            v_accel=v_accel,
+            w_ref=w_ref,
+            w_accel=w_accel,
+            track_v_abs_sum=env_state.track_v_abs_sum + jp.abs(metric_lin_vel - env_state.v_cmd),
+            track_w_abs_sum=env_state.track_w_abs_sum + jp.abs(metric_ang_vel[2] - env_state.w_cmd),
+            track_d0_abs_sum=env_state.track_d0_abs_sum + jp.abs(metric_d0 - env_state.d0_cmd),
+            track_count=env_state.track_count + 1,
+            nonzero_command_count=env_state.nonzero_command_count + nonzero_command.astype(jp.int32),
         )
 
         # 更新 obs history (append 当前帧, 丢弃最老帧)
@@ -956,19 +1063,36 @@ class KuafuMjxEnv(MjxEnv):
         # lin_vel_tracking / orientation 实际值 (供 metric 记录)
         q = jp.stack([data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]])
         lin_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
+        ang_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
         xdot = lin_vel_local[0]
-        lin_vel_track_val = jp.exp(-((xdot - v_cmd) ** 2) / 0.25)
+        lin_vel_track_val = jp.exp(-((xdot - metric_v_cmd) ** 2) / 0.15)
         grav_local = rotate_vector_by_quaternion_conj(q, jp.array([0.0, 0.0, -1.0]))
         orient_val = jp.exp(-ORIENT_ALPHA * jp.sum(grav_local[:2] ** 2))
 
         obs = self._observation(data, env_state)
         # terminated_by_fall: done 且因连续倒下触发 (供 train.py time_outs 区分 timeout vs fall)
         terminated_by_fall = (new_fall_count >= FALL_GRACE_STEPS).astype(jp.float32)
+        lin_vel_err = (xdot - metric_v_cmd) ** 2
+        yaw_rate = ang_vel_local[2]
+        yaw_err = (yaw_rate - metric_w_cmd) ** 2
+        # d0_err 的单位为 mm²；课程阈值必须相应使用 5²，而不是米制 0.05²。
+        avg_d0_m = (
+            self._d0_from_hips(data.qpos[QPOS_HIP_A_L], data.qpos[QPOS_HIP_B_L])
+            + self._d0_from_hips(data.qpos[QPOS_HIP_A_R], data.qpos[QPOS_HIP_B_R])
+        ) / 2.0
+        d0_err = (avg_d0_m - metric_d0_cmd) ** 2
+        resid_norm = jp.sum(action ** 2)
         metrics = {
             "orientation": orient_val,
             "lin_vel_tracking": lin_vel_track_val,
+            "lin_vel_err": lin_vel_err,
+            "yaw_err": yaw_err,
+            "d0_err": d0_err,
             "fallen": terminated_by_fall,  # done 帧的终止原因 (1=摔倒终止, 0=超时)
-            "difficulty": env_state.difficulty,
+            "difficulty": jp.mean(env_state.difficulty),
+            "v_cmd": metric_v_cmd,
+            "w_cmd": metric_w_cmd,
+            "resid_norm": resid_norm,
         }
         info = {"env_state": env_state, "model": model}
         return state.replace(

@@ -1,5 +1,7 @@
 # 夸父 KUAFU — 自主导航与 SLAM 选型设计
 
+> **历史规划文档**：本文保留自主导航选型记录；当前部署、协议和训练契约以 `../contracts/interface.md`、`../operations/deployment.md` 和 `../validation/acceptance.md` 为准。
+
 > **文档版本**: v1.0 / 2026-07-09
 > **关联**: 《[KUAFU](../KUAFU.md)》、[《软件架构与 RL 技术路线》](./2026-07-08-软件架构与RL技术路线-design.md)。硬件规格、分层架构、RL 策略、通信链路以这两份为准；本文聚焦自主侧的定位 / SLAM / 规划选型，以及与已建成的遥控接口（`rl/teleop/`）如何衔接。
 > **核实日期**: 2026-07。

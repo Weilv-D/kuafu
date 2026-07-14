@@ -16,6 +16,7 @@ UART_HandleTypeDef huart1; /* CH340 Debug/Program */
 UART_HandleTypeDef huart2; /* DDSM RS485 */
 UART_HandleTypeDef huart3; /* ST3215 Half-Duplex Servo */
 UART_HandleTypeDef huart6; /* Pi 5 Bridge */
+IWDG_HandleTypeDef hiwdg;
 DMA_HandleTypeDef hdma_usart6_rx;
 
 /* Real-Time Telemetry and State variables */
@@ -32,9 +33,10 @@ ST3215_State_t g_servos[4];
 static const int8_t  g_servo_dir[4]    = SERVO_DIR_INIT;    /* [LF, RF, LB, RB] */
 static const int16_t g_servo_center[4] = SERVO_CENTER_INIT; /* [LF, RF, LB, RB] */
 
-/* Wheel torque commands computed once per 250 Hz cycle (slot 0), sent in slots 0/1 */
+/* Wheel torque commands computed and sent together at each 250 Hz deadline. */
 static float g_ctrl_tau_l = 0.0f;
 static float g_ctrl_tau_r = 0.0f;
+static volatile float g_body_gyro[3] = {0.0f, 0.0f, 0.0f};
 
 /* Max consecutive servo failures before a fatal FAULT lockdown */
 #define SERVO_FAIL_LIMIT         3
@@ -52,6 +54,7 @@ static void MX_USART2_UART_Init(void);
 static void MX_USART3_HalfDuplex_Init(void);
 static void MX_USART6_UART_Init(void);
 static void MX_DMA_Init(void);
+static void MX_IWDG_Init(void);
 static void System_Initial_Setup(void);
 static void Pi_Command_Snapshot(Pi_Command_Heartbeat_t *hb, Pi_Command_Action_t *act);
 static int16_t Servo_Angle_To_Ticks(float angle_rad, int idx);
@@ -73,6 +76,7 @@ int main(void) {
     MX_USART2_UART_Init();
     MX_USART3_HalfDuplex_Init();
     MX_USART6_UART_Init();
+    MX_IWDG_Init();
 
     /* Initialize drivers, CRC tables and control states */
     crc8_init();
@@ -97,6 +101,8 @@ int main(void) {
     System_Initial_Setup();
 
     uint32_t last_tick = 0;
+    uint32_t last_left_tick = 0;
+    uint32_t last_right_tick = 1;
     uint32_t last_servo_loop_time = 0;
     uint8_t active_servo_query_idx = 0;
     uint32_t temp_refresh_counter = 0;
@@ -109,6 +115,7 @@ int main(void) {
             uint32_t dticks = g_system_ticks - last_tick;
             last_tick = g_system_ticks;
             float fusion_dt = (float)dticks * 0.001f;
+            HAL_IWDG_Refresh(&hiwdg);
 
             /* 1. Read IMU sensors (safe to do here in the main loop background) */
             bmi088_read_accel(&g_imu);
@@ -136,6 +143,9 @@ int main(void) {
             } else {
                 safety_state_gyro_calib_update(gx, gy, gz);
             }
+            g_body_gyro[0] = gx;
+            g_body_gyro[1] = gy;
+            g_body_gyro[2] = gz;
 
             /* Balance-relevant tilt & rate mapped to the physical IMU mounting.
              * Pitch rate uses the bias-corrected gyro (offset is 0 until calibrated). */
@@ -143,11 +153,14 @@ int main(void) {
             float body_pitch_rate = ATT_PITCH_RATE_SIGN *
                 (g_imu.gyro[ATT_PITCH_RATE_IDX] - g_safety_state.gyro_calib_offset[ATT_PITCH_RATE_IDX]);
 
-            /* 3. Run the Slot scheduler (250Hz DDSM Motor & Pi Link) */
+            /* 3. Run the 250 Hz motor deadline and lower-rate telemetry slots. */
             uint8_t slot = last_tick % 4;
+            uint8_t control_due = (uint32_t)(last_tick - last_left_tick) >= 4u;
+            uint8_t right_due = (uint32_t)(last_tick - last_right_tick) >= 4u;
 
             /* Safety state machine update (at 250 Hz, inside slot scheduler) */
-            if (slot == 3) {
+            if (control_due) {
+                last_left_tick = last_tick;
                 float max_temp = g_imu.temperature;
                 for (int i = 0; i < 4; i++) {
                     if (g_servos[i].temperature_c > max_temp) {
@@ -158,31 +171,42 @@ int main(void) {
             }
 
             /* --- Slot 0: Compute LQR (once/cycle), command & poll Left DDSM --- */
-            if (slot == 0) {
+            if (control_due) {
                 if (g_safety_state.current_mode != STATE_FAULT && g_safety_state.current_mode != STATE_INIT) {
                     /* Snapshot Pi commands atomically (updated in USART6 ISR) */
                     Pi_Command_Heartbeat_t hb;
                     Pi_Command_Action_t act;
                     Pi_Command_Snapshot(&hb, &act);
-                    (void)hb;
-
                     /* Average wheel velocity in body frame -> forward speed ẋ.
-                     * yaw rate (gz) drives the conditional damping term. */
-                    float wheel_vel_avg =
-                        (WHEEL_DIR_L * g_ddsm_left.velocity_rads +
-                         WHEEL_DIR_R * g_ddsm_right.velocity_rads) * 0.5f;
+                     * All command and residual fields now use the shared P0 contract. */
+                    float wheel_vel_l = WHEEL_DIR_L * g_ddsm_left.velocity_rads;
+                    float wheel_vel_r = WHEEL_DIR_R * g_ddsm_right.velocity_rads;
                     float yaw_rate = gz;
+                    if (!pi_link_is_compatible() || !pi_link_heartbeat_fresh()) {
+                        /* Enter a fresh local hold reference immediately; do not
+                         * jerk-limit a stale command back to zero from its old
+                         * moving reference. */
+                        lqr_reset(&g_lqr, g_lqr.x_est, g_mahony.yaw);
+                    }
 
                     /* Run LQR once per 250 Hz cycle; cache both wheel commands. */
                     lqr_update(&g_lqr,
                                body_pitch,
-                               body_pitch_rate,
-                               wheel_vel_avg,
-                               yaw_rate,
-                               act.delta_torque_l,
-                               act.delta_torque_r,
-                               &g_ctrl_tau_l,
-                               &g_ctrl_tau_r);
+                                body_pitch_rate,
+                                wheel_vel_l,
+                                wheel_vel_r,
+                                g_mahony.yaw,
+                                yaw_rate,
+                                hb.target_velocity,
+                                hb.target_yaw_rate,
+                                (g_safety_state.current_mode == STATE_ACTIVE &&
+                                 pi_link_is_compatible() && pi_link_heartbeat_fresh() && pi_link_action_fresh())
+                                    ? act.delta_torque_common : 0.0f,
+                                (g_safety_state.current_mode == STATE_ACTIVE &&
+                                 pi_link_is_compatible() && pi_link_heartbeat_fresh() && pi_link_action_fresh())
+                                    ? act.delta_torque_yaw : 0.0f,
+                                &g_ctrl_tau_l,
+                                &g_ctrl_tau_r);
 
                     ddsm_set_torque(&huart2, DDSM_LEFT_ID, WHEEL_DIR_L * g_ctrl_tau_l);
                 } else {
@@ -199,10 +223,14 @@ int main(void) {
                 if (HAL_UART_Receive(&huart2, rx_buf, 10, 2) == HAL_OK) {
                     ddsm_parse_feedback(rx_buf, &g_ddsm_left);
                 }
+
             }
 
-            /* --- Slot 1: Command & Poll Right DDSM Motor (uses cached torque) --- */
-            else if (slot == 1) {
+            /* The right motor has an independent staggered deadline. This keeps
+             * the two blocking half-duplex transactions from routinely sharing
+             * one 4 ms control slot. */
+            if (right_due) {
+                last_right_tick = last_tick;
                 if (g_safety_state.current_mode != STATE_FAULT && g_safety_state.current_mode != STATE_INIT) {
                     ddsm_set_torque(&huart2, DDSM_RIGHT_ID, WHEEL_DIR_R * g_ctrl_tau_r);
                 } else {
@@ -212,21 +240,21 @@ int main(void) {
                 /* Discard RS485 self-echo, then block-read Right feedback (10 bytes) */
                 __HAL_UART_CLEAR_OREFLAG(&huart2);
                 __HAL_UART_FLUSH_DRREGISTER(&huart2);
-                uint8_t rx_buf[10];
-                if (HAL_UART_Receive(&huart2, rx_buf, 10, 2) == HAL_OK) {
-                    ddsm_parse_feedback(rx_buf, &g_ddsm_right);
+                uint8_t right_rx_buf[10];
+                if (HAL_UART_Receive(&huart2, right_rx_buf, 10, 2) == HAL_OK) {
+                    ddsm_parse_feedback(right_rx_buf, &g_ddsm_right);
                 }
             }
 
             /* --- Slot 2: Queue telemetry data to Raspberry Pi 5 --- */
-            else if (slot == 2) {
+            if (slot == 2) {
                 pi_link_send_imu(&huart6, 
                                  g_mahony.roll, 
                                  g_mahony.pitch, 
                                  g_mahony.yaw, 
-                                 g_imu.gyro[0], 
-                                 g_imu.gyro[1], 
-                                 g_imu.gyro[2]);
+                                  g_body_gyro[0],
+                                  g_body_gyro[1],
+                                  g_body_gyro[2]);
 
                 /* Report joint feedback in the shared sim/body frame so it is
                  * symmetric with the command contract (mirror + zero applied). */
@@ -266,22 +294,38 @@ int main(void) {
             uint8_t ids[4] = {SERVO_LF_ID, SERVO_RF_ID, SERVO_LB_ID, SERVO_RB_ID};
 
             if (g_safety_state.current_mode == STATE_ACTIVE) {
-                /* Target hip angles received directly from Pi RL agent.
-                 * Order matches sim: target_q = [LF, RF, LB, RB]. */
+                /* Pi supplies bounded workspace residuals.  Project them through
+                 * the same dwell-relative (Qx,D0) five-bar IK as the simulator. */
                 Pi_Command_Heartbeat_t hb;
                 Pi_Command_Action_t act;
                 Pi_Command_Snapshot(&hb, &act);
-                (void)hb;
-
                 int16_t pos_ticks[4];
                 uint16_t speed_ticks[4] = {2000, 2000, 2000, 2000};
                 uint8_t accels[4] = {50, 50, 50, 50};
-
-                for (int i = 0; i < 4; i++) {
-                    pos_ticks[i] = Servo_Angle_To_Ticks(act.target_q[i], i);
+                float action_scale = (pi_link_is_compatible() && pi_link_heartbeat_fresh() &&
+                                      pi_link_action_fresh()) ? 1.0f : 0.0f;
+                float d0_max = (fabsf(hb.target_velocity) > D0_GATE_V_THRESH ||
+                                fabsf(hb.target_yaw_rate) > D0_GATE_W_THRESH)
+                                   ? D0_GATE_MAX_HIGH * 0.001f : KIN_MAX_LEG_D0;
+                float roll_term_mm = -(KUAFU_ROLL_KP * g_mahony.roll +
+                                       KUAFU_ROLL_KD * g_body_gyro[0]);
+                float d0_l = hb.target_leg_d0 + 0.001f * roll_term_mm / 2.0f +
+                             0.001f * D0_RESIDUAL_SCALE_MM * action_scale * act.d0_l;
+                float d0_r = hb.target_leg_d0 - 0.001f * roll_term_mm / 2.0f +
+                             0.001f * D0_RESIDUAL_SCALE_MM * action_scale * act.d0_r;
+                if (d0_l < KIN_MIN_LEG_D0) d0_l = KIN_MIN_LEG_D0;
+                if (d0_l > d0_max) d0_l = d0_max;
+                if (d0_r < KIN_MIN_LEG_D0) d0_r = KIN_MIN_LEG_D0;
+                if (d0_r > d0_max) d0_r = d0_max;
+                float qA_l, qB_l, qA_r, qB_r;
+                if (kinematics_solve_ik_xy(QX_RESIDUAL_SCALE_MM * 0.001f * action_scale * act.qx_l, d0_l, &qA_l, &qB_l) == 0 &&
+                    kinematics_solve_ik_xy(QX_RESIDUAL_SCALE_MM * 0.001f * action_scale * act.qx_r, d0_r, &qA_r, &qB_r) == 0) {
+                    pos_ticks[0] = Servo_Angle_To_Ticks(qA_l, 0);
+                    pos_ticks[1] = Servo_Angle_To_Ticks(qA_r, 1);
+                    pos_ticks[2] = Servo_Angle_To_Ticks(qB_l, 2);
+                    pos_ticks[3] = Servo_Angle_To_Ticks(qB_r, 3);
+                    st3215_sync_write_pos(&huart3, ids, 4, pos_ticks, speed_ticks, accels);
                 }
-
-                st3215_sync_write_pos(&huart3, ids, 4, pos_ticks, speed_ticks, accels);
             }
             else if (g_safety_state.current_mode == STATE_STAND || g_safety_state.current_mode == STATE_CLIMB) {
                 /* Standing/Climbing virtual height mode */
@@ -461,6 +505,15 @@ static void MX_DMA_Init(void) {
     HAL_NVIC_EnableIRQ(DMA2_Stream1_IRQn);
 }
 
+static void MX_IWDG_Init(void) {
+    hiwdg.Instance = IWDG;
+    hiwdg.Init.Prescaler = IWDG_PRESCALER_64;
+    hiwdg.Init.Reload = 4095;
+    if (HAL_IWDG_Init(&hiwdg) != HAL_OK) {
+        Error_Handler();
+    }
+}
+
 static void MX_I2C1_Init(void) {
     hi2c1.Instance = I2C1;
     hi2c1.Init.ClockSpeed = 400000; /* 400 kHz Fast Mode */
@@ -599,7 +652,10 @@ static void MX_USART6_UART_Init(void) {
     hdma_usart6_rx.Init.MemInc = DMA_MINC_ENABLE;
     hdma_usart6_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
     hdma_usart6_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
-    hdma_usart6_rx.Init.Mode = DMA_CIRCULAR;
+    /* Normal mode is restarted after each IDLE chunk; this makes the NDTR
+     * length calculation lossless instead of pretending a circular buffer starts
+     * at offset zero after every interrupt. */
+    hdma_usart6_rx.Init.Mode = DMA_NORMAL;
     hdma_usart6_rx.Init.Priority = DMA_PRIORITY_HIGH;
     hdma_usart6_rx.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
     if (HAL_DMA_Init(&hdma_usart6_rx) != HAL_OK) {

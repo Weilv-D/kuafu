@@ -1,145 +1,205 @@
 #include "pi_link.h"
 #include "crc8.h"
+#include "kuafu_generated.h"
+#include "pin_config.h"
 #include <string.h>
+#include <math.h>
 
 Pi_Command_Heartbeat_t g_pi_cmd_heartbeat;
 Pi_Command_Action_t g_pi_cmd_action;
 
-static uint8_t tx_sequence = 0;
+static uint16_t tx_sequence = 0;
+static uint16_t last_rx_sequence = 0;
+static uint8_t have_rx_sequence = 0;
+static uint8_t link_compatible = 0;
+static uint8_t rx_stream[2 * PI_MAX_PAYLOAD];
+static uint16_t rx_stream_len = 0;
+
+static int16_t read_i16_be(const uint8_t *bytes) {
+    return (int16_t)(((uint16_t)bytes[0] << 8) | bytes[1]);
+}
+
+static void write_i16_be(uint8_t *bytes, int16_t value) {
+    bytes[0] = (uint8_t)((value >> 8) & 0xff);
+    bytes[1] = (uint8_t)(value & 0xff);
+}
+
+static int16_t quantize_i16(float value, float scale) {
+    float scaled = value * scale;
+    if (scaled > 32767.0f) return 32767;
+    if (scaled < -32768.0f) return -32768;
+    return (int16_t)scaled;
+}
+
+static uint8_t sequence_is_new(uint16_t sequence) {
+    uint16_t delta = (uint16_t)(sequence - last_rx_sequence);
+    return !have_rx_sequence || (delta != 0u && delta < 0x8000u);
+}
 
 void pi_link_init(void) {
     memset(&g_pi_cmd_heartbeat, 0, sizeof(g_pi_cmd_heartbeat));
     memset(&g_pi_cmd_action, 0, sizeof(g_pi_cmd_action));
-    /* Initialize leg length target to standard dwell pose (58mm = 0.058m) */
-    g_pi_cmd_heartbeat.target_leg_d0 = 0.058f; 
+    g_pi_cmd_heartbeat.target_leg_d0 = 0.058f;
+    tx_sequence = 0;
+    have_rx_sequence = 0;
+    link_compatible = 0;
+    rx_stream_len = 0;
 }
 
-int pi_link_parse_packet(const uint8_t *buf, uint16_t len) {
-    if (len < 7) {
-        return 0; /* Too short to be a valid frame */
-    }
+void pi_link_clear_action(void) {
+    __disable_irq();
+    memset(&g_pi_cmd_action, 0, sizeof(g_pi_cmd_action));
+    __enable_irq();
+}
 
-    int parsed_count = 0;
-    uint16_t i = 0;
+void pi_link_enter_hold(void) {
+    __disable_irq();
+    memset(&g_pi_cmd_action, 0, sizeof(g_pi_cmd_action));
+    g_pi_cmd_heartbeat.target_velocity = 0.0f;
+    g_pi_cmd_heartbeat.target_yaw_rate = 0.0f;
+    __enable_irq();
+}
 
-    /* Scan buffer for frame start */
-    while (i <= len - 7) {
-        if (buf[i] == PI_FRAME_HEADER) {
-            uint8_t cmd = buf[i + 1];
-            uint8_t seq = buf[i + 2];
-            uint16_t payload_len = 0;
+uint8_t pi_link_is_compatible(void) { return link_compatible; }
 
-            if (cmd == PI_CMD_HEARTBEAT) {
-                payload_len = 7;
-            } else if (cmd == PI_CMD_ACTION) {
-                payload_len = 12;
-            } else {
-                /* Unknown command, skip this header byte and look for next one */
-                i++;
-                continue;
-            }
+uint8_t pi_link_heartbeat_fresh(void) {
+    return g_pi_cmd_heartbeat.last_heartbeat_ms > 0 &&
+           HAL_GetTick() - g_pi_cmd_heartbeat.last_heartbeat_ms <= SAFETY_HEARTBEAT_MS;
+}
 
-            /* Check if we have received the full frame in the buffer */
-            if (i + 3 + payload_len + 2 > len) {
-                /* Full packet not here yet, wait for more data */
-                break;
-            }
+uint8_t pi_link_action_fresh(void) {
+    return g_pi_cmd_action.last_action_ms > 0 &&
+           HAL_GetTick() - g_pi_cmd_action.last_action_ms <= SAFETY_ACTION_MS;
+}
 
-            const uint8_t *payload = &buf[i + 3];
-            uint8_t rx_crc = buf[i + 3 + payload_len];
-            uint8_t rx_footer = buf[i + 3 + payload_len + 1];
-
-            /* Validate footer */
-            if (rx_footer != PI_FRAME_FOOTER) {
-                i++;
-                continue;
-            }
-
-            /* Validate CRC-8 (covers CMD, SEQ, and Payload) */
-            uint8_t calculated_crc = crc8_calculate(&buf[i + 1], 2 + payload_len);
-            if (calculated_crc != rx_crc) {
-                i++;
-                continue; /* CRC mismatch */
-            }
-
-            /* Successfully verified packet. Parse payload. */
-            if (cmd == PI_CMD_HEARTBEAT) {
-                g_pi_cmd_heartbeat.mode_request = payload[0];
-
-                int16_t raw_v = (int16_t)(((uint16_t)payload[1] << 8) | payload[2]);
-                g_pi_cmd_heartbeat.target_velocity = (float)raw_v / 1000.0f;
-
-                int16_t raw_w = (int16_t)(((uint16_t)payload[3] << 8) | payload[4]);
-                g_pi_cmd_heartbeat.target_yaw_rate = (float)raw_w / 1000.0f;
-
-                int16_t raw_d0 = (int16_t)(((uint16_t)payload[5] << 8) | payload[6]);
-                g_pi_cmd_heartbeat.target_leg_d0 = (float)raw_d0 / 1000.0f;
-
-                g_pi_cmd_heartbeat.last_heartbeat_ms = HAL_GetTick();
-                (void)seq; /* Unused */
-
-            } else if (cmd == PI_CMD_ACTION) {
-                int16_t raw_tau_l = (int16_t)(((uint16_t)payload[0] << 8) | payload[1]);
-                g_pi_cmd_action.delta_torque_l = (float)raw_tau_l / 10000.0f;
-
-                int16_t raw_tau_r = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
-                g_pi_cmd_action.delta_torque_r = (float)raw_tau_r / 10000.0f;
-
-                for (int j = 0; j < 4; j++) {
-                    int16_t raw_q = (int16_t)(((uint16_t)payload[4 + j * 2] << 8) | payload[5 + j * 2]);
-                    g_pi_cmd_action.target_q[j] = (float)raw_q / 10000.0f;
-                }
-
-                g_pi_cmd_action.last_action_ms = HAL_GetTick();
-            }
-
-            parsed_count++;
-            i += 3 + payload_len + 2; /* Move past parsed frame */
-        } else {
-            i++;
+static int parse_payload(uint8_t type, const uint8_t *payload, uint8_t payload_len) {
+    if (type == PI_CMD_HELLO) {
+        if (payload_len != 16 || memcmp(payload, KUAFU_MODEL_HASH, 16) != 0) {
+            link_compatible = 0;
+            return 0;
         }
+        memset(&g_pi_cmd_heartbeat, 0, sizeof(g_pi_cmd_heartbeat));
+        memset(&g_pi_cmd_action, 0, sizeof(g_pi_cmd_action));
+        g_pi_cmd_heartbeat.target_leg_d0 = D0_MIN_MM * 0.001f;
+        link_compatible = 1;
+        return 1;
     }
-
-    return parsed_count;
-}
-
-static int pi_link_transmit(UART_HandleTypeDef *huart, uint8_t cmd, const uint8_t *payload, uint16_t payload_len) {
-    uint8_t tx_buf[64];
-    tx_buf[0] = PI_FRAME_HEADER;
-    tx_buf[1] = cmd;
-    tx_buf[2] = tx_sequence++;
-    
-    if (payload_len > 0 && payload != NULL) {
-        memcpy(&tx_buf[3], payload, payload_len);
+    if (type == PI_CMD_HEARTBEAT) {
+        if (!link_compatible) return 0;
+        if (payload_len != 7) return 0;
+        int16_t raw_v = read_i16_be(&payload[1]);
+        int16_t raw_w = read_i16_be(&payload[3]);
+        int16_t raw_d0 = read_i16_be(&payload[5]);
+        float vx = (float)raw_v / 1000.0f;
+        float wz = (float)raw_w / 1000.0f;
+        float d0_mm = (float)raw_d0;
+        float d0_max = (fabsf(vx) > D0_GATE_V_THRESH || fabsf(wz) > D0_GATE_W_THRESH)
+                           ? D0_GATE_MAX_HIGH : D0_MAX_MM;
+        if (payload[0] > 4 || vx < -0.5f || vx > 0.5f || wz < -1.0f || wz > 1.0f ||
+            d0_mm < D0_MIN_MM || d0_mm > d0_max) return 0;
+        g_pi_cmd_heartbeat.mode_request = payload[0];
+        g_pi_cmd_heartbeat.target_velocity = vx;
+        g_pi_cmd_heartbeat.target_yaw_rate = wz;
+        g_pi_cmd_heartbeat.target_leg_d0 = d0_mm / 1000.0f;
+        g_pi_cmd_heartbeat.last_heartbeat_ms = HAL_GetTick();
+        return 1;
     }
-    
-    uint8_t crc = crc8_calculate(&tx_buf[1], 2 + payload_len);
-    tx_buf[3 + payload_len] = crc;
-    tx_buf[3 + payload_len + 1] = PI_FRAME_FOOTER;
-
-    if (HAL_UART_Transmit(huart, tx_buf, 5 + payload_len, 20) != HAL_OK) {
-        return -1;
+    if (type == PI_CMD_ACTION) {
+        if (!link_compatible) return 0;
+        if (payload_len != 12) return 0;
+        int16_t action[6];
+        for (int i = 0; i < 6; ++i) action[i] = read_i16_be(&payload[2 * i]);
+        for (int i = 0; i < 6; ++i) {
+            if (action[i] < -10000 || action[i] > 10000) return 0;
+        }
+        g_pi_cmd_action.delta_torque_common = (float)action[0] / 10000.0f;
+        g_pi_cmd_action.delta_torque_yaw = (float)action[1] / 10000.0f;
+        g_pi_cmd_action.qx_l = (float)action[2] / 10000.0f;
+        g_pi_cmd_action.d0_l = (float)action[3] / 10000.0f;
+        g_pi_cmd_action.qx_r = (float)action[4] / 10000.0f;
+        g_pi_cmd_action.d0_r = (float)action[5] / 10000.0f;
+        g_pi_cmd_action.last_action_ms = HAL_GetTick();
+        return 1;
     }
     return 0;
 }
 
-int pi_link_send_imu(UART_HandleTypeDef *huart, float roll, float pitch, float yaw, float gx, float gy, float gz) {
-    uint8_t payload[12];
-    int16_t values[6];
-
-    values[0] = (int16_t)(roll * 10000.0f);
-    values[1] = (int16_t)(pitch * 10000.0f);
-    values[2] = (int16_t)(yaw * 10000.0f);
-    values[3] = (int16_t)(gx * 10000.0f);
-    values[4] = (int16_t)(gy * 10000.0f);
-    values[5] = (int16_t)(gz * 10000.0f);
-
-    for (int i = 0; i < 6; i++) {
-        payload[i * 2]     = (uint8_t)((values[i] >> 8) & 0xFF);
-        payload[i * 2 + 1] = (uint8_t)(values[i] & 0xFF);
+int pi_link_parse_packet(const uint8_t *buf, uint16_t len) {
+    if (len == 0) return 0;
+    if (len > sizeof(rx_stream) - rx_stream_len) {
+        rx_stream_len = 0;  /* Lost framing: resynchronize at the next header. */
+        if (len > sizeof(rx_stream)) return 0;
     }
+    memcpy(&rx_stream[rx_stream_len], buf, len);
+    rx_stream_len += len;
 
-    return pi_link_transmit(huart, PI_CMD_TELEMETRY_IMU, payload, 12);
+    int parsed = 0;
+    uint16_t offset = 0;
+    while (rx_stream_len - offset >= 12u) {
+        if (rx_stream[offset] != PI_FRAME_HEADER) {
+            ++offset;
+            continue;
+        }
+        uint8_t version = rx_stream[offset + 1];
+        uint8_t type = rx_stream[offset + 2];
+        uint8_t payload_len = rx_stream[offset + 3];
+        uint16_t frame_len = (uint16_t)(12u + payload_len);
+        if (version != PI_PROTOCOL_VERSION || payload_len > PI_MAX_PAYLOAD) {
+            ++offset;
+            continue;
+        }
+        if (rx_stream_len - offset < frame_len) break;  /* Retain fragment. */
+        if (rx_stream[offset + frame_len - 1] != PI_FRAME_FOOTER ||
+            crc8_calculate(&rx_stream[offset + 1], (uint16_t)(9u + payload_len)) !=
+                rx_stream[offset + frame_len - 2]) {
+            ++offset;
+            continue;
+        }
+        uint16_t sequence = (uint16_t)(((uint16_t)rx_stream[offset + 4] << 8) | rx_stream[offset + 5]);
+        /* A validated HELLO starts a new Pi session and deliberately resets the
+         * sequence window; every other frame is monotonic within that session. */
+        uint8_t is_hello = type == PI_CMD_HELLO;
+        if ((is_hello || sequence_is_new(sequence)) && parse_payload(type, &rx_stream[offset + 10], payload_len)) {
+            last_rx_sequence = sequence;
+            have_rx_sequence = 1;
+            ++parsed;
+        }
+        offset += frame_len;
+    }
+    if (offset > 0) {
+        memmove(rx_stream, &rx_stream[offset], rx_stream_len - offset);
+        rx_stream_len -= offset;
+    }
+    return parsed;
+}
+
+static int pi_link_transmit(UART_HandleTypeDef *huart, uint8_t type,
+                            const uint8_t *payload, uint8_t payload_len) {
+    uint8_t frame[12 + PI_MAX_PAYLOAD];
+    uint16_t sequence = tx_sequence++;
+    uint32_t timestamp = HAL_GetTick();
+    frame[0] = PI_FRAME_HEADER;
+    frame[1] = PI_PROTOCOL_VERSION;
+    frame[2] = type;
+    frame[3] = payload_len;
+    frame[4] = (uint8_t)(sequence >> 8);
+    frame[5] = (uint8_t)sequence;
+    frame[6] = (uint8_t)(timestamp >> 24);
+    frame[7] = (uint8_t)(timestamp >> 16);
+    frame[8] = (uint8_t)(timestamp >> 8);
+    frame[9] = (uint8_t)timestamp;
+    if (payload_len > 0) memcpy(&frame[10], payload, payload_len);
+    frame[10 + payload_len] = crc8_calculate(&frame[1], (uint16_t)(9u + payload_len));
+    frame[11 + payload_len] = PI_FRAME_FOOTER;
+    return HAL_UART_Transmit(huart, frame, (uint16_t)(12u + payload_len), 20) == HAL_OK ? 0 : -1;
+}
+
+int pi_link_send_imu(UART_HandleTypeDef *huart, float roll, float pitch, float yaw,
+                     float gx, float gy, float gz) {
+    uint8_t payload[12];
+    float values[6] = {roll, pitch, yaw, gx, gy, gz};
+    for (int i = 0; i < 6; ++i) write_i16_be(&payload[2 * i], quantize_i16(values[i], 1000.0f));
+    return pi_link_transmit(huart, PI_CMD_TELEMETRY_IMU, payload, sizeof(payload));
 }
 
 int pi_link_send_joints(UART_HandleTypeDef *huart,
@@ -148,43 +208,28 @@ int pi_link_send_joints(UART_HandleTypeDef *huart,
                         const float *servo_pos, const float *servo_vel, const float *servo_cur) {
     uint8_t payload[36];
     int16_t values[18];
-
-    values[0] = (int16_t)(wheel_l_pos * 10000.0f);
-    values[1] = (int16_t)(wheel_l_vel * 10000.0f);
-    values[2] = (int16_t)(wheel_l_tau * 10000.0f);
-
-    values[3] = (int16_t)(wheel_r_pos * 10000.0f);
-    values[4] = (int16_t)(wheel_r_vel * 10000.0f);
-    values[5] = (int16_t)(wheel_r_tau * 10000.0f);
-
-    for (int i = 0; i < 4; i++) {
-        values[6 + i * 3 + 0] = (int16_t)(servo_pos[i] * 10000.0f);
-        values[6 + i * 3 + 1] = (int16_t)(servo_vel[i] * 10000.0f);
-        values[6 + i * 3 + 2] = (int16_t)(servo_cur[i] * 10000.0f);
+    values[0] = quantize_i16(wheel_l_pos, 1000.0f);
+    values[1] = quantize_i16(wheel_l_vel, WHEEL_SPEED_SCALE);
+    values[2] = quantize_i16(wheel_l_tau, 10000.0f);
+    values[3] = quantize_i16(wheel_r_pos, 1000.0f);
+    values[4] = quantize_i16(wheel_r_vel, WHEEL_SPEED_SCALE);
+    values[5] = quantize_i16(wheel_r_tau, 10000.0f);
+    for (int i = 0; i < 4; ++i) {
+        values[6 + 3 * i] = quantize_i16(servo_pos[i], 1000.0f);
+        values[7 + 3 * i] = quantize_i16(servo_vel[i], 1000.0f);
+        values[8 + 3 * i] = quantize_i16(servo_cur[i], 1000.0f);
     }
-
-    for (int i = 0; i < 18; i++) {
-        payload[i * 2]     = (uint8_t)((values[i] >> 8) & 0xFF);
-        payload[i * 2 + 1] = (uint8_t)(values[i] & 0xFF);
-    }
-
-    return pi_link_transmit(huart, PI_CMD_TELEMETRY_JOINTS, payload, 36);
+    for (int i = 0; i < 18; ++i) write_i16_be(&payload[2 * i], values[i]);
+    return pi_link_transmit(huart, PI_CMD_TELEMETRY_JOINTS, payload, sizeof(payload));
 }
 
 int pi_link_send_diag(UART_HandleTypeDef *huart, uint16_t battery_mv, uint8_t max_temp_c, uint8_t error_mask) {
-    uint8_t payload[4];
-
-    payload[0] = (uint8_t)((battery_mv >> 8) & 0xFF);
-    payload[1] = (uint8_t)(battery_mv & 0xFF);
-    payload[2] = max_temp_c;
-    payload[3] = error_mask;
-
-    return pi_link_transmit(huart, PI_CMD_TELEMETRY_DIAG, payload, 4);
+    uint8_t payload[4] = {
+        (uint8_t)(battery_mv >> 8), (uint8_t)battery_mv, max_temp_c, error_mask
+    };
+    return pi_link_transmit(huart, PI_CMD_TELEMETRY_DIAG, payload, sizeof(payload));
 }
 
 int pi_link_send_fault(UART_HandleTypeDef *huart, uint8_t fault_code) {
-    uint8_t payload[1];
-    payload[0] = fault_code;
-
-    return pi_link_transmit(huart, PI_CMD_TELEMETRY_FAULT, payload, 1);
+    return pi_link_transmit(huart, PI_CMD_TELEMETRY_FAULT, &fault_code, 1);
 }

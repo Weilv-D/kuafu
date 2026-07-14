@@ -107,7 +107,7 @@
            ============================================================ -->
       <!-- A 链: 髋A → 曲柄 a → P1 → 连杆 b → Q -->
       <body name="crank_A_l" pos="-0.026 0.098 0">
-        <joint name="hip_A_l" type="hinge" axis="0 1 0" range="-2.0 2.0"/>
+        <joint name="hip_A_l" type="hinge" axis="0 1 0" range="-3.3 3.3"/>
         <geom name="crank_A_l_geom" type="capsule" class="leg" fromto="0 0 0  -0.081 0 0.0457" size="0.006" mass="0.036"/>
         <body name="link_A_l" pos="-0.081 0 0.0457">   <!-- P1 相对髋A -->
           <joint name="knee_A_l" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
@@ -116,7 +116,7 @@
           <!-- 左轮: 挂在 Q 点 (link_A_l 末端), 随闭链运动; pos=Q 相对 P1 -->
           <body name="wheel_l" pos="0.107 0 -0.1037">
             <joint name="wheel_l" type="hinge" axis="0 1 0" class="wheel"/>
-            <geom name="wheel_l_geom" type="capsule" size="0.03908 0.0087" zaxis="0 1 0" mass="0.349"
+          <geom name="wheel_l_geom" type="capsule" size="0.03908 0.0087" zaxis="0 1 0" mass="0.349"
                   friction="0.8 0.02 0.001" rgba="0.1 0.1 0.1 1"/>
           </body>
         </body>
@@ -124,7 +124,7 @@
 
       <!-- B 链: 髋B → 曲柄 a → P2 → 连杆 b → Q -->
       <body name="crank_B_l" pos="0.026 0.098 0">
-        <joint name="hip_B_l" type="hinge" axis="0 1 0" range="-2.0 2.0"/>
+        <joint name="hip_B_l" type="hinge" axis="0 1 0" range="-3.3 3.3"/>
         <geom name="crank_B_l_geom" type="capsule" class="leg" fromto="0 0 0  0.081 0 0.0457" size="0.006" mass="0.036"/>
         <body name="link_B_l" pos="0.081 0 0.0457">   <!-- P2 相对髋B -->
           <joint name="knee_B_l" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
@@ -137,7 +137,7 @@
            右腿 (Y=-0.098) 闭链五杆 — 几何与左腿一致 (仅 Y 镜像)
            ============================================================ -->
       <body name="crank_A_r" pos="-0.026 -0.098 0">
-        <joint name="hip_A_r" type="hinge" axis="0 1 0" range="-2.0 2.0"/>
+        <joint name="hip_A_r" type="hinge" axis="0 1 0" range="-3.3 3.3"/>
         <geom name="crank_A_r_geom" type="capsule" class="leg" fromto="0 0 0  -0.081 0 0.0457" size="0.006" mass="0.036"/>
         <body name="link_A_r" pos="-0.081 0 0.0457">
           <joint name="knee_A_r" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
@@ -153,7 +153,7 @@
       </body>
 
       <body name="crank_B_r" pos="0.026 -0.098 0">
-        <joint name="hip_B_r" type="hinge" axis="0 1 0" range="-2.0 2.0"/>
+        <joint name="hip_B_r" type="hinge" axis="0 1 0" range="-3.3 3.3"/>
         <geom name="crank_B_r_geom" type="capsule" class="leg" fromto="0 0 0  0.081 0 0.0457" size="0.006" mass="0.036"/>
         <body name="link_B_r" pos="0.081 0 0.0457">
           <joint name="knee_B_r" type="hinge" axis="0 1 0" range="-3.14 3.14"/>
@@ -206,10 +206,10 @@
     <!-- 腿: position actuator, ctrl=目标角(rad) 范围±2.0=joint range;
          kp/kv 直接写在 actuator 上 (default 中 motor 与 position 混合导致 kp 继承失效)。
          4 个舵机 (hip_A + hip_B 各左右) 全部独立驱动, 对齐真机 4×ST3215。 -->
-    <position name="q_hip_A_l" joint="hip_A_l" kp="80" kv="2" forcerange="-2.94 2.94" ctrlrange="-2.0 2.0"/>
-    <position name="q_hip_A_r" joint="hip_A_r" kp="80" kv="2" forcerange="-2.94 2.94" ctrlrange="-2.0 2.0"/>
-    <position name="q_hip_B_l" joint="hip_B_l" kp="80" kv="2" forcerange="-2.94 2.94" ctrlrange="-2.0 2.0"/>
-    <position name="q_hip_B_r" joint="hip_B_r" kp="80" kv="2" forcerange="-2.94 2.94" ctrlrange="-2.0 2.0"/>
+    <position name="q_hip_A_l" joint="hip_A_l" kp="80" kv="2" forcerange="-2.94 2.94" ctrlrange="-3.3 3.3"/>
+    <position name="q_hip_A_r" joint="hip_A_r" kp="80" kv="2" forcerange="-2.94 2.94" ctrlrange="-3.3 3.3"/>
+    <position name="q_hip_B_l" joint="hip_B_l" kp="80" kv="2" forcerange="-2.94 2.94" ctrlrange="-3.3 3.3"/>
+    <position name="q_hip_B_r" joint="hip_B_r" kp="80" kv="2" forcerange="-2.94 2.94" ctrlrange="-3.3 3.3"/>
   </actuator>
 
   <!-- ============================================================

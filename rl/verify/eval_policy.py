@@ -27,18 +27,12 @@ import numpy as np
 import mujoco
 
 import kuafu_physics as P
-from rl.env.kuafu_env import OBS_DIM_BASE, OBS_DIM, ACTION_DIM  # 37 / 148 / 6
+from rl.env.kuafu_env import OBS_DIM_BASE, OBS_DIM, ACTION_DIM  # 35 / 140 / 6
 
-CTRL_DT = 0.02    # 50 Hz
-N_SUBSTEPS = 10   # 500 Hz 物理
+CTRL_DT = P.RL_DT
 PITCH_THRESH = np.radians(30)   # 与训练 _is_fallen 一致
 ROLL_THRESH = np.radians(30)
 OMEGA_NOLOAD = P.RPM_WHEEL_NOLOAD * 2 * np.pi / 60  # DDSM315 空载角速度 rad/s
-
-# RMA: 训练时 teacher actor 以静态特权 latent z(9) 为条件 (Kumar 2021)。
-# 仿真评估在标称平地下进行, z 取标称值:
-# [friction, mass_scale, com_bias(x,y,z), inertia_scale, torque_scale, deadband, delay_steps]
-NOMINAL_STATIC = np.array([1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0], dtype=np.float32)
 
 
 def _limit_wheel_torque(tau, omega):
@@ -58,96 +52,91 @@ def rotate_vector_by_quaternion_conj(q, v):
 
 
 def _build_obs(data, last_action, command, step, model=None):
-    """37 维 base obs (含接触标志). command=[v_cmd, w_cmd, d0_cmd] 可注入.
-
-    model: MjModel (原生 MuJoCo), 用于查 wheel geom id 算接触标志。
-    若 None 则接触标志取 1.0 (假设接地, 平地评估安全默认)。
-    """
+    """35 维固定尺度 Actor frame，与 MJX ``_base_observation`` 同序。"""
     qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
     roll = np.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
-    pitch = np.arcsin(np.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
-    yaw = np.arctan2(2 * (qw * qz + qx * qy), 1 - 2 * (qz**2 + qy**2))
-    attitude = np.array([roll, pitch, yaw])
     q = np.array([qw, qx, qy, qz])
     ang_vel = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
-    wheel_state = np.array([data.qpos[9], data.qpos[14], data.qvel[8], data.qvel[13]])
-    hip_state = np.array([
-        data.qpos[7], data.qpos[12], data.qpos[10], data.qpos[15],
-        data.qvel[6], data.qvel[11], data.qvel[9], data.qvel[14]])
-    wheel_torque = np.array([data.actuator_force[0], data.actuator_force[1]])
-    hip_torque = np.array([
-        data.actuator_force[2], data.actuator_force[3],
-        data.actuator_force[4], data.actuator_force[5]])
-    phase = step / 1000.0  # 对应 EPISODE_LENGTH = 1000
-    phase_clock = np.array([np.sin(2 * np.pi * phase), np.cos(2 * np.pi * phase)])
-
-    # 接触标志 (2): 左右轮是否接地
-    if model is not None:
-        wl = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "wheel_l_geom")
-        wr = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "wheel_r_geom")
-        cl = 0.0
-        cr = 0.0
-        for i in range(data.ncon):
-            g1, g2 = data.contact[i].geom1, data.contact[i].geom2
-            if g1 == wl or g2 == wl:
-                cl = 1.0
-            if g1 == wr or g2 == wr:
-                cr = 1.0
-        contact = np.array([cl, cr], dtype=np.float32)
-    else:
-        contact = np.array([1.0, 1.0], dtype=np.float32)  # 平地默认接地
-
-    return np.concatenate([attitude, ang_vel, wheel_state, hip_state,
-                           wheel_torque, hip_torque, last_action, command,
-                           phase_clock, contact])
+    lin_vel = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
+    gravity = rotate_vector_by_quaternion_conj(q, np.array([0.0, 0.0, -1.0]))
+    q_l = P.fivebar_fk_relative(data.qpos[7], data.qpos[10])
+    q_r = P.fivebar_fk_relative(data.qpos[12], data.qpos[15])
+    d0 = (-q_l[1] - q_r[1]) * 0.5
+    wheel_speed = np.array([data.qvel[8], data.qvel[13]])
+    hip_pos = np.array([data.qpos[7], data.qpos[10], data.qpos[12], data.qpos[15]])
+    hip_vel = np.array([data.qvel[6], data.qvel[9], data.qvel[11], data.qvel[14]])
+    return np.concatenate([
+        np.array([command[0] / 0.5, command[1], (command[2] - 132.5) / 74.5]),
+        gravity,
+        ang_vel / 10.0,
+        np.array([lin_vel[0] / 0.5, ang_vel[2], (d0 - 132.5) / 74.5, roll]),
+        wheel_speed / 33.0,
+        hip_pos / 3.3,
+        hip_vel / P.SERVO_MAX_SPEED,
+        last_action,
+        np.zeros(6),
+    ])
 
 
-def _apply_action(data, action, command=None):
-    """基层(pitch LQR + yaw 差速 + roll 调平 PD) + RL 残差 → ctrl.
+class NativeBaseline:
+    """Native-MuJoCo counterpart of the 500/250/50 Hz MJX baseline."""
 
-    与训练 kuafu_mjx_env.step 控制律一致:
-    - 轮: τ_L = τ_pitch + τ_diff + Δτ_L,  τ_R = τ_pitch - τ_diff + Δτ_R
-    - 腿: 基层 D0 对称 + roll PD 左右差 + RL 位置残差
-    command: [v_cmd, w_cmd, d0_cmd], 用于 yaw 跟踪 w_cmd + D0 目标。None→[0,0,dwell]。
-    """
-    qw, qx, qy, qz = data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]
-    q = np.array([qw, qx, qy, qz])
-    lin_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[0:3])
-    xdot = lin_vel_local[0]
-    ang_vel_local = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
-    thetadot = ang_vel_local[1]
-    yaw_rate = ang_vel_local[2]
-    omega_x = ang_vel_local[0]
-    pitch = np.arcsin(np.clip(2 * (qw * qy - qx * qz), -0.999999, 0.999999))
-    roll = np.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
+    def __init__(self, data, torque_scale=1.0, deadband=0.0):
+        self.x_ref = float(data.qpos[0])
+        self.x_int = 0.0
+        self.v_ref = self.v_accel = 0.0
+        self.w_ref = self.w_accel = 0.0
+        self.yaw_ref = self._yaw(data)
+        self.torque_scale = torque_scale
+        self.deadband = deadband
 
-    # 基层 pitch LQR
-    F = -(P.LQR_K @ np.array([0.0, pitch, xdot, thetadot]))
-    tau_pitch = F * P.R / 2.0
+    @staticmethod
+    def _yaw(data):
+        qw, qx, qy, qz = data.qpos[3:7]
+        return np.arctan2(2 * (qw * qz + qx * qy), 1 - 2 * (qz * qz + qy * qy))
 
-    # 基层 yaw 条件阻尼 (大 ωz 关闭防 pitch 耦合; 命令跟踪交 RL)
-    if abs(yaw_rate) < P.YAW_DAMP_THRESH:
-        tau_diff = np.clip(-P.YAW_KD * yaw_rate, -P.TAU_WHEEL_RATED, P.TAU_WHEEL_RATED)
-    else:
-        tau_diff = 0.0
+    @staticmethod
+    def _jerk(target, value, accel, max_accel, max_jerk):
+        target_accel = np.clip((target - value) / P.BASE_DT, -max_accel, max_accel)
+        accel = np.clip(accel + np.clip(target_accel - accel, -max_jerk * P.BASE_DT, max_jerk * P.BASE_DT),
+                        -max_accel, max_accel)
+        return value + accel * P.BASE_DT, accel
 
-    # DDSM back-EMF 限幅 (与训练 _limit_wheel_torque 一致)
-    data.ctrl[0] = _limit_wheel_torque(
-        tau_pitch + tau_diff + action[0] * P.TAU_WHEEL_RATED, data.qvel[8])
-    data.ctrl[1] = _limit_wheel_torque(
-        tau_pitch - tau_diff + action[1] * P.TAU_WHEEL_RATED, data.qvel[13])
-
-    # 基层 D0 对称 + roll PD 左右差 + RL 残差
-    d0_cmd = command[2] if command is not None else P.D0_MIN
-    d0_norm = (d0_cmd - P.D0_MIN) / (P.D0_MAX - P.D0_MIN)
-    hip_A_base = -d0_norm * P.HIP_STROKE
-    hip_B_base = d0_norm * P.HIP_STROKE
-    d_d0_mm = -(P.ROLL_KP * roll + P.ROLL_KD * omega_x)
-    d_d0_rad = d_d0_mm / (P.D0_MAX - P.D0_MIN) * P.HIP_STROKE
-    data.ctrl[2] = hip_A_base + d_d0_rad / 2.0 + action[2] * P.HIP_STROKE
-    data.ctrl[3] = hip_A_base - d_d0_rad / 2.0 + action[3] * P.HIP_STROKE
-    data.ctrl[4] = hip_B_base + d_d0_rad / 2.0 + action[4] * P.HIP_STROKE
-    data.ctrl[5] = hip_B_base - d_d0_rad / 2.0 + action[5] * P.HIP_STROKE
+    def step(self, model, data, action, command):
+        for _ in range(P.BASE_STEPS_PER_RL):
+            q = data.qpos[3:7]
+            body_velocity = rotate_vector_by_quaternion_conj(q, data.qvel[:3])
+            body_rate = rotate_vector_by_quaternion_conj(q, data.qvel[3:6])
+            qw, qx, qy, qz = q
+            pitch = np.arcsin(np.clip(2 * (qw * qy - qx * qz), -1.0, 1.0))
+            self.v_ref, self.v_accel = self._jerk(command[0], self.v_ref, self.v_accel, 2.0, 8.0)
+            self.w_ref, self.w_accel = self._jerk(command[1], self.w_ref, self.w_accel, 4.0, 16.0)
+            self.x_ref += self.v_ref * P.BASE_DT
+            self.yaw_ref += self.w_ref * P.BASE_DT
+            self.x_int = np.clip(self.x_int + (data.qpos[0] - self.x_ref) * P.BASE_DT, -0.25, 0.25)
+            state = np.array([data.qpos[0] - self.x_ref, pitch, body_velocity[0] - self.v_ref, body_rate[1]])
+            force = -(P.LQR_K_DT4 @ state) - P.LQI_KI_DT4 * self.x_int
+            tau_pitch = force * P.R / 2.0 * self.torque_scale
+            yaw_error = np.arctan2(np.sin(self.yaw_ref - self._yaw(data)), np.cos(self.yaw_ref - self._yaw(data)))
+            tau_yaw = (P.YAW_KP * yaw_error + P.YAW_KD * (self.w_ref - body_rate[2])) * self.torque_scale
+            data.ctrl[0] = _limit_wheel_torque(
+                tau_pitch - tau_yaw + (action[0] - action[1]) * P.TAU_WHEEL_RATED * self.torque_scale,
+                data.qvel[8])
+            data.ctrl[1] = _limit_wheel_torque(
+                tau_pitch + tau_yaw + (action[0] + action[1]) * P.TAU_WHEEL_RATED * self.torque_scale,
+                data.qvel[13])
+            roll = np.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx * qx + qy * qy))
+            roll_d0 = -(P.ROLL_KP * roll + P.ROLL_KD * body_rate[0])
+            d0_l = np.clip(command[2] + roll_d0 / 2.0 + action[3] * 30.0, P.D0_MIN, P.D0_MAX)
+            d0_r = np.clip(command[2] - roll_d0 / 2.0 + action[5] * 30.0, P.D0_MIN, P.D0_MAX)
+            qA_l, qB_l = P.fivebar_ik_cmd_xy(action[2] * 20.0, d0_l)
+            qA_r, qB_r = P.fivebar_ik_cmd_xy(action[4] * 20.0, d0_r)
+            goals = np.array([qA_l, qA_r, qB_l, qB_r])
+            actual = data.qpos[[7, 12, 10, 15]]
+            goals = np.where(np.abs(goals - actual) < self.deadband, actual, goals)
+            data.ctrl[2:6] = goals
+            mujoco.mj_step(model, data)
+            mujoco.mj_step(model, data)
 
 
 def _get_pitch_roll(data):
@@ -158,8 +147,9 @@ def _get_pitch_roll(data):
 
 
 def _is_fallen(data):
-    pitch, roll = _get_pitch_roll(data)
-    return abs(pitch) > PITCH_THRESH or abs(roll) > ROLL_THRESH
+    q = np.asarray(data.qpos[3:7])
+    gravity = rotate_vector_by_quaternion_conj(q, np.asarray([0.0, 0.0, -1.0]))
+    return gravity[2] > -np.cos(PITCH_THRESH)
 
 
 def _site_gap(data, model, suffix):
@@ -169,14 +159,43 @@ def _site_gap(data, model, suffix):
 
 
 def run_episode(model, data, teacher, command, max_steps, rng=None, dr=False,
-                latency=0):
+                latency=0, sense_latency=None):
     """跑一个 episode, 返回指标 dict. fallen 则提前终止.
 
-    latency: 观测/动作延迟步数 (默认 0). 复现训练侧 latency randomization
-    (kuafu_mjx_env 的 obs_delay_buffer / action_buffer), 用于检验部署鲁棒性。
-    与训练一致, 同一 latency 同时作用于 obs 与 action。
+    latency: action delay steps; sense_latency independently controls observation
+    delay. Both buffers match the training-side action/observation delay semantics.
     """
     import torch
+    nominal = None
+    torque_scale = 1.0
+    deadband = 0.0
+    if dr and rng is not None:
+        chassis = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "chassis")
+        wheel_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+                     for name in ("wheel_l_geom", "wheel_r_geom")]
+        nominal = {
+            "body_mass": model.body_mass.copy(),
+            "body_ipos": model.body_ipos.copy(),
+            "body_inertia": model.body_inertia.copy(),
+            "geom_friction": model.geom_friction.copy(),
+            "geom_size": model.geom_size.copy(),
+            "actuator_gainprm": model.actuator_gainprm.copy(),
+            "actuator_biasprm": model.actuator_biasprm.copy(),
+        }
+        model.body_mass[:] = nominal["body_mass"] * rng.uniform(*P.DR_MASS)
+        model.body_inertia[:] = nominal["body_inertia"] * rng.uniform(*P.DR_INERTIA)
+        model.body_ipos[chassis] = nominal["body_ipos"][chassis] + rng.uniform(P.DR_COM[0], P.DR_COM[1], 3)
+        model.geom_friction[:, 0] = nominal["geom_friction"][:, 0] * rng.uniform(*P.DR_FRICTION)
+        wheel_delta = rng.uniform(*P.DR_WHEEL_R)
+        for wheel_id in wheel_ids:
+            model.geom_size[wheel_id, 0] = nominal["geom_size"][wheel_id, 0] + wheel_delta
+        pd_scale = rng.uniform(*P.DR_SERVO_PD)
+        for actuator in range(2, 6):
+            model.actuator_gainprm[actuator, 0] = nominal["actuator_gainprm"][actuator, 0] * pd_scale
+            model.actuator_biasprm[actuator, 1:] = nominal["actuator_biasprm"][actuator, 1:] * pd_scale
+        torque_scale = rng.uniform(*P.DR_TORQUE_CONST)
+        deadband = rng.uniform(*P.DR_DEADBAND)
+        mujoco.mj_setConst(model, data)
     mujoco.mj_resetDataKeyframe(model, data, 0)
     if dr and rng is not None:
         # 初始 pitch/roll 扰动 ±2°
@@ -188,12 +207,15 @@ def run_episode(model, data, teacher, command, max_steps, rng=None, dr=False,
         data.qpos[3:7] = [w1*w2-x1*x2-y1*y2-z1*z2, w1*x2+x1*w2+y1*z2-z1*y2,
                           w1*y2-x1*z2+y1*w2+z1*x2, w1*z2+x1*y2-y1*x2+z1*w2]
     mujoco.mj_forward(model, data)
+    baseline = NativeBaseline(data, torque_scale=torque_scale, deadband=deadband)
 
     obs_history = np.zeros((4, OBS_DIM_BASE), dtype=np.float32)
     last_action = np.zeros(ACTION_DIM, dtype=np.float32)
 
-    # 延迟缓冲 (复现训练侧 latency): 存历史 obs(148) 与 action(6)
-    cap = max(latency, 0) + 1
+    # 延迟缓冲 (复现训练侧 latency): 存历史 obs(140) 与 action(6)
+    if sense_latency is None:
+        sense_latency = latency
+    cap = max(latency, sense_latency, 0) + 1
     obs_delay_buf = [obs_history.flatten().astype(np.float32).copy() for _ in range(cap)]
     act_delay_buf = [last_action.copy() for _ in range(cap)]
 
@@ -207,18 +229,14 @@ def run_episode(model, data, teacher, command, max_steps, rng=None, dr=False,
             break
         # 推理: 用延迟后的 obs_history。latency=0 为当前; latency=k 取 k 步前 = buf[-(k+1)]
         # (缓冲末尾为当前帧, 与训练 _delayed_obs 语义一致)
-        # teacher actor 条件于静态特权 z(9), 标称评估下补 nominal z → 157 维
-        inf_obs148 = obs_delay_buf[-(latency + 1)] if latency > 0 else obs_history.flatten()
-        inf_obs = np.concatenate([inf_obs148, NOMINAL_STATIC])
+        inf_obs = obs_delay_buf[-(sense_latency + 1)] if sense_latency > 0 else obs_history.flatten()
         with torch.no_grad():
             action = teacher(torch.from_numpy(inf_obs).float().unsqueeze(0)).numpy()[0]
         # 执行延迟后的动作 (latency=0 时为当前 action; latency=k 取 k 步前)
         applied = act_delay_buf[-(latency + 1)] if latency > 0 else action
         action_delta = action - last_action
-        _apply_action(data, applied, command)
+        baseline.step(model, data, applied, command)
         last_action = action  # 注意: obs 里的 last_action 用 policy 原始输出 (与 env 一致)
-        for _ in range(N_SUBSTEPS):
-            mujoco.mj_step(model, data)
 
         # 推理后才更新 history (与训练 step() 顺序一致: step 后 append base_obs)
         base_obs = _build_obs(data, last_action, command, step, model)
@@ -245,7 +263,7 @@ def run_episode(model, data, teacher, command, max_steps, rng=None, dr=False,
     pitches = np.array(pitches); rolls = np.array(rolls)
     ang_vels = np.array(ang_vels); lin_vels_local = np.array(lin_vels_local)
     n = len(pitches)
-    return {
+    result = {
         "stable_steps": n,
         "stable_seconds": n * CTRL_DT,
         "fallen": n < max_steps,
@@ -258,6 +276,16 @@ def run_episode(model, data, teacher, command, max_steps, rng=None, dr=False,
         "action_smoothness": np.mean(actions_sq) if n else 0,
         "loop_gap_mm": max(max(gaps_l) if gaps_l else [0], max(gaps_r) if gaps_r else [0]) * 1000,
     }
+    if nominal is not None:
+        model.body_mass[:] = nominal["body_mass"]
+        model.body_ipos[:] = nominal["body_ipos"]
+        model.body_inertia[:] = nominal["body_inertia"]
+        model.geom_friction[:] = nominal["geom_friction"]
+        model.geom_size[:] = nominal["geom_size"]
+        model.actuator_gainprm[:] = nominal["actuator_gainprm"]
+        model.actuator_biasprm[:] = nominal["actuator_biasprm"]
+        mujoco.mj_setConst(model, data)
+    return result
 
 
 def print_report(title, results):
@@ -289,7 +317,9 @@ def main():
     parser.add_argument("--max_steps", type=int, default=10000,
                         help="单 episode 最大步数 (默认 10000=200s)")
     parser.add_argument("--latency", type=int, default=0,
-                        help="观测/动作延迟步数 (复现训练 latency DR, 默认 0)")
+                        help="动作延迟步数 (默认 0)")
+    parser.add_argument("--sense_latency", type=int, default=None,
+                        help="独立观测延迟步数；省略时沿用 --latency")
     args = parser.parse_args()
 
     from rl.train.teacher_model import TeacherInferenceModel
@@ -306,7 +336,8 @@ def main():
 
     if args.mode == "deterministic":
         command = np.array([0.0, 0.0, DWELL])
-        r = run_episode(model, data, teacher, command, args.max_steps, latency=args.latency)
+        r = run_episode(model, data, teacher, command, args.max_steps, latency=args.latency,
+                         sense_latency=args.sense_latency)
         print_report("deterministic (v=0, ω=0, d0=dwell)", [r])
 
     elif args.mode == "dr":
@@ -315,7 +346,7 @@ def main():
         results = []
         for ep in range(args.episodes):
             r = run_episode(model, data, teacher, command, args.max_steps, rng=rng, dr=True,
-                            latency=args.latency)
+                            latency=args.latency, sense_latency=args.sense_latency)
             results.append(r)
             status = "倒下" if r["fallen"] else "稳定"
             print(f"  ep {ep+1}/{args.episodes}: {r['stable_steps']}步 ({r['stable_seconds']:.1f}s) [{status}]")
@@ -328,7 +359,8 @@ def main():
         print(f"  {'v_cmd':>8} {'稳定步数':>10} {'状态':>6} {'跟踪误差':>10}")
         for v in velocities:
             command = np.array([v, 0.0, DWELL])
-            r = run_episode(model, data, teacher, command, args.max_steps, latency=args.latency)
+            r = run_episode(model, data, teacher, command, args.max_steps, latency=args.latency,
+                            sense_latency=args.sense_latency)
             results.append(r)
             status = "倒下" if r["fallen"] else "稳定"
             print(f"  {v:>8.2f} {r['stable_steps']:>10} {status:>6} {r['lin_vel_track_err']:>10.4f}")

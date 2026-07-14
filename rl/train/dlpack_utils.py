@@ -18,8 +18,12 @@ def resolve_device(prefer: str = "cuda") -> str:
     避免 torch 默认 device="cuda"(无 index)被 DLPack 解释为 255 导致零拷贝失败.
     """
     if prefer.startswith("cuda"):
-        if torch.cuda.is_available() and len(jax.devices("gpu")) > 0:
-            dev_id = jax.devices("gpu")[0].id
+        try:
+            jax_gpu_devices = jax.devices("gpu")
+        except RuntimeError:
+            jax_gpu_devices = []
+        if torch.cuda.is_available() and jax_gpu_devices:
+            dev_id = jax_gpu_devices[0].id
             return f"cuda:{dev_id}"
         warnings.warn(
             "CUDA 不可用 (torch.cuda.is_available 或 jax gpu 设备为空), "

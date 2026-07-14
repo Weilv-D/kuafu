@@ -68,10 +68,14 @@ void safety_state_update(float pitch_rad, float gyro_y_rads, float max_temp_c, f
             safety_state_trigger_fault(FAULT_OVERTEMP);
         }
 
-        /* Check Heartbeat Timeout (Only enforce after Pi link starts sending heartbeats or when in ACTIVE/CLIMB) */
+        /* Freshness is not a hard fault: the STM32 baseline remains responsible for
+         * position/heading hold when the Pi or learned residual disappears. */
         if (g_pi_cmd_heartbeat.last_heartbeat_ms > 0) {
             if ((current_time - g_pi_cmd_heartbeat.last_heartbeat_ms) > SAFETY_HEARTBEAT_MS) {
-                safety_state_trigger_fault(FAULT_HEARTBEAT);
+                pi_link_enter_hold();
+            } else if (g_pi_cmd_action.last_action_ms > 0 &&
+                       (current_time - g_pi_cmd_action.last_action_ms) > SAFETY_ACTION_MS) {
+                pi_link_clear_action();
             }
         }
     }
@@ -84,15 +88,19 @@ void safety_state_update(float pitch_rad, float gyro_y_rads, float max_temp_c, f
 
         case STATE_STAND:
             /* If Pi requests ACTIVE mode and heartbeat is healthy, transition */
-            if (g_pi_cmd_heartbeat.mode_request == STATE_ACTIVE && 
-                g_pi_cmd_heartbeat.last_heartbeat_ms > 0 &&
-                (current_time - g_pi_cmd_heartbeat.last_heartbeat_ms) <= SAFETY_HEARTBEAT_MS) {
+            if (g_pi_cmd_heartbeat.mode_request == STATE_ACTIVE &&
+                pi_link_is_compatible() && pi_link_heartbeat_fresh()) {
                 g_safety_state.current_mode = STATE_ACTIVE;
                 g_safety_state.mode_timer_ms = current_time;
             }
             break;
 
         case STATE_ACTIVE:
+            if (!pi_link_is_compatible() || !pi_link_heartbeat_fresh()) {
+                g_safety_state.current_mode = STATE_STAND;
+                g_safety_state.mode_timer_ms = current_time;
+                break;
+            }
             /* Transition back to STAND if Pi requests it */
             if (g_pi_cmd_heartbeat.mode_request == STATE_STAND) {
                 g_safety_state.current_mode = STATE_STAND;
@@ -106,6 +114,11 @@ void safety_state_update(float pitch_rad, float gyro_y_rads, float max_temp_c, f
             break;
 
         case STATE_CLIMB:
+            if (!pi_link_is_compatible() || !pi_link_heartbeat_fresh()) {
+                g_safety_state.current_mode = STATE_STAND;
+                g_safety_state.mode_timer_ms = current_time;
+                break;
+            }
             /* Transition back to ACTIVE or STAND if requested */
             if (g_pi_cmd_heartbeat.mode_request == STATE_ACTIVE) {
                 g_safety_state.current_mode = STATE_ACTIVE;

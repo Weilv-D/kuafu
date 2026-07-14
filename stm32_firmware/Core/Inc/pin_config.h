@@ -2,6 +2,7 @@
 #define PIN_CONFIG_H
 
 #include "stm32f4xx.h"
+#include "kuafu_generated.h"
 
 /* ========================================================================== */
 /*                           System Configuration                             */
@@ -82,25 +83,24 @@
 /* ========================================================================== */
 
 /* LQR Gain K Vector: [e_x, theta, e_x_dot, theta_dot] */
-#define LQR_K0                  -4.47f
-#define LQR_K1                  -61.18f
-#define LQR_K2                  -5.82f
-#define LQR_K3                  -4.02f
+#define LQR_K0                  KUAFU_LQR_K0
+#define LQR_K1                  KUAFU_LQR_K1
+#define LQR_K2                  KUAFU_LQR_K2
+#define LQR_K3                  KUAFU_LQR_K3
+#define LQI_KI                  KUAFU_LQI_KI
 
 /* DDSM315 Current to Torque scaling factor */
 /* tau = 0.75 * I_amps. Command maps raw [-32767, 32767] to [-8.0, 8.0] Amps.
  * Hence: I_raw = tau * (32767.0f / 6.0f) ~= 5461.17f * tau */
 #define DDSM_TORQUE_TO_RAW      5461.17f
 #define DDSM_RAW_TO_TORQUE      (1.0f / DDSM_TORQUE_TO_RAW)
-#define DDSM_MAX_TORQUE_NM      1.1f            /* TAU_WHEEL_STALL (N-m) */
 
 /* Wheel geometry & rated torque (mirrors kuafu_physics.py) */
-#define WHEEL_RADIUS_M          0.03908f        /* R_WHEEL = 39.08mm */
-#define TAU_WHEEL_RATED         0.55f           /* Single wheel rated torque (N-m) */
+#define WHEEL_RADIUS_M          R_WHEEL_M
 
-/* Base-layer yaw conditional damping (mirrors kuafu_physics.py) */
-#define YAW_KD                  0.05f           /* yaw damping gain (N-m·s/rad) */
-#define YAW_DAMP_THRESH         0.3f            /* only damp when |ωz| < this (rad/s) */
+/* Base-layer heading/rate tracking (mirrors kuafu_physics.py) */
+#define YAW_KP                  KUAFU_YAW_KP
+#define YAW_KD                  KUAFU_YAW_KD
 
 /* Wheel rotation direction mapping (body frame: +torque/+velocity = forward).
  * Left/right hub motors may be mirror mounted; set the affected side to -1.0f.
@@ -110,11 +110,11 @@
 #define WHEEL_DIR_R             (+1.0f)
 
 /* 5-Bar Linkage Kinematics parameters (meters) */
-#define KIN_LEG_A               0.093f          /* Upper leg crank length 'a' (93mm) */
-#define KIN_LEG_B               0.149f          /* Lower leg rod length 'b' (149mm)  */
-#define KIN_LEG_C               0.026f          /* Hips spacing offset 'c' (26mm)    */
-#define KIN_MIN_LEG_D0          0.058f          /* 58mm minimum virtual leg length    */
-#define KIN_MAX_LEG_D0          0.207f          /* 207mm maximum virtual leg length   */
+#define KIN_LEG_A               (A_LEN_MM * 0.001f)
+#define KIN_LEG_B               (B_LEN_MM * 0.001f)
+#define KIN_LEG_C               (-AX_MM * 0.001f)
+#define KIN_MIN_LEG_D0          (D0_MIN_MM * 0.001f)
+#define KIN_MAX_LEG_D0          (D0_MAX_MM * 0.001f)
 
 /* ST3215 Servo mapping */
 #define SERVO_CENTER_TICKS      2048
@@ -151,5 +151,6 @@
 #define SAFETY_MAX_PITCH_RAD    0.785398f       /* 45 degrees */
 #define SAFETY_MAX_TEMP_C       65.0f
 #define SAFETY_HEARTBEAT_MS     200U            /* Pi heartbeat timeout */
+#define SAFETY_ACTION_MS        80U             /* RL action freshness timeout */
 
 #endif /* PIN_CONFIG_H */

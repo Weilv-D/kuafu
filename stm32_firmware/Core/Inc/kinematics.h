@@ -13,4 +13,8 @@
  */
 int kinematics_solve_ik(float D0, float *q_hip_A, float *q_hip_B);
 
+/* Full five-bar workspace target. Qx is fore/aft foot displacement in metres in
+ * the chassis frame; D0 is positive downward in metres. */
+int kinematics_solve_ik_xy(float qx, float d0, float *q_hip_A, float *q_hip_B);
+
 #endif /* KINEMATICS_H */

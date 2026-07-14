@@ -14,7 +14,11 @@ from rl.train import dlpack_utils as du
 
 
 def _device():
-    return "cuda" if (torch.cuda.is_available() and len(jax.devices("gpu")) > 0) else "cpu"
+    try:
+        has_jax_gpu = any(device.platform == "gpu" for device in jax.devices())
+    except RuntimeError:
+        has_jax_gpu = False
+    return "cuda" if (torch.cuda.is_available() and has_jax_gpu) else "cpu"
 
 
 def test_verify_zero_copy_passes():

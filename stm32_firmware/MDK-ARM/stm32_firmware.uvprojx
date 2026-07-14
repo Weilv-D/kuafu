@@ -499,6 +499,11 @@
               <FilePath>..\Core\Inc\kinematics.h</FilePath>
             </File>
             <File>
+              <FileName>kuafu_generated.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\kuafu_generated.h</FilePath>
+            </File>
+            <File>
               <FileName>lqr_controller.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Core\Src\lqr_controller.c</FilePath>
@@ -597,6 +602,11 @@
               <FileName>stm32f4xx_hal_i2c.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_i2c.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32f4xx_hal_iwdg.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_iwdg.c</FilePath>
             </File>
           </Files>
         </Group>

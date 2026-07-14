@@ -6,10 +6,13 @@
 
 #define PI_FRAME_HEADER          0xA5
 #define PI_FRAME_FOOTER          0x5A
+#define PI_PROTOCOL_VERSION       1
+#define PI_MAX_PAYLOAD            64
 
 /* Command codes from Pi -> STM32 */
 #define PI_CMD_HEARTBEAT         0x01
 #define PI_CMD_ACTION            0x02
+#define PI_CMD_HELLO             0x03
 
 /* Command codes from STM32 -> Pi */
 #define PI_CMD_TELEMETRY_IMU     0x81
@@ -26,9 +29,12 @@ typedef struct {
 } Pi_Command_Heartbeat_t;
 
 typedef struct {
-    float delta_torque_l;    /* Left residual torque command (N-m) */
-    float delta_torque_r;    /* Right residual torque command (N-m) */
-    float target_q[4];       /* Target hip joint angles (rad): [LF, RF, LB, RB] */
+    float delta_torque_common; /* Common wheel residual, normalized [-1,1] */
+    float delta_torque_yaw;    /* Yaw wheel residual, normalized [-1,1] */
+    float qx_l;                /* Left foot Qx residual, normalized [-1,1] */
+    float d0_l;                /* Left D0 residual, normalized [-1,1] */
+    float qx_r;                /* Right foot Qx residual, normalized [-1,1] */
+    float d0_r;                /* Right D0 residual, normalized [-1,1] */
     uint32_t last_action_ms;
 } Pi_Command_Action_t;
 
@@ -36,14 +42,25 @@ typedef struct {
 extern Pi_Command_Heartbeat_t g_pi_cmd_heartbeat;
 extern Pi_Command_Action_t g_pi_cmd_action;
 
+uint8_t pi_link_is_compatible(void);
+uint8_t pi_link_heartbeat_fresh(void);
+uint8_t pi_link_action_fresh(void);
+
 /**
  * @brief Initializes the Pi communication bridge structures.
  */
 void pi_link_init(void);
 
+/* Freshness fallbacks are intentionally separate: stale action removes only the
+ * learned residual, while stale heartbeat also zeros high-level velocity/yaw and
+ * leaves the 250Hz position-hold baseline active. */
+void pi_link_clear_action(void);
+void pi_link_enter_hold(void);
+
 /**
- * @brief Parses an incoming raw byte stream for valid Pi link packets.
- *        Designed to be called from the USART IDLE line ISR or a background task.
+ * @brief Feeds arbitrary UART byte chunks into the versioned streaming decoder.
+ *        Frame: A5 | version | type | length | seq:u16 | timestamp_ms:u32 |
+ *        payload | CRC8/MAXIM | 5A. Partial DMA-IDLE chunks are retained.
  * 
  * @param buf Pointer to the raw bytes buffer.
  * @param len Length of the buffer to parse.

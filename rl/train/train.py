@@ -20,6 +20,9 @@ import argparse
 import time
 import json
 import glob
+import random
+import tempfile
+import numpy as np
 
 PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJ_ROOT)
@@ -37,7 +40,7 @@ from rl.train.seed_utils import seed_all, capture_provenance
 from rl.train import dlpack_utils as dlu
 from rl.env.kuafu_mjx_env import (
     KuafuMjxEnv, OBS_DIM, PRIVILEGED_DIM, RMA_STATIC_DIM, TRANSIENT_DIM,
-    ACTOR_OBS_DIM, CRITIC_PRIV_DIM, CRITIC_OBS_DIM,
+    ACTOR_OBS_DIM, CRITIC_PRIV_DIM, CRITIC_OBS_DIM, DIFFICULTY_DIM,
 )
 
 
@@ -70,7 +73,8 @@ class Curriculum:
     def __init__(self, start: float = 0.1, max_d: float = 1.0, step: float = 0.05,
                  window: int = 200, min_d: float = 0.1,
                  upgrade_avg_survival: float = 800.0, upgrade_fall_rate: float = 0.5,
-                 fallback_avg_survival: float = 600.0, fallback_fall_rate: float = 0.65):
+                 fallback_avg_survival: float = 600.0, fallback_fall_rate: float = 0.65,
+                 upgrade_track_frac: float = 0.8):
         self.d = start
         self.max_d = max_d
         self.min_d = min_d
@@ -80,21 +84,28 @@ class Curriculum:
         self.upgrade_fall_rate = upgrade_fall_rate
         self.fallback_avg_survival = fallback_avg_survival
         self.fallback_fall_rate = fallback_fall_rate
+        # P0/P4: 升级还需命令跟踪达标 (静止策略不可仅凭存活升级, audit P0)
+        self.upgrade_track_frac = upgrade_track_frac
         self._surv_buf = []   # 高难度 done env 存活步数
         self._fall_buf = []    # 高难度 done env 是否摔倒 (1/0)
         self._last_avg_survival = float("nan")
         self._last_fall_rate = float("nan")
+        self._last_track_ok = float("nan")
 
-    def update(self, survival_steps, fell):
+    def update(self, survival_steps, fell, track_ok_frac=None):
         """survival_steps / fell: 本批高难度 done 环境的存活步数与摔倒标志 (numpy 数组).
+        track_ok_frac: 本批高难度 done 环境中命令跟踪达标(env 比例, 0..1); None=不检查.
 
         返回 "up" / "down" / None, 供调用方在难度跳变时重注探索噪声.
         """
         for s, f in zip(survival_steps, fell):
             self._surv_buf.append(float(s))
             self._fall_buf.append(float(f))
+        self._last_track_ok = track_ok_frac
         if len(self._surv_buf) > self.window:
             del self._surv_buf[: len(self._surv_buf) - self.window]
+        if len(self._fall_buf) > self.window:
+            del self._fall_buf[: len(self._fall_buf) - self.window]
         # 窗口未满时仍记录真实(部分)统计, 避免 resume 首轮 NaN 污染 TB 曲线;
         # 但 d_max 的升降仅在窗口填满后决策, 防止部分样本误判。
         if self._surv_buf:
@@ -108,6 +119,9 @@ class Curriculum:
         avg_survival = self._last_avg_survival
         fall_rate = self._last_fall_rate
         if avg_survival >= self.upgrade_avg_survival and fall_rate <= self.upgrade_fall_rate:
+            # P0/P4: 命令跟踪不达标(静止/乱动策略)则即使存活也不升级
+            if track_ok_frac is not None and track_ok_frac < self.upgrade_track_frac:
+                return None
             if self.d < self.max_d:
                 self.d = min(self.max_d, self.d + self.step)
                 return "up"
@@ -131,9 +145,8 @@ class DirectVecEnv:
         self.env = env
         self.num_envs = num_envs
         self.num_actions = env.action_size
-        self.num_obs = ACTOR_OBS_DIM                             # actor = proprio(148) + z(9)
-        # critic 输入 = actor(157) + 瞬态特权(3) = 160 (RSL-RL 实际从 extras 取此维,
-        # 但此处显式声明以免未来版本误读 env.num_privileged_obs 而建错 critic)。
+        self.num_obs = ACTOR_OBS_DIM                             # actor = 35 x 4 causal frames
+        # Critic input = actor 140 + 12 simulation-only values = 152.
         self.num_privileged_obs = CRITIC_OBS_DIM if env._teacher else None
         self.device = device
         self.cfg = {"env_name": "kuafu", "num_envs": num_envs}
@@ -163,7 +176,7 @@ class DirectVecEnv:
 
         self._rng = jax_key if jax_key is not None else jax.random.PRNGKey(seed)
         self._rng, diff_rng = jax.random.split(self._rng)
-        diff_vec = jax.random.uniform(diff_rng, (num_envs,),
+        diff_vec = jax.random.uniform(diff_rng, (num_envs, DIFFICULTY_DIM),
                                       minval=0.0, maxval=self._difficulty)
         self._state = self._reset_vmapped(jax.random.split(self._rng, num_envs), diff_vec)
 
@@ -180,7 +193,7 @@ class DirectVecEnv:
         state_obs = self._to_torch(obs["state"]) if isinstance(obs, dict) else self._to_torch(obs)
         extras = {"observations": {}}
         if isinstance(obs, dict) and "privileged_state" in obs:
-            # critic 吃 actor obs (157) + 瞬态特权 (3) = 160
+            # critic receives actor observation plus all simulation-only values.
             priv_obs = self._to_torch(obs["privileged_state"])
             extras["observations"]["critic"] = torch.cat([state_obs, priv_obs], dim=-1)
         return state_obs, extras
@@ -189,7 +202,7 @@ class DirectVecEnv:
         """VecEnv 接口要求: 重置所有环境."""
         self._rng, reset_rng, diff_rng = jax.random.split(self._rng, 3)
         # per-env 独立采样难度 Uniform(0, d_max), 策略同时面对简单与困难场景
-        diff_vec = jax.random.uniform(diff_rng, (self.num_envs,),
+        diff_vec = jax.random.uniform(diff_rng, (self.num_envs, DIFFICULTY_DIM),
                                       minval=0.0, maxval=self._difficulty)
         self._state = self._reset_vmapped(jax.random.split(reset_rng, self.num_envs), diff_vec)
         self.episode_length_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
@@ -213,20 +226,35 @@ class DirectVecEnv:
             # 课程: 仅统计 done 且高难度 (difficulty > d_max×0.7) 环境的存活步数与摔倒率
             # 避免低难度虚高 + 非 done 稀释; 升级条件 avg_survival>800 且 fall_rate<0.5
             cur_env_state = self._state.info["env_state"]
-            high_diff = cur_env_state.difficulty > (self._difficulty * 0.7)
+            high_diff = jax.numpy.mean(cur_env_state.difficulty, axis=-1) > (self._difficulty * 0.7)
             relevant = done_jax & high_diff
             relevant_np = jax.device_get(relevant)
             if relevant_np.any():
                 survival_np = jax.device_get(cur_env_state.step_count)
                 fallen_np = jax.device_get(fallen_jax)
-                changed = self._curriculum.update(survival_np[relevant_np], fallen_np[relevant_np])
+                # P4: gate uses full-episode MAE and requires nonzero-command
+                # exposure.  A stationary policy cannot upgrade from one lucky
+                # terminal frame or an all-zero command episode.
+                count_np = jax.device_get(cur_env_state.track_count)[relevant_np]
+                lin_vel_err_np = jax.device_get(cur_env_state.track_v_abs_sum)[relevant_np] / count_np
+                yaw_err_np = jax.device_get(cur_env_state.track_w_abs_sum)[relevant_np] / count_np
+                d0_err_np = jax.device_get(cur_env_state.track_d0_abs_sum)[relevant_np] / count_np
+                nonzero_np = jax.device_get(cur_env_state.nonzero_command_count)[relevant_np]
+                track_pass = (
+                    (lin_vel_err_np <= 0.10)
+                    & (yaw_err_np <= 0.15)
+                    & (d0_err_np <= 5.0)
+                    & (nonzero_np > 0))
+                track_ok_frac = float(track_pass.mean()) if track_pass.size else None
+                changed = self._curriculum.update(
+                    survival_np[relevant_np], fallen_np[relevant_np], track_ok_frac)
                 if changed == "up":
                     self._reopen_exploration()
             self._adjust_entropy_floor()
             self._difficulty = jax.numpy.float32(self._curriculum.d)
 
             # per-env 独立采样难度 Uniform(0, d_max)
-            diff_vec = jax.random.uniform(diff_rng, (self.num_envs,),
+            diff_vec = jax.random.uniform(diff_rng, (self.num_envs, DIFFICULTY_DIM),
                                           minval=0.0, maxval=self._difficulty)
             reset_state = self._reset_vmapped(
                 jax.random.split(reset_rng, self.num_envs), diff_vec)
@@ -279,6 +307,31 @@ class DirectVecEnv:
                 "observations": extras.get("observations", {}), "log": log}
         return state_obs, reward, done, info
 
+    @staticmethod
+    def _host_tree(tree):
+        return jax.tree_util.tree_map(
+            lambda value: np.asarray(jax.device_get(value)) if hasattr(value, "shape") else value,
+            tree)
+
+    @staticmethod
+    def _device_tree(tree):
+        return jax.tree_util.tree_map(
+            lambda value: jax.numpy.asarray(value) if isinstance(value, np.ndarray) else value,
+            tree)
+
+    def checkpoint_state(self):
+        """Capture vectorized MJX state, delays, integrators, and RNGs for exact resume."""
+        return {
+            "rng": np.asarray(jax.device_get(self._rng)),
+            "state": self._host_tree(self._state),
+            "episode_length": self.episode_length_buf.detach().cpu(),
+        }
+
+    def restore_checkpoint_state(self, snapshot):
+        self._rng = jax.numpy.asarray(snapshot["rng"])
+        self._state = self._device_tree(snapshot["state"])
+        self.episode_length_buf = snapshot["episode_length"].to(self.device)
+
     def _reopen_exploration(self):
         """课程升级时把策略噪声 std 抬回下限, 重开探索.
 
@@ -319,38 +372,83 @@ class _CurriculumPersistMixin:
     curriculum_{it}.pt 中额外持久化 d_max, resume 时回写 env._curriculum.d。
     """
     def save(self, path, infos=None):
-        super().save(path, infos)
+        # RSL-RL saves a complete policy/optimizer state.  Route that write through
+        # a sibling temporary file, then add KUAFU's curriculum/RNG/schema state and
+        # atomically replace the destination so interrupted saves never yield a
+        # half-checkpoint.
+        directory = os.path.dirname(path)
+        fd, temporary = tempfile.mkstemp(prefix=".checkpoint-", suffix=".pt", dir=directory)
+        os.close(fd)
         try:
+            super().save(temporary, infos)
+            checkpoint = torch.load(temporary, map_location="cpu", weights_only=False)
             cur = self.env._curriculum
-            sidecar = path.replace("model_", "curriculum_")
-            torch.save({
-                "d": float(cur.d),
-                "difficulty": float(self.env._difficulty),
-                # 持久化滑动窗口缓冲与最近统计, 避免 resume 后课程冷启动 / TB NaN
-                "surv_buf": list(cur._surv_buf),
-                "fall_buf": list(cur._fall_buf),
-                "last_avg_survival": float(cur._last_avg_survival),
-                "last_fall_rate": float(cur._last_fall_rate),
-            }, sidecar)
-        except Exception:
-            pass
+            checkpoint["kuafu_state"] = {
+                "schema_version": __import__("rl.env.contract", fromlist=["SCHEMA_VERSION"]).SCHEMA_VERSION,
+                "model_hash": __import__("kuafu_physics").model_hash(),
+                "curriculum": {
+                    "d": float(cur.d),
+                    "surv_buf": list(cur._surv_buf),
+                    "fall_buf": list(cur._fall_buf),
+                    "last_avg_survival": float(cur._last_avg_survival),
+                    "last_fall_rate": float(cur._last_fall_rate),
+                    "last_track_ok": float(cur._last_track_ok),
+                },
+                "entropy_coef": float(self.alg.entropy_coef),
+                "learning_rate": float(self.alg.learning_rate),
+                "torch_rng": torch.get_rng_state(),
+                "numpy_rng": np.random.get_state(),
+                "python_rng": random.getstate(),
+                "jax_rng": jax.device_get(self.env._rng),
+                "environment": self.env.checkpoint_state(),
+                "torch_cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            }
+            torch.save(checkpoint, temporary)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     def load(self, path, load_optimizer=True):
-        infos = super().load(path, load_optimizer)
-        sidecar = path.replace("model_", "curriculum_")
-        if os.path.exists(sidecar):
-            try:
-                sd = torch.load(sidecar, weights_only=False)
-                self.env._curriculum.d = float(sd["d"])
-                self.env._difficulty = jax.numpy.float32(sd["d"])
-                cur = self.env._curriculum
-                cur._surv_buf = list(sd.get("surv_buf", []))
-                cur._fall_buf = list(sd.get("fall_buf", []))
-                cur._last_avg_survival = float(sd.get("last_avg_survival", float("nan")))
-                cur._last_fall_rate = float(sd.get("last_fall_rate", float("nan")))
-            except Exception:
-                pass
-        return infos
+        # RSL-RL loads without map_location; use the runner device so a CUDA
+        # checkpoint can be resumed on CPU for audit/smoke runs as well.
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        state = checkpoint.get("kuafu_state")
+        if state is None:
+            raise RuntimeError("checkpoint lacks KUAFU resume state; legacy checkpoints cannot resume")
+        from rl.env.contract import SCHEMA_VERSION
+        import kuafu_physics as P
+        if state["schema_version"] != SCHEMA_VERSION or state["model_hash"] != P.model_hash():
+            raise RuntimeError("checkpoint schema/model hash does not match this run")
+        self.alg.policy.load_state_dict(checkpoint["model_state_dict"])
+        if self.alg.rnd and checkpoint.get("rnd_state_dict") is not None:
+            self.alg.rnd.load_state_dict(checkpoint["rnd_state_dict"])
+        if load_optimizer:
+            self.alg.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.current_learning_iteration = checkpoint["iter"]
+        cur_state = state["curriculum"]
+        cur = self.env._curriculum
+        cur.d = float(cur_state["d"])
+        self.env._difficulty = jax.numpy.float32(cur.d)
+        cur._surv_buf = list(cur_state["surv_buf"])
+        cur._fall_buf = list(cur_state["fall_buf"])
+        cur._last_avg_survival = float(cur_state["last_avg_survival"])
+        cur._last_fall_rate = float(cur_state["last_fall_rate"])
+        cur._last_track_ok = float(cur_state["last_track_ok"])
+        self.alg.entropy_coef = float(state["entropy_coef"])
+        self.alg.learning_rate = float(state["learning_rate"])
+        for group in self.alg.optimizer.param_groups:
+            group["lr"] = self.alg.learning_rate
+        torch.set_rng_state(state["torch_rng"])
+        np.random.set_state(state["numpy_rng"])
+        random.setstate(state["python_rng"])
+        self.env._rng = jax.numpy.asarray(state["jax_rng"])
+        if state.get("environment") is None:
+            raise RuntimeError("checkpoint lacks exact vectorized environment state")
+        self.env.restore_checkpoint_state(state["environment"])
+        if state.get("torch_cuda_rng") is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(state["torch_cuda_rng"])
+        return checkpoint["infos"]
 
 
 def main():
@@ -412,9 +510,16 @@ def main():
     run_root = os.path.join(PROJ_ROOT, args.log_dir, args.run_name)
     log_dir = os.path.join(run_root, "teacher")
 
+    if args.smoke_test:
+        # Smoke runs are disposable and never share a formal run directory.
+        run_root = os.path.join(PROJ_ROOT, args.log_dir, "_smoke", f"{args.run_name}-{int(time.time())}")
+        log_dir = os.path.join(run_root, "teacher")
+    if args.resume and os.path.abspath(os.path.dirname(args.resume)) == os.path.abspath(log_dir):
+        raise SystemExit("resume output must use a new --run_name; source checkpoints are immutable")
+
     # 防覆盖校验: 目录已存在且含 .pt, 且非续训 -> 报错
     existing = glob.glob(os.path.join(log_dir, "model_*.pt"))
-    if existing and not args.resume and not args.smoke_test:
+    if existing and not args.resume:
         print(f"❌ 目录已含 checkpoint: {log_dir}")
         print(f"   续训请加 --resume <latest.pt>, 或换 --run_name")
         sys.exit(1)
@@ -422,6 +527,8 @@ def main():
     os.makedirs(log_dir, exist_ok=True)
 
     # ---- 写训练元数据 run.json ----
+    from rl.env.contract import SCHEMA_VERSION
+    import kuafu_physics as P
     run_meta = {
         "run_name": args.run_name,
         "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -430,8 +537,10 @@ def main():
         "seed": args.seed,
         "resume_from": args.resume,
         "algorithm": "PPO",
-        "policy": "ActorCritic [512,512,512] elu",
+        "policy": "TanhActorCritic [512,512,512] elu",
         "device": device,
+        "schema_version": SCHEMA_VERSION,
+        "model_hash": P.model_hash(),
         "provenance": capture_provenance(),
     }
     meta_path = os.path.join(run_root, "run.json")
@@ -440,6 +549,13 @@ def main():
 
     # ---- RSL-RL Runner ----
     from rsl_rl.runners import OnPolicyRunner
+    # 注入 TanhActorCritic 到 runner 命名空间: runner 用 eval(policy_cfg["class_name"])
+    # 解析策略类, 故需让 "TanhActorCritic" 可解析 (audit P0: 训练=无界 vs 部署=tanh)。
+    from rl.train.tanh_actor_critic import TanhActorCritic
+    import rsl_rl.runners.on_policy_runner as _runner_mod
+    _runner_mod.TanhActorCritic = TanhActorCritic
+    train_cfg["policy"]["class_name"] = "TanhActorCritic"
+
     class _StepRunner(_CurriculumPersistMixin, OnPolicyRunner):
         pass
     runner = _StepRunner(torch_env, train_cfg, log_dir=log_dir, device=device)
@@ -467,7 +583,7 @@ def main():
     total_steps = args.num_envs * train_cfg["num_steps_per_env"] * run_iter
     print(f"开始训练: 需进行 {run_iter} 轮迭代 (已完成 {start_iter} 轮, 目标 {n_iter} 轮) × {args.num_envs} envs × {train_cfg['num_steps_per_env']} steps = {total_steps:,} steps")
     t0 = time.time()
-    runner.learn(num_learning_iterations=run_iter, init_at_random_ep_len=True)
+    runner.learn(num_learning_iterations=run_iter, init_at_random_ep_len=not bool(args.resume))
     elapsed = time.time() - t0
 
     print(f"\n✅ 训练完成: {elapsed:.1f}s, {total_steps:,} steps, {total_steps/elapsed:,.0f} steps/s")
