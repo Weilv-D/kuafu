@@ -131,6 +131,7 @@ int st3215_read_state(UART_HandleTypeDef *huart, uint8_t id, ST3215_State_t *sta
     state->current_a = (float)raw_current * 0.0065f; /* 6.5mA per LSB */
 
     state->id = id;
+    device_health_mark_valid(&state->health, HAL_GetTick());
     return 0;
 }
 

@@ -509,6 +509,16 @@
               <FilePath>..\Core\Inc\servo_mapping.h</FilePath>
             </File>
             <File>
+              <FileName>device_health.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\device_health.c</FilePath>
+            </File>
+            <File>
+              <FileName>device_health.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\device_health.h</FilePath>
+            </File>
+            <File>
               <FileName>kuafu_generated.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Core\Inc\kuafu_generated.h</FilePath>

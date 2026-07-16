@@ -119,7 +119,7 @@ int ddsm_parse_feedback(const uint8_t *rx_buf, DDSM_State_t *state) {
     state->position_rad = (float)raw_position * POS_TO_RAD;
 
     state->error_code = rx_buf[8];
-    state->last_update_ms = HAL_GetTick();
+    device_health_mark_valid(&state->health, HAL_GetTick());
 
     return 0;
 }

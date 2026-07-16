@@ -2,6 +2,7 @@
 #define ST3215_H
 
 #include "stm32f4xx_hal.h"
+#include "device_health.h"
 #include <stdint.h>
 
 #define ST_INST_PING             0x01
@@ -35,8 +36,7 @@ typedef struct {
     float temperature_c;     /* Present temperature in Celsius */
     float voltage;           /* Present voltage in Volts */
     float current_a;         /* Present current in Amperes */
-    uint8_t is_online;       /* 1 if online, 0 if offline */
-    uint8_t consecutive_failures;
+    DeviceHealth_t health;
 } ST3215_State_t;
 
 /**

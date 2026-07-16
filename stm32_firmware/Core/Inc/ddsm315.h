@@ -2,6 +2,7 @@
 #define DDSM315_H
 
 #include "stm32f4xx_hal.h"
+#include "device_health.h"
 #include <stdint.h>
 
 #define DDSM_MODE_CURRENT        1
@@ -16,7 +17,7 @@ typedef struct {
     float velocity_rads;     /* Measured feedback velocity (rad/s) */
     float position_rad;      /* Measured feedback single-turn angle (rad, [0, 2pi]) */
     uint8_t error_code;
-    uint32_t last_update_ms;
+    DeviceHealth_t health;
 } DDSM_State_t;
 
 /**

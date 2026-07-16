@@ -2,6 +2,7 @@
 #define BMI088_H
 
 #include "stm32f4xx_hal.h"
+#include "device_health.h"
 
 /* I2C Device Addresses */
 #define BMI088_ACCEL_ADDR        0x18
@@ -35,6 +36,7 @@ typedef struct {
     float accel[3];          /* Accel X, Y, Z in m/s^2 */
     float gyro[3];           /* Gyro X, Y, Z in rad/s */
     float temperature;       /* Chip temperature in degC */
+    DeviceHealth_t health;
 } BMI088_t;
 
 /**

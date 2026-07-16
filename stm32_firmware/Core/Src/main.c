@@ -82,10 +82,12 @@ int main(void) {
 
     g_ddsm_left.id = DDSM_LEFT_ID;
     g_ddsm_right.id = DDSM_RIGHT_ID;
+    device_health_init(&g_ddsm_left.health);
+    device_health_init(&g_ddsm_right.health);
     for (int i = 0; i < 4; i++) {
         g_servos[i].id = i + 1; /* IDs: 1, 2, 3, 4 */
-        g_servos[i].is_online = 1;
-        g_servos[i].consecutive_failures = 0;
+        device_health_init(&g_servos[i].health);
+        g_servos[i].health.online = 1U; /* optimistic discovery; first valid read timestamps it */
     }
 
     /* Start Pi Link bridge USART6 reception via DMA */
@@ -376,16 +378,21 @@ int main(void) {
             /* Sequentially query feedback from one online servo to prevent blocking.
              * A servo that stays unreachable triggers a fatal FAULT lockdown. */
             ST3215_State_t *qs = &g_servos[active_servo_query_idx];
-            if (qs->is_online) {
-                if (st3215_read_state(&huart3, ids[active_servo_query_idx], qs) == 0) {
-                    qs->consecutive_failures = 0;
+            if (qs->health.online) {
+                int read_result = st3215_read_state(&huart3, ids[active_servo_query_idx], qs);
+                if (read_result == 0) {
+                    /* Driver marks the shared health record valid. */
                 } else if (g_safety_state.current_mode == STATE_INIT) {
                     /* Ignore transient boot races before calibration; keep retrying */
-                    qs->consecutive_failures = 0;
+                    device_health_mark_failure(&qs->health,
+                                               read_result == -2 ? DEVICE_FAILURE_CHECKSUM : DEVICE_FAILURE_TIMEOUT,
+                                               0U);
+                    qs->health.consecutive_failures = 0U;
                 } else {
-                    qs->consecutive_failures++;
-                    if (qs->consecutive_failures >= SERVO_FAIL_LIMIT) {
-                        qs->is_online = 0;
+                    device_health_mark_failure(&qs->health,
+                                               read_result == -2 ? DEVICE_FAILURE_CHECKSUM : DEVICE_FAILURE_TIMEOUT,
+                                               SERVO_FAIL_LIMIT);
+                    if (!qs->health.online) {
                         safety_state_trigger_fault(FAULT_SERVO); /* fatal lockdown */
                     }
                 }

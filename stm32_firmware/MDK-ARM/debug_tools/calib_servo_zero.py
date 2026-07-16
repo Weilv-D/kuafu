@@ -25,11 +25,11 @@ def symbol_address(name):
         raise RuntimeError(f"cannot find {name} in {MAP_PATH}")
     return int(match.group(1), 16)
 
-# Each ST3215_State_t is 0x20 bytes. Resolve the base from the latest build.
+# Each ST3215_State_t is 0x28 bytes. Resolve the base from the latest build.
 A_SERVOS = symbol_address("g_servos")
-SERVO_STRIDE = 0x20
+SERVO_STRIDE = 0x28
 OFF_POS_RAD = 0x04
-OFF_IS_ONLINE = 0x1c
+OFF_IS_ONLINE = 0x27
 SERVO_NAMES = ["LF (id1, hip_A_l)", "RF (id2, hip_A_r)", "LB (id3, hip_B_l)", "RB (id4, hip_B_r)"]
 
 TICK_TO_RAD = (2.0 * 3.14159265) / 4096.0
