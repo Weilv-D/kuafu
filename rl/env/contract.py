@@ -173,9 +173,6 @@ class ProtocolFrameSpec:
         "hip_A_r_pos", "hip_A_r_vel", "hip_A_r_current",
         "hip_B_l_pos", "hip_B_l_vel", "hip_B_l_current",
         "hip_B_r_pos", "hip_B_r_vel", "hip_B_r_current",
-        "health_fault_mask", "health_mode", "health_reset_cause",
-        "health_imu_age", "health_wheel_age", "health_servo_age",
-        "health_bus_errors",
     )
     # 轮速/角速度使用 ×1000；位置/电流使用各自的 frame codec scale。
     WHEEL_SPEED_SCALE = 1000
