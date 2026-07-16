@@ -12,6 +12,12 @@ uint32_t test_get_time_ms(void);
 void test_i2c_reset(void);
 void test_i2c_set_chip_ids(uint8_t accel_id, uint8_t gyro_id);
 uint32_t test_i2c_operation_count(void);
+void test_uart_reset(void);
+uint32_t test_uart_tx_count(void);
+const uint8_t *test_uart_last_tx(void);
+uint16_t test_uart_last_tx_size(void);
+void test_uart_supply_rx(const uint8_t *data, uint16_t size);
+uint32_t test_uart_abort_count(void);
 
 #define TEST_TRUE(expr) do { \
     if (!(expr)) { \

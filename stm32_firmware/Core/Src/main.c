@@ -30,6 +30,7 @@ LQRController_t g_lqr;
 DDSM_State_t g_ddsm_left;
 DDSM_State_t g_ddsm_right;
 ST3215_State_t g_servos[4];
+static DDSM_Bus_t g_ddsm_bus;
 
 /* Wheel torque commands computed and sent together at each 250 Hz deadline. */
 static float g_ctrl_tau_l = 0.0f;
@@ -84,6 +85,7 @@ int main(void) {
     g_ddsm_right.id = DDSM_RIGHT_ID;
     device_health_init(&g_ddsm_left.health);
     device_health_init(&g_ddsm_right.health);
+    ddsm_bus_init(&g_ddsm_bus, &huart2);
     for (int i = 0; i < 4; i++) {
         g_servos[i].id = i + 1; /* IDs: 1, 2, 3, 4 */
         device_health_init(&g_servos[i].health);
@@ -128,6 +130,8 @@ int main(void) {
         StartupOutputs_t startup_outputs;
         uint8_t startup_servos_online = 1U;
 
+        ddsm_bus_step(&g_ddsm_bus, startup_now);
+
         if (bmi_init_in_progress) {
             int bmi_result = bmi088_init_step(&g_imu, startup_now);
             if (bmi_result != 0) {
@@ -161,20 +165,24 @@ int main(void) {
         }
 
         if (startup_outputs.request_actuator_discovery && !actuator_configured) {
+            int discovery_result = -1;
             if (actuator_discovery_step == 0U) {
-                (void)ddsm_set_mode(&huart2, DDSM_LEFT_ID, DDSM_MODE_CURRENT);
+                discovery_result = ddsm_bus_queue_mode(&g_ddsm_bus, &g_ddsm_left,
+                                                       DDSM_MODE_CURRENT, startup_now);
             } else if (actuator_discovery_step == 1U) {
-                (void)ddsm_set_enable(&huart2, DDSM_LEFT_ID, 0U);
+                discovery_result = ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_left,
+                                                         0U, startup_now);
             } else if (actuator_discovery_step == 2U) {
-                (void)ddsm_set_mode(&huart2, DDSM_RIGHT_ID, DDSM_MODE_CURRENT);
+                discovery_result = ddsm_bus_queue_mode(&g_ddsm_bus, &g_ddsm_right,
+                                                       DDSM_MODE_CURRENT, startup_now);
             } else if (actuator_discovery_step == 3U) {
-                (void)ddsm_set_enable(&huart2, DDSM_RIGHT_ID, 0U);
+                discovery_result = ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_right,
+                                                         0U, startup_now);
             } else if (actuator_discovery_step < 8U) {
-                (void)st3215_set_torque_enable(&huart3,
-                                               (uint8_t)(actuator_discovery_step - 3U),
-                                               0U);
+                discovery_result = st3215_set_torque_enable(
+                    &huart3, (uint8_t)(actuator_discovery_step - 3U), 0U);
             }
-            if (actuator_discovery_step < 8U) {
+            if (actuator_discovery_step < 8U && discovery_result == 0) {
                 ++actuator_discovery_step;
             }
             actuator_configured = (uint8_t)(actuator_discovery_step >= 8U);
@@ -182,18 +190,23 @@ int main(void) {
 
         if (startup_outputs.enable_actuators && !actuators_enabled &&
             (int32_t)(startup_now - next_actuator_enable_ms) >= 0) {
+            int enable_result = -1;
             if (actuator_enable_step == 0U) {
-                (void)ddsm_set_enable(&huart2, DDSM_LEFT_ID, 1U);
+                enable_result = ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_left,
+                                                      1U, startup_now);
             } else if (actuator_enable_step == 1U) {
-                (void)ddsm_set_enable(&huart2, DDSM_RIGHT_ID, 1U);
+                enable_result = ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_right,
+                                                      1U, startup_now);
             } else if (actuator_enable_step < 6U) {
 #if SERVO_ZERO_CALIBRATION_MODE
-                (void)st3215_set_torque_enable(&huart3, (uint8_t)(actuator_enable_step - 1U), 0U);
+                enable_result = st3215_set_torque_enable(
+                    &huart3, (uint8_t)(actuator_enable_step - 1U), 0U);
 #else
-                (void)st3215_set_torque_enable(&huart3, (uint8_t)(actuator_enable_step - 1U), 1U);
+                enable_result = st3215_set_torque_enable(
+                    &huart3, (uint8_t)(actuator_enable_step - 1U), 1U);
 #endif
             }
-            if (actuator_enable_step < 6U) {
+            if (actuator_enable_step < 6U && enable_result == 0) {
                 ++actuator_enable_step;
             }
             next_actuator_enable_ms = startup_now + 5U;
@@ -347,22 +360,16 @@ int main(void) {
                                 &g_ctrl_tau_l,
                                 &g_ctrl_tau_r);
 
-                    ddsm_set_torque(&huart2, DDSM_LEFT_ID, WHEEL_DIR_L * g_ctrl_tau_l);
+                    (void)ddsm_bus_queue_torque(&g_ddsm_bus, &g_ddsm_left,
+                                                WHEEL_DIR_L * g_ctrl_tau_l,
+                                                last_tick);
                 } else {
                     /* Safe stop wheels if in FAULT or INIT */
                     g_ctrl_tau_l = 0.0f;
                     g_ctrl_tau_r = 0.0f;
-                    ddsm_set_torque(&huart2, DDSM_LEFT_ID, 0.0f);
+                    (void)ddsm_bus_queue_torque(&g_ddsm_bus, &g_ddsm_left,
+                                                0.0f, last_tick);
                 }
-
-                /* Discard RS485 self-echo, then block-read Left feedback (10 bytes) */
-                __HAL_UART_CLEAR_OREFLAG(&huart2);
-                __HAL_UART_FLUSH_DRREGISTER(&huart2);
-                uint8_t rx_buf[10];
-                if (HAL_UART_Receive(&huart2, rx_buf, 10, 2) == HAL_OK) {
-                    ddsm_parse_feedback(rx_buf, &g_ddsm_left);
-                }
-
             }
 
             /* The right motor has an independent staggered deadline. This keeps
@@ -371,17 +378,12 @@ int main(void) {
             if (right_due && startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY) {
                 last_right_tick = last_tick;
                 if (g_safety_state.current_mode != STATE_FAULT && g_safety_state.current_mode != STATE_INIT) {
-                    ddsm_set_torque(&huart2, DDSM_RIGHT_ID, WHEEL_DIR_R * g_ctrl_tau_r);
+                    (void)ddsm_bus_queue_torque(&g_ddsm_bus, &g_ddsm_right,
+                                                WHEEL_DIR_R * g_ctrl_tau_r,
+                                                last_tick);
                 } else {
-                    ddsm_set_torque(&huart2, DDSM_RIGHT_ID, 0.0f);
-                }
-
-                /* Discard RS485 self-echo, then block-read Right feedback (10 bytes) */
-                __HAL_UART_CLEAR_OREFLAG(&huart2);
-                __HAL_UART_FLUSH_DRREGISTER(&huart2);
-                uint8_t right_rx_buf[10];
-                if (HAL_UART_Receive(&huart2, right_rx_buf, 10, 2) == HAL_OK) {
-                    ddsm_parse_feedback(right_rx_buf, &g_ddsm_right);
+                    (void)ddsm_bus_queue_torque(&g_ddsm_bus, &g_ddsm_right,
+                                                0.0f, last_tick);
                 }
             }
 
@@ -701,6 +703,8 @@ static void MX_USART2_UART_Init(void) {
     if (HAL_UART_Init(&huart2) != HAL_OK) {
         Error_Handler();
     }
+    HAL_NVIC_SetPriority(USART2_IRQn, 1, 0);
+    HAL_NVIC_EnableIRQ(USART2_IRQn);
 }
 
 static void MX_USART3_UART_Init(void) {
@@ -803,6 +807,28 @@ void USART6_IRQHandler(void) {
         HAL_UART_Receive_DMA(&huart6, g_pi_rx_buf, PI_RX_BUF_SIZE);
     }
     HAL_UART_IRQHandler(&huart6);
+}
+
+void USART2_IRQHandler(void) {
+    HAL_UART_IRQHandler(&huart2);
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
+    if (huart == &huart2) {
+        ddsm_bus_on_tx_complete(&g_ddsm_bus);
+    }
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+    if (huart == &huart2) {
+        ddsm_bus_on_rx_complete(&g_ddsm_bus, HAL_GetTick());
+    }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+    if (huart == &huart2) {
+        ddsm_bus_on_uart_error(&g_ddsm_bus);
+    }
 }
 
 /**

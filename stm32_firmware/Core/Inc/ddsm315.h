@@ -5,68 +5,59 @@
 #include "device_health.h"
 #include <stdint.h>
 
-#define DDSM_MODE_CURRENT        1
-#define DDSM_MODE_SPEED          2
-#define DDSM_MODE_POSITION       3
-#define DDSM_MODE_DISABLE        9
+#define DDSM_MODE_CURRENT        1U
+#define DDSM_MODE_SPEED          2U
+#define DDSM_MODE_POSITION       3U
+#define DDSM_MODE_DISABLE        9U
+#define DDSM_FRAME_SIZE         10U
+#define DDSM_TRANSACTION_TIMEOUT_MS 2U
 
 typedef struct {
     uint8_t id;
     uint8_t mode;
-    float torque;            /* Measured feedback torque (N-m) */
-    float velocity_rads;     /* Measured feedback velocity (rad/s) */
-    float position_rad;      /* Measured feedback single-turn angle (rad, [0, 2pi]) */
+    float torque;
+    float velocity_rads;
+    float position_rad;
     uint8_t error_code;
     DeviceHealth_t health;
 } DDSM_State_t;
 
-/**
- * @brief Sends a command to set the motor torque (current loop).
- * 
- * @param huart USART handle to send the packet.
- * @param id Motor ID.
- * @param torque_nm Target torque in N-m (clamped to [-1.1, 1.1]).
- * @return int 0 on success, -1 on failure.
- */
-int ddsm_set_torque(UART_HandleTypeDef *huart, uint8_t id, float torque_nm);
+typedef enum {
+    DDSM_BUS_IDLE = 0,
+    DDSM_BUS_TX = 1,
+    DDSM_BUS_RX = 2
+} DDSM_BusPhase_t;
 
-/**
- * @brief Sends a command to set the motor speed (speed loop).
- * 
- * @param huart USART handle to send the packet.
- * @param id Motor ID.
- * @param rpm Target speed in RPM.
- * @return int 0 on success, -1 on failure.
- */
-int ddsm_set_speed(UART_HandleTypeDef *huart, uint8_t id, float rpm);
+typedef struct {
+    UART_HandleTypeDef *huart;
+    DDSM_State_t *target;
+    uint8_t tx[DDSM_FRAME_SIZE];
+    uint8_t rx[DDSM_FRAME_SIZE];
+    uint32_t deadline_ms;
+    DDSM_BusPhase_t phase;
+} DDSM_Bus_t;
 
-/**
- * @brief Sends enable/disable command to the motor.
- * 
- * @param huart USART handle.
- * @param id Motor ID.
- * @param enable 1 to enable, 0 to disable.
- * @return int 0 on success, -1 on failure.
- */
-int ddsm_set_enable(UART_HandleTypeDef *huart, uint8_t id, uint8_t enable);
+void ddsm_build_torque(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, float torque_nm);
+void ddsm_build_speed(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, float rpm);
+void ddsm_build_enable(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, uint8_t enable);
+void ddsm_build_mode(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, uint8_t mode);
+int ddsm_parse_feedback(const uint8_t packet[DDSM_FRAME_SIZE], DDSM_State_t *state);
 
-/**
- * @brief Changes the motor control mode.
- * 
- * @param huart USART handle.
- * @param id Motor ID.
- * @param mode Target mode (DDSM_MODE_CURRENT, DDSM_MODE_SPEED, DDSM_MODE_POSITION).
- * @return int 0 on success, -1 on failure.
- */
-int ddsm_set_mode(UART_HandleTypeDef *huart, uint8_t id, uint8_t mode);
+void ddsm_bus_init(DDSM_Bus_t *bus, UART_HandleTypeDef *huart);
+uint8_t ddsm_bus_is_idle(const DDSM_Bus_t *bus);
+int ddsm_bus_submit(DDSM_Bus_t *bus,
+                    DDSM_State_t *target,
+                    const uint8_t packet[DDSM_FRAME_SIZE],
+                    uint32_t now_ms);
+int ddsm_bus_queue_torque(DDSM_Bus_t *bus, DDSM_State_t *target,
+                          float torque_nm, uint32_t now_ms);
+int ddsm_bus_queue_enable(DDSM_Bus_t *bus, DDSM_State_t *target,
+                          uint8_t enable, uint32_t now_ms);
+int ddsm_bus_queue_mode(DDSM_Bus_t *bus, DDSM_State_t *target,
+                        uint8_t mode, uint32_t now_ms);
+void ddsm_bus_step(DDSM_Bus_t *bus, uint32_t now_ms);
+void ddsm_bus_on_tx_complete(DDSM_Bus_t *bus);
+void ddsm_bus_on_rx_complete(DDSM_Bus_t *bus, uint32_t now_ms);
+void ddsm_bus_on_uart_error(DDSM_Bus_t *bus);
 
-/**
- * @brief Parses a received 10-byte feedback frame and updates motor state.
- * 
- * @param rx_buf Pointer to 10-byte buffer.
- * @param state Out: State structure to update.
- * @return int 0 on success, -1 on CRC/format failure, -2 on wrong ID.
- */
-int ddsm_parse_feedback(const uint8_t *rx_buf, DDSM_State_t *state);
-
-#endif /* DDSM315_H */
+#endif
