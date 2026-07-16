@@ -86,17 +86,10 @@ DISTILL = {
 }
 
 # ============================================================
-# 课程 (design.md §2.6: 自动课程) — 设计参考; 实际课程由 train.py 的 Curriculum 类
-# 驱动 (全局成功率滑动窗口双向调节, 初始难度 0.1 即注入 DR + 随机推力, 防卡 difficulty=0)
+# 课程 — 实际课程由 rl/train/curriculum.py 的 8-axis 独立课程驱动
+# (AXIS_CONFIG: command/d0/dr/latency/slope/step/rough/push 各自独立升降级,
+#  terrain/扰动轴纯存活门, command/d0 加跟踪反作弊门)。本文件不再维护课程配置。
 # ============================================================
-CURRICULUM = [
-    {"name": "flat_balance",    "terrain": "plane",        "difficulty": 0.0, "threshold": 0.90},
-    {"name": "slope",           "terrain": "plane_tilt",   "difficulty": 0.3, "threshold": 0.85},
-    {"name": "rough",           "terrain": "hfield",       "difficulty": 0.5, "threshold": 0.80},
-    {"name": "stair_30mm",      "terrain": "mesh_stair",   "difficulty": 0.7, "threshold": 0.80},  # M4 验收
-    {"name": "perturbation",    "terrain": "plane",        "difficulty": 1.0, "threshold": 0.80},
-    # 成功率 ≥ threshold -> 升级; ≤ 40% -> 降级 (双向调节, 避免策略退化后永久卡死)
-]
 
 # ============================================================
 # 收敛判据 (design.md M5 验收) — "两者结合": 原恢复时间指标保留为子集,

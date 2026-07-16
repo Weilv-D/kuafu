@@ -3,7 +3,7 @@
 
 /* AUTO-GENERATED from kuafu_physics.py. Regenerate with rl/verify/generate_artifacts.py. */
 #define KUAFU_MODEL_SCHEMA_VERSION "v1.1.0"
-#define KUAFU_MODEL_HASH "42d18b6c352bbe04"
+#define KUAFU_MODEL_HASH "18b6af846c4dc95d"
 #define BASE_DT 0.004000f
 #define PHYS_DT 0.002000f
 #define RL_DT 0.020000f

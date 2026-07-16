@@ -61,7 +61,7 @@ The Jacobian term `-log(1-a^2)` is included in `log_prob`, ensuring unbiased PPO
 
 ## Curriculum
 
-Training drives a 7-axis independent curriculum state machine: command, D0, domain randomization, latency/noise, slope, step, and push. Each axis has independent levels (0-4), evaluated every 25 PPO updates. An axis advances when survival rate is at least 90% and tracking passes at least 80% for two consecutive evaluations; it regresses on two consecutive failures. Upgrade decisions use full-episode velocity, yaw, and D0 tracking error with nonzero-command exposure, so a policy that remains still cannot pass the gate.
+Training drives an 8-axis independent curriculum state machine (`rl/train/curriculum.py`): `command, d0, dr, latency, slope, step, rough, push`. Each axis has independent levels (0-4), evaluated by done-env episode count. Terrain/perturbation axes advance on a pure survival gate; only `command`/`d0` add a tracking anti-cheat gate calibrated to the physical noise floor, so a policy that remains still cannot pass the gate but terrain progress is never blocked on velocity tracking. An axis advances when survival (and, for command/d0, tracking) passes for two consecutive evaluations and regresses on two consecutive failures. Rough terrain is a MuJoCo heightfield rewritten each reset.
 
 ## Simulation
 

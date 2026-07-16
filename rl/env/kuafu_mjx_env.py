@@ -97,12 +97,10 @@ RMA_STATIC_DIM = 9    # friction(1)+mass_scale(1)+com_bias(3)+inertia_scale(1)+t
 TRANSIENT_DIM = 3     # active_push(3) 瞬态外力
 ACTION_DIM = 6        # [dtau_common, dtau_yaw, dQx_L, dD0_L, dQx_R, dD0_R]
 DELAY_BUFFER_LEN = 3   # 最大延迟缓冲 (3步×20ms=60ms, 覆盖 DR_DELAY_ACT=30ms + DR_DELAY_SENSE=20ms)
-DIFF_COMMAND = 0
-DIFF_DR = 1
-DIFF_TERRAIN = 2
-DIFF_PUSH = 3
-DIFF_D0 = 4
-DIFFICULTY_DIM = 5
+from rl.train.curriculum import AXES, NUM_AXES, DIFF_INDICES
+# 难度轴序单一真源 (8轴): command, d0, dr, latency, slope, step, rough, push
+D = DIFF_INDICES
+DIFFICULTY_DIM = NUM_AXES
 
 # Actor 只消费本体感受；Critic 追加仿真特权。
 PROPRIO_DIM = OBS_DIM
@@ -293,13 +291,20 @@ class KuafuMjxEnv(MjxEnv):
         self._wheel_l_geom_id = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_GEOM, "wheel_l_geom")
         self._wheel_r_geom_id = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_GEOM, "wheel_r_geom")
 
-        # 地形几何 ID (M4 台阶/斜坡, 由 _apply_terrain 按 difficulty 缩放)
-        # 注: MJX 不支持 heightfield×cylinder 碰撞, 故地形用倾斜平面(斜坡) +
-        # 静态 step box(台阶) 实现, 二者均兼容圆柱轮 (cylinder-plane/box 碰撞已支持)
+        # 地形几何 ID: 斜坡(floor plane 旋转)/台阶(step box)/粗糙(hfield)
+        # 由 _apply_terrain 按 3 个独立轴 difficulty(D['slope']/D['step']/D['rough']) 缩放。
+        # 轮为 capsule, MJX 3.10.0 支持 hfield×capsule 碰撞, 故粗糙地形用 heightfield 实现。
         self._floor_geom_id = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
         self._step_geom_ids = [
             mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_GEOM, f"step{i}") for i in range(4)
         ]
+        # 粗糙地形 hfield 缓存 (MJX 3.10.0 支持 hfield×capsule 碰撞)
+        self._hfield_geom_id = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_GEOM, "terrain_hfield")
+        self._hfield_id = int(self._mj_model.geom_dataid[self._hfield_geom_id])  # hfield asset id
+        self._hfield_data_id = int(self._mj_model.hfield_adr[self._hfield_id])
+        self._hfield_nrow = int(self._mj_model.hfield_nrow[self._hfield_id])
+        self._hfield_ncol = int(self._mj_model.hfield_ncol[self._hfield_id])
+        self._hfield_n = self._hfield_nrow * self._hfield_ncol
 
         # keyframe 0 (dwell) 的 qpos
         self._keyframe_qpos = self._mj_model.qpos0.copy()
@@ -331,7 +336,7 @@ class KuafuMjxEnv(MjxEnv):
 
         在 reset 时调用, 对 mass/friction/inertia/COM/wheel_radius/servo_pd 注入随机扰动。
         """
-        dr_difficulty = difficulty[DIFF_DR]
+        dr_difficulty = difficulty[D["dr"]]
         # mass ±15% (与独立 DR 难度缩放)
         mass_scale_raw = jax.random.uniform(
             rng, minval=DR["mass"][0], maxval=DR["mass"][1])
@@ -392,29 +397,39 @@ class KuafuMjxEnv(MjxEnv):
 
         return model, friction_actual, mass_scale, inertia_scale, com_bias
 
-    # ---- 地形 (M4 台阶/斜坡) ----
+    # ---- 地形 (8轴: slope / step / rough 独立) ----
     def _apply_terrain(self, model: mjx.Model, difficulty: jax.Array, rng: jax.Array) -> mjx.Model:
-        """按课程难度生成地形 (M4 台阶/斜坡), 兼容 MJX 圆柱轮碰撞.
+        """按 3 个独立地形轴的 difficulty 生成地形, 组合应用。
 
-        MJX 不支持 heightfield×cylinder, 故用:
-          - 斜坡: 旋转 ground plane 法向 (绕 Y 轴 ≤10°), 随 difficulty 缩放
-          - 台阶: 4 级静态 step box, 高度 = (i+1)×30mm × difficulty (M4 验收 30mm)
-        difficulty=0 → 平面不倾斜 + 台阶高度≈0, 完全退回已验证的平地行为。
-        出生在原点 (x=0, y=0), 台阶位于 x≥0.6m, 斜坡在原点 z=0 通过, 起步安全。
+        difficulty=0 → 平面不倾斜 + 台阶高度≈0 + hfield 全平, 完全退回已验证平地。
+        出生在原点 (x=0, y=0), 台阶/hfield 凸起避开出生区, 起步安全。
         """
-        # 斜坡: 绕 Y 轴旋转 ground plane, 角度 = difficulty × 10°
-        terrain_difficulty = difficulty[DIFF_TERRAIN]
+        model = self._apply_slope(model, difficulty, rng)
+        model = self._apply_step(model, difficulty, rng)
+        model = self._apply_rough(model, difficulty, rng)
+        return model
+
+    def _apply_slope(self, model: mjx.Model, difficulty: jax.Array, rng: jax.Array) -> mjx.Model:
+        """斜坡: 旋转 ground plane + hfield 法向 (绕 Y 轴 ≤10°), 随 D['slope'] 缩放。
+
+        地面 plane 作无限兜底 (避免 hfield 边界外坠空), hfield 同步旋转使粗糙区
+        与斜坡一致; difficulty=0 → 单位四元数 (全平)。
+        """
         rng, slope_rng = jax.random.split(rng)
         slope_sign = jax.random.bernoulli(slope_rng, p=0.5) * 2.0 - 1.0
-        ang = slope_sign * terrain_difficulty * jp.radians(10.0)
+        ang = slope_sign * difficulty[D["slope"]] * jp.radians(10.0)
         c, s = jp.cos(ang / 2.0), jp.sin(ang / 2.0)
-        floor_quat = jp.array([c, 0.0, s, 0.0])  # (w, x, y, z), 绕 Y
-        geom_quat = model.geom_quat.at[self._floor_geom_id].set(floor_quat)
-        model = model.replace(geom_quat=geom_quat)
+        quat = jp.array([c, 0.0, s, 0.0])  # (w, x, y, z), 绕 Y
+        geom_quat = model.geom_quat
+        geom_quat = geom_quat.at[self._floor_geom_id].set(quat)
+        geom_quat = geom_quat.at[self._hfield_geom_id].set(quat)
+        return model.replace(geom_quat=geom_quat)
 
-        # 台阶: 逐级高度 (i+1)×30mm × difficulty (最小 0.5mm 避免退化)
+    def _apply_step(self, model: mjx.Model, difficulty: jax.Array, rng: jax.Array) -> mjx.Model:
+        """台阶: 4 级静态 step box, 高度 = (i+1)×30mm × D['step'] (M4 验收 30mm)。"""
+        step_difficulty = difficulty[D["step"]]
         for i, gid in enumerate(self._step_geom_ids):
-            h = jp.maximum((i + 1) * 0.03 * terrain_difficulty, 1e-3)
+            h = jp.maximum((i + 1) * 0.03 * step_difficulty, 1e-3)
             x_pos = 0.60 + i * 0.60  # non-overlapping (0.6m = 2 × half-length)
             size = model.geom_size.at[gid, 2].set(h / 2.0)      # box 半高
             pos = model.geom_pos.at[gid, 0].set(x_pos)          # x 位置 (不重叠)
@@ -422,15 +437,51 @@ class KuafuMjxEnv(MjxEnv):
             model = model.replace(geom_size=size, geom_pos=pos)
         return model
 
+    def _apply_rough(self, model: mjx.Model, difficulty: jax.Array, rng: jax.Array) -> mjx.Model:
+        """粗糙地形: 改写 hfield_data 注入平滑高度噪声, 振幅随 D['rough'] 缩放。
+
+        - 生成低通后的随机高度 (白噪 + 两次 box blur), 避免尖刺穿轮
+        - 中心出生区 (x=0, y=0 附近) 强制置 0, 保证出生/起步安全
+        - 振幅 = 0.05 * D['rough'] (最大 50mm); difficulty=0 → 全平
+        """
+        rough = difficulty[D["rough"]]
+        rng, noise_rng = jax.random.split(rng)
+        amp = 0.05 * rough
+        # 低分辨率随机场, 双线性上采样到 nrow×ncol, 再低通平滑
+        ncoarse = 8
+        coarse = jax.random.uniform(noise_rng, (ncoarse, ncoarse), minval=-1.0, maxval=1.0)
+        # 上采样
+        xs = jp.linspace(0.0, ncoarse - 1, self._hfield_nrow)
+        ys = jp.linspace(0.0, ncoarse - 1, self._hfield_ncol)
+        grid = jax.scipy.ndimage.map_coordinates(coarse, jp.meshgrid(xs, ys, indexing="ij"), order=1)
+        # 两次 box blur (3x3) 平滑
+        k = jp.ones((3, 3)) / 9.0
+        grid = jax.scipy.signal.convolve2d(grid, k, mode="same")
+        grid = jax.scipy.signal.convolve2d(grid, k, mode="same")
+        # 归一化到 [0,1] 再乘振幅
+        gmin = grid.min()
+        gmax = grid.max()
+        grid = (grid - gmin) / jp.maximum(gmax - gmin, 1e-6)
+        # 中心出生区置零: x=0 → nrow 索引 0.25, y=0 → ncol 索引 0.5
+        ix = int(0.25 * self._hfield_nrow)
+        iy = int(0.50 * self._hfield_ncol)
+        pad = 6
+        mask = jp.ones_like(grid)
+        mask = mask.at[ix - pad:ix + pad, iy - pad:iy + pad].set(0.0)
+        heights = grid * mask * amp
+        new_data = model.hfield_data.at[self._hfield_data_id:self._hfield_data_id + self._hfield_n].set(
+            heights.reshape(-1, order="F"))
+        return model.replace(hfield_data=new_data)
+
     # ---- 命令采样 ----
     def _sample_command(self, rng: jax.Array, difficulty: jax.Array):
         """独立采样命令与 D0 工作空间难度。"""
         rng, k1, k2, k3 = jax.random.split(rng, 4)
-        v_limit = 0.05 + 0.45 * difficulty[DIFF_COMMAND]
-        w_limit = 0.1 + 0.9 * difficulty[DIFF_COMMAND]
+        v_limit = 0.05 + 0.45 * difficulty[D["command"]]
+        w_limit = 0.1 + 0.9 * difficulty[D["command"]]
         v_cmd = jax.random.uniform(k1, minval=-v_limit, maxval=v_limit)
         w_cmd = jax.random.uniform(k2, minval=-w_limit, maxval=w_limit)
-        d0_upper = P.D0_MIN + (P.D0_MAX - P.D0_MIN) * difficulty[DIFF_D0]
+        d0_upper = P.D0_MIN + (P.D0_MAX - P.D0_MIN) * difficulty[D["d0"]]
         d0_cmd = jax.random.uniform(k3, minval=D0_CMD_RANGE[0], maxval=d0_upper)
         # 10% 概率零命令 (静支平衡, D0 也回到驻留)
         rng, k_zero = jax.random.split(rng)
@@ -818,22 +869,22 @@ class KuafuMjxEnv(MjxEnv):
         # DDSM 力矩常数 DR (与 difficulty 缩放)
         torque_scale_raw = jax.random.uniform(
             torque_rng, minval=DR["torque_const"][0], maxval=DR["torque_const"][1])
-        torque_scale = 1.0 + difficulty[DIFF_DR] * (torque_scale_raw - 1.0)
+        torque_scale = 1.0 + difficulty[D["dr"]] * (torque_scale_raw - 1.0)
 
-        # deadband [0, 2°] (舵机齿轮间隙, 与 difficulty 缩放)
+        # deadband [0, 2°] (舵机齿轮间隙) — 归入 latency 轴
         deadband_raw = jax.random.uniform(
             db_rng, minval=P.DR_DEADBAND[0], maxval=P.DR_DEADBAND[1])
-        deadband = deadband_raw * difficulty[DIFF_DR]
+        deadband = deadband_raw * difficulty[D["latency"]]
 
-        # delay [0, 30ms] → 步数 (1步=20ms, 最大 1-2 步, 与 difficulty 缩放)
+        # delay [0, 30ms] → 步数 (1步=20ms, 最大 1-2 步) — 归入 latency 轴
         delay_s_raw = jax.random.uniform(
             delay_rng, minval=P.DR_DELAY_ACT[0], maxval=P.DR_DELAY_ACT[1])
-        delay_s = delay_s_raw * difficulty[DIFF_DR]
+        delay_s = delay_s_raw * difficulty[D["latency"]]
         delay_steps = jp.round(delay_s / CTRL_DT).astype(jp.int32)
         sense_delay_s_raw = jax.random.uniform(
             sense_delay_rng, minval=P.DR_DELAY_SENSE[0], maxval=P.DR_DELAY_SENSE[1])
         sense_delay_steps = jp.round(
-            sense_delay_s_raw * difficulty[DIFF_DR] / CTRL_DT).astype(jp.int32)
+            sense_delay_s_raw * difficulty[D["latency"]] / CTRL_DT).astype(jp.int32)
 
         # 命令 (范围与 difficulty 缩放)
         cmd_rng, v_cmd, w_cmd, d0_cmd = self._sample_command(cmd_rng, difficulty)
@@ -978,7 +1029,7 @@ class KuafuMjxEnv(MjxEnv):
             is_push_resample, new_push_end_step, env_state.push_end_step)
         # 仅在推力窗口（5 步 = 100ms）内施加推力，reset 后前几步不施加
         is_push_active = (env_state.step_count < push_end_step) & (env_state.step_count > 5)
-        active_push = jp.where(is_push_active, push_force * env_state.difficulty[DIFF_PUSH], 0.0)
+        active_push = jp.where(is_push_active, push_force * env_state.difficulty[D["push"]], 0.0)
         # 注入推力到 chassis 质心 (xfrc_applied)
         xfrc_applied = data.xfrc_applied
         xfrc_applied = xfrc_applied.at[self._chassis_body_id, :3].set(active_push)

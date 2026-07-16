@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from rl.train.curriculum import AXES, NUM_AXES, Curriculum
+from rl.train.curriculum import AXES, NUM_AXES, AXIS_CONFIG, DIFF_INDICES, Curriculum
 
 
 def _passing_episodes(n=300):
@@ -67,3 +67,46 @@ def test_curriculum_persistence():
     assert restored.axes["slope"].level == 1
     assert restored.axes["step"].streak == 2
     assert restored.axes["step"].fail_streak == 1
+
+
+def test_axis_config_covers_all_axes():
+    assert set(AXIS_CONFIG.keys()) == set(AXES) == set(DIFF_INDICES.keys())
+    assert len(AXES) == NUM_AXES == 8
+    # terrain/perturbation axes must be survival-only (no tracking gate)
+    for ax in ("dr", "latency", "slope", "step", "rough", "push"):
+        assert AXIS_CONFIG[ax].track_thresh is None
+        assert AXIS_CONFIG[ax].track_metric is None
+    # command/d0 keep a tracking anti-cheat gate
+    assert AXIS_CONFIG["command"].track_metric == "linvel_yaw"
+    assert AXIS_CONFIG["d0"].track_metric == "d0"
+
+
+def test_terrain_axis_advances_on_survival_alone():
+    cur = Curriculum()
+    # step axis has no track gate: survives, no track_pass key supplied
+    ep = [{"survived": True} for _ in range(300)]
+    assert cur.update_axis("step", ep) is None
+    assert cur.update_axis("step", ep) == "up"
+    assert cur.axes["step"].level == 1
+
+
+def test_d0_axis_requires_track_pass():
+    cur = Curriculum()
+    # survived but tracking failed -> should NOT advance
+    ep_bad = [{"survived": True, "track_pass": False} for _ in range(300)]
+    assert cur.update_axis("d0", ep_bad) is None
+    assert cur.axes["d0"].level == 0
+    # survived and tracked -> advance
+    ep_good = [{"survived": True, "track_pass": True} for _ in range(300)]
+    assert cur.update_axis("d0", ep_good) is None
+    assert cur.update_axis("d0", ep_good) == "up"
+    assert cur.axes["d0"].level == 1
+
+
+def test_min_episodes_gate():
+    cur = Curriculum()
+    # fewer than min_episodes should never produce a decision
+    short = [{"survived": True, "track_pass": True}] * 100
+    assert cur.update_axis("command", short) is None
+    assert cur.axes["command"].streak == 0
+

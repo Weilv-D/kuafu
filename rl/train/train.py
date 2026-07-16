@@ -35,6 +35,7 @@ os.environ["JAX_COMPILATION_CACHE_DIR"] = os.path.join(
 os.environ["JAX_ENABLE_CUDA_GRAPHS"] = "1"
 
 import jax
+import jax.numpy as jp
 import torch
 from rl.train.seed_utils import seed_all, capture_provenance
 from rl.train import dlpack_utils as dlu
@@ -42,6 +43,7 @@ from rl.env.kuafu_mjx_env import (
     KuafuMjxEnv, PRIVILEGED_DIM, RMA_STATIC_DIM, TRANSIENT_DIM,
     ACTOR_OBS_DIM, CRITIC_PRIV_DIM, CRITIC_OBS_DIM, DIFFICULTY_DIM,
 )
+from rl.train.curriculum import Curriculum as KuafuCurriculum, AXES, DIFF_INDICES, AXIS_CONFIG
 
 
 def make_train_cfg() -> dict:
@@ -56,82 +58,10 @@ def make_train_cfg() -> dict:
     }
 
 
-class Curriculum:
-    """全局课程: 高难度环境存活指标双向调节 difficulty (DR/扰动强度).
-
-    仅统计 per-env 采样中 difficulty > d_max×0.7 的高难度环境 (避免低难度虚高),
-    以滑动窗口统计其平均存活步数与摔倒率:
-
-      - 升级: avg_survival ≥ 800 且 fall_rate ≤ 0.5 → d_max += step (直到 1.0)
-      - 降级: avg_survival ≤ 600 或 fall_rate ≥ 0.65 → d_max -= step (下限 0.1)
-
-    设计参考 ETH legged_gym: 以"能否稳定存活 + 不倒"驱动难度渐进, 而非要求活满
-    固定时长; 训练初期即注入 DR + 随机推力, 防过拟合标称参数。双向调节让策略
-    退化 (如熵坍缩后) 时回退到可驾驭难度恢复, 避免永久卡死。
-    """
-
-    def __init__(self, start: float = 0.1, max_d: float = 1.0, step: float = 0.05,
-                 window: int = 200, min_d: float = 0.1,
-                 upgrade_avg_survival: float = 800.0, upgrade_fall_rate: float = 0.5,
-                 fallback_avg_survival: float = 600.0, fallback_fall_rate: float = 0.65,
-                 upgrade_track_frac: float = 0.8):
-        self.d = start
-        self.max_d = max_d
-        self.min_d = min_d
-        self.step = step
-        self.window = window
-        self.upgrade_avg_survival = upgrade_avg_survival
-        self.upgrade_fall_rate = upgrade_fall_rate
-        self.fallback_avg_survival = fallback_avg_survival
-        self.fallback_fall_rate = fallback_fall_rate
-        # P0/P4: 升级还需命令跟踪达标 (静止策略不可仅凭存活升级, audit P0)
-        self.upgrade_track_frac = upgrade_track_frac
-        self._surv_buf = []   # 高难度 done env 存活步数
-        self._fall_buf = []    # 高难度 done env 是否摔倒 (1/0)
-        self._last_avg_survival = float("nan")
-        self._last_fall_rate = float("nan")
-        self._last_track_ok = float("nan")
-
-    def update(self, survival_steps, fell, track_ok_frac=None):
-        """survival_steps / fell: 本批高难度 done 环境的存活步数与摔倒标志 (numpy 数组).
-        track_ok_frac: 本批高难度 done 环境中命令跟踪达标(env 比例, 0..1); None=不检查.
-
-        返回 "up" / "down" / None, 供调用方在难度跳变时重注探索噪声.
-        """
-        for s, f in zip(survival_steps, fell):
-            self._surv_buf.append(float(s))
-            self._fall_buf.append(float(f))
-        self._last_track_ok = track_ok_frac
-        if len(self._surv_buf) > self.window:
-            del self._surv_buf[: len(self._surv_buf) - self.window]
-        if len(self._fall_buf) > self.window:
-            del self._fall_buf[: len(self._fall_buf) - self.window]
-        # 窗口未满时仍记录真实(部分)统计, 避免 resume 首轮 NaN 污染 TB 曲线;
-        # 但 d_max 的升降仅在窗口填满后决策, 防止部分样本误判。
-        if self._surv_buf:
-            self._last_avg_survival = sum(self._surv_buf) / len(self._surv_buf)
-            self._last_fall_rate = sum(self._fall_buf) / len(self._fall_buf)
-        else:
-            self._last_avg_survival = float("nan")
-            self._last_fall_rate = float("nan")
-        if len(self._surv_buf) < self.window:
-            return None
-        avg_survival = self._last_avg_survival
-        fall_rate = self._last_fall_rate
-        if avg_survival >= self.upgrade_avg_survival and fall_rate <= self.upgrade_fall_rate:
-            # P0/P4: 命令跟踪不达标(静止/乱动策略)则即使存活也不升级
-            if track_ok_frac is not None and track_ok_frac < self.upgrade_track_frac:
-                return None
-            if self.d < self.max_d:
-                self.d = min(self.max_d, self.d + self.step)
-                return "up"
-            return None
-        elif avg_survival <= self.fallback_avg_survival or fall_rate >= self.fallback_fall_rate:
-            if self.d > self.min_d:
-                self.d = max(self.min_d, self.d - self.step)
-                return "down"
-            return None
-        return None
+# 8-axis independent curriculum 现统一实现于 rl/train/curriculum.py (见该模块
+# AXIS_CONFIG / DIFF_INDICES)。本文件直接 import KuafuCurriculum 使用, 不再
+# 维护标量 d_max 课程。难度采样改为 band[0.8*level, level] 的 per-axis 采样,
+# 每轴独立按存活率(地形/扰动轴)或 存活率+跟踪(命令/D0 轴)升级/降级。
 
 
 class DirectVecEnv:
@@ -153,12 +83,21 @@ class DirectVecEnv:
         self.max_episode_length = env._episode_length
         self.episode_length_buf = torch.zeros(num_envs, device=device, dtype=torch.long)
 
-        # 课程: d_max 由高难度环境平均存活步数 + 摔倒率双向调节, per-env 采样 Uniform(0, d_max)
-        # 训练初期即注入 DR + 随机推力, 防过拟合标称参数, ETH legged_gym 实践
-        self._curriculum = Curriculum(start=0.1, max_d=1.0, step=0.05, window=200,
-                                      upgrade_avg_survival=800.0, upgrade_fall_rate=0.5,
-                                      fallback_avg_survival=600.0, fallback_fall_rate=0.65)
-        self._difficulty = jax.numpy.float32(self._curriculum.d)  # d_max (课程上界)
+        # 8-axis 独立课程: 每轴按 AXIS_CONFIG 的门控独立升级/降级, 难度采样为
+        # band[0.8*level, level] 的 per-axis 采样 (level = 当前轴等级/4)。
+        self._curriculum = KuafuCurriculum()
+        self._difficulty = jp.array(self._curriculum.difficulty_vector())  # (8,) per-axis 上限
+        # 每轴累积的 episode 缓冲 (done-env 计数触发, min_episodes=256)
+        self._ep_buf = {ax: [] for ax in AXES}
+        # 诊断日志 (per-axis 跟踪分量)。预填 nan 使其从首步即在 log dict 中出现
+        # (RSL-RL 只记录首个 log dict 中出现的键)。
+        self._diag = {
+            "diag_lin_vel_err_mean": float("nan"),
+            "diag_yaw_err_mean": float("nan"),
+            "diag_d0_err_mean": float("nan"),
+        }
+        for _ax in AXES:
+            self._diag["diag_track_" + _ax + "_pass"] = float("nan")
 
         # 探索护栏 (防熵坍塌): 课程升级时重注噪声 std, noise_std 跌破地板时抬高 entropy_coef.
         # 引用由 train.py 在 runner 建好后注入 (self._actor_critic / self._alg); 未注入则护栏静默关闭.
@@ -176,8 +115,7 @@ class DirectVecEnv:
 
         self._rng = jax_key if jax_key is not None else jax.random.PRNGKey(seed)
         self._rng, diff_rng = jax.random.split(self._rng)
-        diff_vec = jax.random.uniform(diff_rng, (num_envs, DIFFICULTY_DIM),
-                                      minval=0.0, maxval=self._difficulty)
+        diff_vec = self._sample_difficulty(diff_rng)
         self._state = self._reset_vmapped(jax.random.split(self._rng, num_envs), diff_vec)
 
     def _to_torch(self, x):
@@ -201,12 +139,46 @@ class DirectVecEnv:
     def reset(self):
         """VecEnv 接口要求: 重置所有环境."""
         self._rng, reset_rng, diff_rng = jax.random.split(self._rng, 3)
-        # per-env 独立采样难度 Uniform(0, d_max), 策略同时面对简单与困难场景
-        diff_vec = jax.random.uniform(diff_rng, (self.num_envs, DIFFICULTY_DIM),
-                                      minval=0.0, maxval=self._difficulty)
+        # per-axis band[0.8*level, level] 采样: 每轴在当前等级附近采样, 既有 per-env
+        # 多样性又能诚实评估当前等级 (避免永远卡在等级 0 测不到下一等级)。
+        diff_vec = self._sample_difficulty(diff_rng)
         self._state = self._reset_vmapped(jax.random.split(reset_rng, self.num_envs), diff_vec)
         self.episode_length_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         return self.get_observations()
+
+    def _sample_difficulty(self, rng):
+        """Per-axis band 采样: diff[a] ~ Uniform(0.8*upper_a, upper_a), 等级 0 时退化为 0。"""
+        upper = self._difficulty  # (8,)
+        lo = 0.8 * upper
+        return jax.random.uniform(rng, (self.num_envs, DIFFICULTY_DIM), minval=lo, maxval=upper)
+
+    @staticmethod
+    def _pad_to_common_contacts(state_a, state_b):
+        """Pad 两状态 Data 的 contact(ncon)/efc(nefc) 数组到两者 max, 使 where 合法。
+
+        MJX 按实际接触数定长这些数组; 重置批次与步进批次的 max 接触数常不同
+        (尤其粗糙地形), 直接 tree_map(where) 会因 pytree 结构不一致崩溃。pad 后
+        ncon/nefc 标量叶保留每 env 实际值, 零填充槽位被 MJX 忽略。
+        """
+        impl_a = state_a.data._impl
+        impl_b = state_b.data._impl
+        ncon_a = int(impl_a.contact.dist.shape[1])
+        ncon_b = int(impl_b.contact.dist.shape[1])
+        max_ncon = max(ncon_a, ncon_b)
+        nefc_a = int(impl_a.efc_J.shape[1])
+        nefc_b = int(impl_b.efc_J.shape[1])
+        max_nefc = max(nefc_a, nefc_b)
+
+        def _pad_one(state, cur_ncon, cur_nefc):
+            def _fn(x):
+                if isinstance(x, jax.Array) and x.ndim >= 2:
+                    if x.shape[1] == cur_ncon:
+                        return jax.numpy.pad(x, [(0, 0), (0, max_ncon - cur_ncon)] + [(0, 0)] * (x.ndim - 2))
+                    if x.shape[1] == cur_nefc:
+                        return jax.numpy.pad(x, [(0, 0), (0, max_nefc - cur_nefc)] + [(0, 0)] * (x.ndim - 2))
+                return x
+            return jax.tree_util.tree_map(_fn, state)
+        return _pad_one(state_a, ncon_a, nefc_a), _pad_one(state_b, ncon_b, nefc_b)
 
     def step(self, action):
         jax_action = self._to_jax(action)
@@ -225,38 +197,62 @@ class DirectVecEnv:
         if done_any:
             self._rng, reset_rng, diff_rng = jax.random.split(self._rng, 3)
 
-            # Curriculum: only count done + high-difficulty envs
+            # 8-axis 独立课程: 每轴累积 done-env episode, 达到 min_episodes 触发升级/降级评估
             cur_env_state = self._state.info["env_state"]
-            high_diff = jax.numpy.mean(cur_env_state.difficulty, axis=-1) > (self._difficulty * 0.7)
-            relevant = done_jax & high_diff
-            relevant_np = jax.device_get(relevant)
-            if relevant_np.any():
-                survival_np = jax.device_get(cur_env_state.step_count)
-                fallen_np = jax.device_get(fallen_jax)
-                count_np = jax.device_get(cur_env_state.track_count)[relevant_np]
-                count_np = np.maximum(count_np, 1)
-                lin_vel_err_np = jax.device_get(cur_env_state.track_v_abs_sum)[relevant_np] / count_np
-                yaw_err_np = jax.device_get(cur_env_state.track_w_abs_sum)[relevant_np] / count_np
-                d0_err_np = jax.device_get(cur_env_state.track_d0_abs_sum)[relevant_np] / count_np
-                nonzero_np = jax.device_get(cur_env_state.nonzero_command_count)[relevant_np]
-                track_pass = (
-                    (lin_vel_err_np <= 0.10)
-                    & (yaw_err_np <= 0.15)
-                    & (d0_err_np <= 5.0)
-                    & (nonzero_np > 0))
-                track_ok_frac = float(track_pass.mean()) if track_pass.size else None
-                changed = self._curriculum.update(
-                    survival_np[relevant_np], fallen_np[relevant_np], track_ok_frac)
-                if changed == "up":
-                    self._reopen_exploration()
+            difficulty_np = jax.device_get(cur_env_state.difficulty)        # (N, 8)
+            done_np = jax.device_get(done_jax)                              # (N,)
+            survival_np = jax.device_get(cur_env_state.step_count)          # (N,)
+            fallen_np = jax.device_get(fallen_jax)                          # (N,)
+            count_np = np.maximum(jax.device_get(cur_env_state.track_count), 1)
+            lin_vel_err_np = jax.device_get(cur_env_state.track_v_abs_sum) / count_np
+            yaw_err_np = jax.device_get(cur_env_state.track_w_abs_sum) / count_np
+            d0_err_np = jax.device_get(cur_env_state.track_d0_abs_sum) / count_np
+            nonzero_np = jax.device_get(cur_env_state.nonzero_command_count) > 0
+            # 诊断: 全局 err 均值 (跨所有 done env), 用于校准 track_err 门槛
+            diag = {
+                "diag_lin_vel_err_mean": float(lin_vel_err_np.mean()) if lin_vel_err_np.size else float("nan"),
+                "diag_yaw_err_mean": float(yaw_err_np.mean()) if yaw_err_np.size else float("nan"),
+                "diag_d0_err_mean": float(d0_err_np.mean()) if d0_err_np.size else float("nan"),
+            }
+            for axis_name in AXES:
+                aidx = DIFF_INDICES[axis_name]
+                cfg = AXIS_CONFIG[axis_name]
+                # 该轴等级附近的 env 才计入 (band 采样下 difficulty 已在等级附近)
+                rel = done_np & (difficulty_np[:, aidx] >= 0.5 * float(self._difficulty[aidx]))
+                if not rel.any():
+                    continue
+                idx = np.where(rel)[0]
+                survived = (fallen_np[idx] < 0.5)
+                if cfg.track_metric == "linvel_yaw":
+                    track_pass = ((lin_vel_err_np[idx] <= cfg.track_err["lin_vel"])
+                                  & (yaw_err_np[idx] <= cfg.track_err["yaw"])
+                                  & nonzero_np[idx])
+                elif cfg.track_metric == "d0":
+                    track_pass = (d0_err_np[idx] <= cfg.track_err["d0"])
+                else:
+                    track_pass = np.ones_like(survived, dtype=bool)
+                diag["diag_track_" + axis_name + "_pass"] = float(track_pass.mean())
+                episodes = [{"survived": bool(s), "track_pass": bool(t)}
+                            for s, t in zip(survived, track_pass)]
+                self._ep_buf[axis_name].extend(episodes)
+                if len(self._ep_buf[axis_name]) >= self._curriculum.min_episodes:
+                    changed = self._curriculum.update_axis(axis_name, self._ep_buf[axis_name])
+                    self._ep_buf[axis_name] = []
+                    if changed == "up":
+                        self._reopen_exploration()
+            self._diag = diag
             self._adjust_entropy_floor()
-            self._difficulty = jax.numpy.float32(self._curriculum.d)
+            self._difficulty = jp.array(self._curriculum.difficulty_vector())
 
             # Selective reset: compute reset for ALL envs (JAX-fast on GPU) then select
-            diff_vec = jax.random.uniform(diff_rng, (self.num_envs, DIFFICULTY_DIM),
-                                          minval=0.0, maxval=self._difficulty)
+            diff_vec = self._sample_difficulty(diff_rng)
             reset_state = self._reset_vmapped(
                 jax.random.split(reset_rng, self.num_envs), diff_vec)
+            # MJX 把 contact(ncon)/efc(nefc) 数组按实际接触数定长, 故 reset 批次与
+            # 步进批次的 max ncon/nefc 可能不同 (粗糙地形接触数远大于平地), 直接
+            # where 会因 pytree 结构不一致崩溃。先 pad 到两者 max, 再 where (ncon
+            # 标量叶保留每 env 实际值, 零填充槽位被 MJX 忽略)。
+            self._state, reset_state = self._pad_to_common_contacts(self._state, reset_state)
             self._state = jax.tree_util.tree_map(
                 lambda cur, new: jax.numpy.where(
                     done_jax_bool.reshape((-1,) + (1,) * (cur.ndim - 1)), new, cur),
@@ -282,15 +278,18 @@ class DirectVecEnv:
                 if key in metrics_jax:
                     val = self._to_torch(metrics_jax[key])
                     log[key] = (val * done_mask).sum().item() / n_done.item()
-            # 课程高难度窗口指标: 平均存活步数 + 摔倒率 (驱动 d_max 升降)
-            log["curriculum_avg_survival"] = self._curriculum._last_avg_survival
-            log["curriculum_fall_rate"] = self._curriculum._last_fall_rate
             # 探索护栏可观测量 (entropy_coef 实时值 + 当前 noise_std)
             log["entropy_coef"] = self._alg.entropy_coef if self._alg is not None else float("nan")
             if self._actor_critic is not None and hasattr(self._actor_critic, "std"):
                 log["noise_std_guard"] = float(self._actor_critic.std.data.mean().item())
-        # difficulty 每步记录 (d_max 课程标量 + per-env 实际均值)
-        log["difficulty"] = self._to_torch(self._difficulty).mean().item()
+        # 课程等级 + 诊断 + difficulty 每步记录 (RSL-RL 只记录首个 log dict 中出现的
+        # 键, 故这些键必须每步都存在, 否则 done 帧首次出现前不会被写入 TB)。
+        for axis_name in AXES:
+            log["curriculum_" + axis_name + "_level"] = float(self._curriculum.axes[axis_name].level)
+            log["difficulty_" + axis_name] = float(self._difficulty[DIFF_INDICES[axis_name]])
+        if getattr(self, "_diag", None) is not None:
+            for k, v in self._diag.items():
+                log[k] = v
         log["difficulty_mean"] = self._to_torch(
             self._state.info["env_state"].difficulty).mean().item()
 
@@ -364,10 +363,13 @@ class DirectVecEnv:
 
 
 class _CurriculumPersistMixin:
-    """让 checkpoint 同时保存/恢复 Curriculum 的 d_max, 避免 --resume 把课程重置回 0.1。
+    """让 checkpoint 同时保存/恢复 8-axis 课程的每轴等级与 episode 缓冲, 避免
+    --resume 把课程重置回全 0。
 
-    rsl_rl 的 save/load 不存 Curriculum 状态; 本 mixin 在同名 sidecar
-    curriculum_{it}.pt 中额外持久化 d_max, resume 时回写 env._curriculum.d。
+    rsl_rl 的 save/load 不存 Curriculum 状态; 本 mixin 在 checkpoint 内联持久化
+    curriculum.state_dict (每轴 level/streak/fail_streak) + episode_buffers +
+    kuafu_curriculum_schema="v2"。legacy 5-axis 旧 checkpoint 因 schema 不匹配
+    拒绝 resume (8 轴难度维度不兼容)。
     """
     def save(self, path, infos=None):
         # RSL-RL saves a complete policy/optimizer state.  Route that write through
@@ -385,13 +387,10 @@ class _CurriculumPersistMixin:
                 "schema_version": __import__("rl.env.contract", fromlist=["SCHEMA_VERSION"]).SCHEMA_VERSION,
                 "model_hash": __import__("kuafu_physics").model_hash(),
                 "curriculum": {
-                    "d": float(cur.d),
-                    "surv_buf": list(cur._surv_buf),
-                    "fall_buf": list(cur._fall_buf),
-                    "last_avg_survival": float(cur._last_avg_survival),
-                    "last_fall_rate": float(cur._last_fall_rate),
-                    "last_track_ok": float(cur._last_track_ok),
+                    "schema": "v2",
+                    "state": cur.state_dict(),
                 },
+                "episode_buffers": {ax: list(self.env._ep_buf[ax]) for ax in AXES},
                 "entropy_coef": float(self.alg.entropy_coef),
                 "learning_rate": float(self.alg.learning_rate),
                 "torch_rng": torch.get_rng_state(),
@@ -407,7 +406,7 @@ class _CurriculumPersistMixin:
             if os.path.exists(temporary):
                 os.unlink(temporary)
 
-    def load(self, path, load_optimizer=True):
+    def load(self, path, load_optimizer=True, ignore_hash=False):
         # Load the full checkpoint on CPU first.  load_state_dict transfers
         # model/optimizer tensors to the runner device automatically, and CPU
         # RNG state must be restored on CPU regardless of the runner device.
@@ -417,7 +416,9 @@ class _CurriculumPersistMixin:
             raise RuntimeError("checkpoint lacks KUAFU resume state; legacy checkpoints cannot resume")
         from rl.env.contract import SCHEMA_VERSION
         import kuafu_physics as P
-        if state["schema_version"] != SCHEMA_VERSION or state["model_hash"] != P.model_hash():
+        hash_ok = state["schema_version"] == SCHEMA_VERSION and (
+            ignore_hash or state["model_hash"] == P.model_hash())
+        if not hash_ok:
             raise RuntimeError("checkpoint schema/model hash does not match this run")
         # Move model state dict to runner device before loading
         model_state = {k: v.to(self.device) for k, v in checkpoint["model_state_dict"].items()}
@@ -430,14 +431,15 @@ class _CurriculumPersistMixin:
             self.alg.optimizer.zero_grad()
         self.current_learning_iteration = checkpoint["iter"]
         cur_state = state["curriculum"]
+        if cur_state.get("schema") != "v2":
+            raise RuntimeError(
+                "legacy 5-axis curriculum checkpoint (schema=%r) cannot resume; "
+                "start a new run_name (8-axis curriculum is incompatible)."
+                % cur_state.get("schema"))
         cur = self.env._curriculum
-        cur.d = float(cur_state["d"])
-        self.env._difficulty = jax.numpy.float32(cur.d)
-        cur._surv_buf = list(cur_state["surv_buf"])
-        cur._fall_buf = list(cur_state["fall_buf"])
-        cur._last_avg_survival = float(cur_state["last_avg_survival"])
-        cur._last_fall_rate = float(cur_state["last_fall_rate"])
-        cur._last_track_ok = float(cur_state["last_track_ok"])
+        cur.load_state_dict(cur_state["state"])
+        self.env._ep_buf = {ax: list(state.get("episode_buffers", {}).get(ax, [])) for ax in AXES}
+        self.env._difficulty = jp.array(cur.difficulty_vector())
         self.alg.entropy_coef = float(state["entropy_coef"])
         self.alg.learning_rate = float(state["learning_rate"])
         for group in self.alg.optimizer.param_groups:
@@ -469,6 +471,9 @@ def main():
     parser.add_argument("--smoke_test", action="store_true", help="烟测模式 (5 iteration)")
     parser.add_argument("--resume", type=str, default=None,
                         help="从 checkpoint 恢复训练(传 .pt 路径,如 rl/checkpoints/garlic/teacher/model_3999.pt)")
+    parser.add_argument("--resume_ignore_hash", action="store_true",
+                        help="恢复时跳过 model_hash 校验(仅校验 schema_version)。"
+                             "用于仅在地形/资源等良性资产变更后继续旧 checkpoint 的训练/诊断。")
     args = parser.parse_args()
 
     # 统一播种所有 RNG (torch/numpy/random 与 JAX 显式 key 同源)
@@ -481,8 +486,8 @@ def main():
     print(f"  JAX 设备: {jax.devices()}")
 
     # ---- 创建环境 ----
-    # 课程: 双向滑动窗口调节 d_max (Curriculum 类, 初始 0.1 即注入 DR+扰动),
-    # per-env 采样 Uniform(0, d_max); 地形(斜坡+台阶)由 KuafuMjxEnv._apply_terrain 按 difficulty 生成。
+    # 课程: 8-axis 独立课程 (rl/train/curriculum.py), per-axis band[0.8*level, level]
+    # 采样; 地形 (斜坡/台阶/粗糙 hfield) 由 KuafuMjxEnv._apply_terrain 按 difficulty 生成。
 
     env = KuafuMjxEnv(teacher=True, num_envs=args.num_envs)
 
@@ -568,7 +573,7 @@ def main():
     # ---- 载入 Checkpoint 恢复训练 ----
     if args.resume:
         print(f"  载入 Checkpoint 恢复训练: {args.resume}")
-        runner.load(args.resume)
+        runner.load(args.resume, ignore_hash=args.resume_ignore_hash)
 
     # 注入探索护栏引用 (Curriculum 升级 bump std / noise_std 地板抬 entropy_coef).
     # DirectVecEnv 内部据此在难度跳变与熵跌破地板时介入; 不注入则护栏静默关闭.
