@@ -3,7 +3,7 @@
 KUAFU 策略评估 — headless deterministic / DR / 命令扫描
 
 在原生 MuJoCo (CPU 单环境, 与训练同 .xml) 中加载 policy, 关探索噪声, 记录全套
-稳定性指标。obs/action 逻辑与训练环境 (kuafu_mjx_env.py) 及 playback.py 逐维一致。
+稳定性指标。obs/action 逻辑与训练环境 (kuafu_mjx_env.py) 逐维一致。
 
 三种模式:
   --mode deterministic  关噪声/DR, 固定命令 (v=0, ω=0, d0=dwell), 长 episode
@@ -42,7 +42,7 @@ def _limit_wheel_torque(tau, omega):
     return np.clip(tau, -tau_avail, tau_avail)
 
 
-# ---- obs / action: 与 playback.py / 训练 _base_observation 逐维对齐 ----
+# ---- obs / action: 与训练 _base_observation 逐维对齐 ----
 def rotate_vector_by_quaternion_conj(q, v):
     w, x, y, z = q[0], q[1], q[2], q[3]
     q_xyz = np.array([-x, -y, -z])
