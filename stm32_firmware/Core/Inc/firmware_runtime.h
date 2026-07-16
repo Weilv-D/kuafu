@@ -10,6 +10,7 @@ typedef struct {
     uint8_t link_compatible;
     uint8_t heartbeat_fresh;
     uint8_t action_fresh;
+    uint8_t wheel_authorized;
     uint8_t wheel_bus_idle;
     uint8_t servo_bus_idle;
 } FirmwareRuntimeInputs_t;

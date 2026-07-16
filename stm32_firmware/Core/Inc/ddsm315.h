@@ -10,7 +10,7 @@
 #define DDSM_MODE_POSITION       3U
 #define DDSM_MODE_DISABLE        9U
 #define DDSM_FRAME_SIZE         10U
-#define DDSM_TRANSACTION_TIMEOUT_MS 2U
+#define DDSM_TRANSACTION_TIMEOUT_MS 3U
 
 typedef struct {
     uint8_t id;
@@ -41,6 +41,7 @@ void ddsm_build_torque(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, float torque
 void ddsm_build_speed(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, float rpm);
 void ddsm_build_enable(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, uint8_t enable);
 void ddsm_build_mode(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, uint8_t mode);
+void ddsm_build_query(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id);
 int ddsm_parse_feedback(const uint8_t packet[DDSM_FRAME_SIZE], DDSM_State_t *state);
 
 void ddsm_bus_init(DDSM_Bus_t *bus, UART_HandleTypeDef *huart);
@@ -55,6 +56,8 @@ int ddsm_bus_queue_enable(DDSM_Bus_t *bus, DDSM_State_t *target,
                           uint8_t enable, uint32_t now_ms);
 int ddsm_bus_queue_mode(DDSM_Bus_t *bus, DDSM_State_t *target,
                         uint8_t mode, uint32_t now_ms);
+int ddsm_bus_queue_query(DDSM_Bus_t *bus, DDSM_State_t *target,
+                         uint32_t now_ms);
 void ddsm_bus_step(DDSM_Bus_t *bus, uint32_t now_ms);
 void ddsm_bus_on_tx_complete(DDSM_Bus_t *bus);
 void ddsm_bus_on_rx_complete(DDSM_Bus_t *bus, uint32_t now_ms);

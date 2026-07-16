@@ -13,6 +13,7 @@ void run_firmware_runtime_tests(void) {
     inputs.link_compatible = 1U;
     inputs.heartbeat_fresh = 1U;
     inputs.action_fresh = 1U;
+    inputs.wheel_authorized = 1U;
     inputs.wheel_bus_idle = 1U;
     inputs.servo_bus_idle = 1U;
     firmware_runtime_init(&runtime, 0U);
@@ -41,6 +42,11 @@ void run_firmware_runtime_tests(void) {
     outputs = firmware_runtime_step(&runtime, &inputs);
     TEST_TRUE(!outputs.residual_allowed);
     TEST_TRUE(outputs.wheel_intent_allowed);
+
+    inputs.wheel_authorized = 0U;
+    outputs = firmware_runtime_step(&runtime, &inputs);
+    TEST_TRUE(!outputs.wheel_intent_allowed);
+    inputs.wheel_authorized = 1U;
 
     inputs.wheel_bus_idle = 0U;
     inputs.servo_bus_idle = 0U;

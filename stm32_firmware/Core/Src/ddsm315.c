@@ -60,6 +60,13 @@ void ddsm_build_mode(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, uint8_t mode) 
     packet[9] = mode;
 }
 
+void ddsm_build_query(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id) {
+    memset(packet, 0, DDSM_FRAME_SIZE);
+    packet[0] = id;
+    packet[1] = 0x74U;
+    packet[9] = crc8_calculate(packet, 9U);
+}
+
 int ddsm_parse_feedback(const uint8_t packet[DDSM_FRAME_SIZE], DDSM_State_t *state) {
     int16_t raw_current;
     int16_t raw_speed;
@@ -127,6 +134,14 @@ int ddsm_bus_queue_mode(DDSM_Bus_t *bus, DDSM_State_t *target,
     uint8_t packet[DDSM_FRAME_SIZE];
     if (target == NULL) return -1;
     ddsm_build_mode(packet, target->id, mode);
+    return ddsm_bus_submit(bus, target, packet, now_ms);
+}
+
+int ddsm_bus_queue_query(DDSM_Bus_t *bus, DDSM_State_t *target,
+                         uint32_t now_ms) {
+    uint8_t packet[DDSM_FRAME_SIZE];
+    if (target == NULL) return -1;
+    ddsm_build_query(packet, target->id);
     return ddsm_bus_submit(bus, target, packet, now_ms);
 }
 

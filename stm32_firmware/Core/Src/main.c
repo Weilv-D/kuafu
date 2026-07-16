@@ -123,7 +123,7 @@ int main(void) {
 #endif
 
     uint32_t last_tick = 0;
-    uint32_t last_right_tick = 1;
+    uint32_t next_right_tick = 6U;
     uint8_t active_servo_query_idx = 0;
     uint32_t last_servo_query_ms = 0U;
     uint8_t fault_servo_disable_idx = 0U;
@@ -133,8 +133,9 @@ int main(void) {
     uint8_t bmi_init_in_progress = 0U;
     uint8_t actuator_discovery_step = 0U;
     uint8_t actuator_configured = 0U;
-    uint8_t actuator_enable_step = 0U;
-    uint8_t actuators_enabled = 0U;
+    uint8_t servo_enable_step = 0U;
+    uint8_t servos_enabled = 0U;
+    uint8_t wheel_enable_mask = 0U;
     uint32_t next_actuator_enable_ms = 0U;
     uint32_t last_pi_poll_ms = 0U;
     FirmwareRuntime_t firmware_runtime;
@@ -154,6 +155,9 @@ int main(void) {
         DDSM_State_t left_feedback;
         DDSM_State_t right_feedback;
         ST3215_State_t servo_feedback[4];
+        Pi_Command_Heartbeat_t runtime_heartbeat;
+        Pi_Command_Action_t runtime_action;
+        uint8_t wheel_authorized;
         uint8_t startup_servos_online = 1U;
 
         if (g_pi_poll_requested || startup_now != last_pi_poll_ms) {
@@ -166,12 +170,20 @@ int main(void) {
         ddsm_bus_step(&g_ddsm_bus, startup_now);
         st3215_bus_step(&g_st3215_bus, startup_now);
         Actuator_Feedback_Snapshot(&left_feedback, &right_feedback, servo_feedback);
+        Pi_Command_Snapshot(&runtime_heartbeat, &runtime_action);
+        (void)runtime_action;
+        wheel_authorized = (uint8_t)(startup_manager.phase == STARTUP_READY &&
+                                     g_safety_state.current_mode != STATE_FAULT &&
+                                     pi_link_is_compatible() && pi_link_heartbeat_fresh() &&
+                                     runtime_heartbeat.mode_request >= (uint8_t)STATE_STAND &&
+                                     runtime_heartbeat.mode_request <= (uint8_t)STATE_CLIMB);
 
         runtime_inputs.now_ms = startup_now;
         runtime_inputs.mode = g_safety_state.current_mode;
         runtime_inputs.link_compatible = pi_link_is_compatible();
         runtime_inputs.heartbeat_fresh = pi_link_heartbeat_fresh();
         runtime_inputs.action_fresh = pi_link_action_fresh();
+        runtime_inputs.wheel_authorized = wheel_authorized;
         runtime_inputs.wheel_bus_idle = ddsm_bus_is_idle(&g_ddsm_bus);
         runtime_inputs.servo_bus_idle = st3215_bus_is_idle(&g_st3215_bus);
         runtime_outputs = firmware_runtime_step(&firmware_runtime, &runtime_inputs);
@@ -234,29 +246,44 @@ int main(void) {
             actuator_configured = (uint8_t)(actuator_discovery_step >= 8U);
         }
 
-        if (startup_outputs.enable_actuators && !actuators_enabled &&
+        if (startup_outputs.enable_actuators && !servos_enabled &&
             (int32_t)(startup_now - next_actuator_enable_ms) >= 0) {
             int enable_result = -1;
-            if (actuator_enable_step == 0U) {
-                enable_result = ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_left,
-                                                      1U, startup_now);
-            } else if (actuator_enable_step == 1U) {
-                enable_result = ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_right,
-                                                      1U, startup_now);
-            } else if (actuator_enable_step < 6U) {
+            if (servo_enable_step < 4U) {
 #if SERVO_ZERO_CALIBRATION_MODE
                 enable_result = st3215_bus_queue_torque(
-                    &g_st3215_bus, (uint8_t)(actuator_enable_step - 1U), 0U);
+                    &g_st3215_bus, (uint8_t)(servo_enable_step + 1U), 0U);
 #else
                 enable_result = st3215_bus_queue_torque(
-                    &g_st3215_bus, (uint8_t)(actuator_enable_step - 1U), 1U);
+                    &g_st3215_bus, (uint8_t)(servo_enable_step + 1U), 1U);
 #endif
             }
-            if (actuator_enable_step < 6U && enable_result == 0) {
-                ++actuator_enable_step;
+            if (servo_enable_step < 4U && enable_result == 0) {
+                ++servo_enable_step;
             }
             next_actuator_enable_ms = startup_now + 5U;
-            actuators_enabled = (uint8_t)(actuator_enable_step >= 6U);
+            servos_enabled = (uint8_t)(servo_enable_step >= 4U);
+        }
+
+        /* Wheel power is a separately armed safety domain.  Discovery and
+         * zero-current polling run while disabled; enabling requires an
+         * authenticated, fresh Pi mode request and is revoked on link loss. */
+        if (wheel_authorized && wheel_enable_mask != 0x03U && ddsm_bus_is_idle(&g_ddsm_bus)) {
+            if ((wheel_enable_mask & 0x01U) == 0U) {
+                if (ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_left, 1U, startup_now) == 0) {
+                    wheel_enable_mask |= 0x01U;
+                }
+            } else if (ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_right, 1U, startup_now) == 0) {
+                wheel_enable_mask |= 0x02U;
+            }
+        } else if (!wheel_authorized && wheel_enable_mask != 0U && ddsm_bus_is_idle(&g_ddsm_bus)) {
+            if ((wheel_enable_mask & 0x01U) != 0U) {
+                if (ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_left, 0U, startup_now) == 0) {
+                    wheel_enable_mask &= (uint8_t)~0x01U;
+                }
+            } else if (ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_right, 0U, startup_now) == 0) {
+                wheel_enable_mask &= (uint8_t)~0x02U;
+            }
         }
 
         if (startup_outputs.fault_requested) {
@@ -318,7 +345,7 @@ int main(void) {
             /* 3. Run the 250 Hz motor deadline and lower-rate telemetry slots. */
             uint8_t slot = last_tick % 4;
             uint8_t control_due = control_deadline_pending;
-            uint8_t right_due = (uint32_t)(last_tick - last_right_tick) >= 4u;
+            uint8_t right_due = (uint8_t)((int32_t)(last_tick - next_right_tick) >= 0);
             if (control_due) control_deadline_pending = 0U;
 
             /* Safety state machine update (at 250 Hz, inside slot scheduler) */
@@ -345,7 +372,7 @@ int main(void) {
                 safety_inputs.pitch_rate_rads = body_pitch_rate;
                 safety_inputs.max_temp_c = max_temp;
                 safety_inputs.gyro_calibrated = g_safety_state.is_gyro_calibrated;
-                safety_inputs.startup_ready = actuators_enabled;
+                safety_inputs.startup_ready = servos_enabled;
                 safety_inputs.imu_fresh = device_health_is_fresh(&g_imu.health,
                                                                  safety_now,
                                                                  SAFETY_IMU_MAX_AGE_MS);
@@ -411,8 +438,7 @@ int main(void) {
                     /* Safe stop wheels if in FAULT or INIT */
                     g_ctrl_tau_l = 0.0f;
                     g_ctrl_tau_r = 0.0f;
-                    (void)ddsm_bus_queue_torque(&g_ddsm_bus, &g_ddsm_left,
-                                                0.0f, last_tick);
+                    (void)ddsm_bus_queue_query(&g_ddsm_bus, &g_ddsm_left, last_tick);
                 }
             }
 
@@ -420,14 +446,13 @@ int main(void) {
              * the two blocking half-duplex transactions from routinely sharing
              * one 4 ms control slot. */
             if (right_due && startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY) {
-                last_right_tick = last_tick;
+                next_right_tick = last_tick + 4U;
                 if (runtime_outputs.wheel_intent_allowed) {
                     (void)ddsm_bus_queue_torque(&g_ddsm_bus, &g_ddsm_right,
                                                 WHEEL_DIR_R * g_ctrl_tau_r,
                                                 last_tick);
                 } else {
-                    (void)ddsm_bus_queue_torque(&g_ddsm_bus, &g_ddsm_right,
-                                                0.0f, last_tick);
+                    (void)ddsm_bus_queue_query(&g_ddsm_bus, &g_ddsm_right, last_tick);
                 }
             }
 

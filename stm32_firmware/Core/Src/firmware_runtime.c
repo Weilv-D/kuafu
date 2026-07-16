@@ -35,7 +35,8 @@ FirmwareRuntimeOutputs_t firmware_runtime_step(FirmwareRuntime_t *runtime,
     }
 
     operational = (uint8_t)(inputs->mode != STATE_INIT && inputs->mode != STATE_FAULT);
-    outputs.wheel_intent_allowed = (uint8_t)(operational && inputs->wheel_bus_idle);
+    outputs.wheel_intent_allowed = (uint8_t)(operational && inputs->wheel_authorized &&
+                                             inputs->wheel_bus_idle);
     outputs.servo_intent_allowed = (uint8_t)(operational && inputs->servo_bus_idle);
     outputs.residual_allowed = (uint8_t)(inputs->mode == STATE_ACTIVE &&
                                          inputs->link_compatible &&
