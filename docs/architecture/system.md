@@ -2,17 +2,28 @@
 
 ## Control Partition
 
-The STM32 owns safety-critical stabilization. It runs a 250 Hz discrete LQR/LQI controller with reference tracking, yaw heading/rate tracking, roll leveling, actuator limits, and five-bar workspace projection. The Pi5 runs an ONNX Actor at 50 Hz and supplies bounded residual actions. The Actor never replaces the baseline controller.
+The STM32 owns safety-critical stabilization as a deadline-bounded bare-metal runtime; the Pi5 runs an ONNX Actor at 50 Hz and supplies bounded residual actions. The Actor never replaces the baseline controller. The two exchange a shared contract — Pi5 commands velocity/yaw/D0 plus six normalized residuals, STM32 returns timestamped IMU, joint, and health telemetry — defined in full in `docs/contracts/interface.md`.
 
 ```text
-high-level command
+high-level command (Pi5)
   -> jerk/acceleration-limited references
   -> STM32 baseline: position, velocity, pitch, heading, roll, IK
   <- Pi5 Actor: bounded common/yaw torque and Qx/D0 residuals
   -> wheel/servo commands
 ```
 
-Roll leveling applies `ΔD0 = -ROLL_KP·roll - ROLL_KD·ωx` with `ROLL_KP = 190 mm/rad` and `ROLL_KD = 5.0`, derived from the 196 mm wheel track geometry. A high-speed D0 gate limits D0 to 120 mm whenever `|v| > 0.3 m/s` or `|w| > 0.6 rad/s`, preventing COM-rise topple. On stale action the STM32 clears only the learned residual. On stale heartbeat it also commands zero velocity and yaw rate, retaining baseline position/heading hold. A nonrecoverable tilt, thermal, or hardware fault is the only wheel-torque shutdown path.
+The runtime runs on four deadline-bounded layers driven by the 1 kHz BMI088 gyro data-ready timebase:
+
+1. **1 kHz IMU layer** — BMI088 sampling and Mahony attitude fusion, never waiting on actuator buses.
+2. **250 Hz safety-control layer** — snapshots the newest valid sensor and command state, runs the state machine, then LQR/LQI with reference tracking, yaw heading/rate tracking, and roll leveling.
+3. **50 Hz leg/Pi layer** — projects Qx/D0 residuals through five-bar IK onto ST3215 targets, parses Pi traffic, and publishes telemetry.
+4. **Low-rate diagnostic layer** — reports temperatures, per-device bus ages, error counters, reset cause, and safety mode.
+
+A separate `startup_manager` gates actuator power through `WAIT_POWER → IMU_DISCOVERY → GYRO_CALIBRATION → ACTUATOR_DISCOVERY → READY` (with a `FAILED` terminal that latches FAULT). Torque is never enabled merely because initialization began; the system reaches STAND only once every device reports fresh, and reaches ACTIVE only after a compatible Pi `HELLO` and fresh heartbeat. Wheel torque is a separately armed domain: beyond being in STAND/ACTIVE/CLIMB it additionally requires no latched fault, a compatible model hash, a fresh heartbeat, and an explicit mode request — five conditions whose loss is immediately revoked.
+
+Ten independent fault classes (tilt, pitch rate, overtemperature with 100 ms debounce, IMU loss, left/right wheel loss, servo loss, emergency stop, initialization failure, internal-state fault) latch `FAULT` until reset. Degradation short of a fault is explicitly asymmetric: a stale action clears only the learned residual, while a stale heartbeat additionally zeroes velocity and yaw commands and returns ACTIVE/CLIMB to STAND, retaining a bounded local position/heading hold so the robot stays still rather than falling.
+
+Roll leveling applies `ΔD0 = -ROLL_KP·roll - ROLL_KD·ωx` with `ROLL_KP = 190 mm/rad` and `ROLL_KD = 5.0`, a conservative initial value derived from the ~196 mm wheel track. A high-speed D0 gate limits D0 to 120 mm whenever `|v| > 0.3 m/s` or `|w| > 0.6 rad/s`, preventing COM-rise topple. LQR/LQI gains, wheel torque limits, five-bar geometry, and the full normative physical model live in `kuafu_physics.py`; the implementation-level runtime, driver, and safety detail lives in `stm32_firmware/README.md`.
 
 ## Learning Partition
 
