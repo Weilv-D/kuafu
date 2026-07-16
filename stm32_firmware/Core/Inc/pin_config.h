@@ -115,7 +115,7 @@
 /* 5-Bar Linkage Kinematics parameters (meters) */
 #define KIN_LEG_A               (A_LEN_MM * 0.001f)
 #define KIN_LEG_B               (B_LEN_MM * 0.001f)
-#define KIN_LEG_C               (-AX_MM * 0.001f)
+#define KIN_LEG_C               (-(AX_MM) * 0.001f)
 #define KIN_MIN_LEG_D0          (D0_MIN_MM * 0.001f)
 #define KIN_MAX_LEG_D0          (D0_MAX_MM * 0.001f)
 
