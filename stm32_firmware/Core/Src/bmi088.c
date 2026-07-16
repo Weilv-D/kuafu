@@ -32,8 +32,10 @@ int bmi088_init(BMI088_t *imu, I2C_HandleTypeDef *hi2c) {
     bmi088_write_reg(hi2c, BMI088_ACCEL_ADDR, BMI088_ACC_PWR_CONF, 0x00);
     HAL_Delay(5);
 
-    /* Enable Accelerometer (write 0x03 to ACC_PWR_CTRL) */
-    bmi088_write_reg(hi2c, BMI088_ACCEL_ADDR, BMI088_ACC_PWR_CTRL, 0x03);
+    /* Enable Accelerometer: ACC_PWR_CTRL=0x04 selects "normal/active" mode
+     * (bit2). Writing 0x03 leaves the acc inactive, so data registers read 0.
+     * Per BMI088 datasheet (BST-BMI088-DS001, register 0x7D). */
+    bmi088_write_reg(hi2c, BMI088_ACCEL_ADDR, BMI088_ACC_PWR_CTRL, 0x04);
     HAL_Delay(50);
 
     /* Read and verify Accel Chip ID */
