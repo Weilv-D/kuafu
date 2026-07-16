@@ -63,7 +63,7 @@ def open_session(tries=6):
     for attempt in range(tries):
         try:
             session = ConnectHelper.session_with_chosen_probe(
-                blocking=False, unique_id=PROBE, target=TARGET, frequency=1_000_000)
+                blocking=False, unique_id=PROBE, target_override=TARGET, frequency=1_000_000)
             if session is None:
                 raise RuntimeError("probe not found")
             # connect_mode='under-reset' asserts NRST during DAP attach so the
