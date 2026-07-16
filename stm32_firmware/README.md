@@ -24,4 +24,6 @@ Frames are `A5 | version | type | length | seq:u16 | timestamp:u32 | payload | c
 
 The checked-in target project is `MDK-ARM/stm32_firmware.uvprojx`. Host syntax checks can validate controller, kinematics, and protocol C files, but a Keil/ARM target build and HIL loopback remain required before flashing.
 
+Use `powershell -ExecutionPolicy Bypass -File tools/build_keil.ps1` for a warning-free reproducible target build. Read-only SWD health inspection and dry-run-first protocol cases are under `MDK-ARM/debug_tools`; follow `HIL_CHECKLIST.md` in order and keep wheel power off through the initial flash and IMU gate.
+
 Follow `../docs/hardware/calibration.md` and `../docs/validation/acceptance.md`; servo centers, mirror signs, IMU axes, and motor direction require hardware calibration. Battery sensing is not fitted, so diagnostic `battery_mv` is always the unavailable sentinel `0` and is never used as a fault input.
