@@ -12,6 +12,7 @@ add_executable(firmware_host_tests
     test_bmi088.c
     test_ddsm315.c
     test_st3215.c
+    test_pi_link.c
     test_support.c
     ../Core/Src/crc8.c
     ../Core/Src/kinematics.c
@@ -22,6 +23,8 @@ add_executable(firmware_host_tests
     ../Core/Src/bmi088.c
     ../Core/Src/ddsm315.c
     ../Core/Src/st3215.c
+    ../Core/Src/pi_link.c
+    ../Core/Src/pi_transport.c
 )
 
 target_include_directories(firmware_host_tests PRIVATE

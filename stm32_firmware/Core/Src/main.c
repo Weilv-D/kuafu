@@ -2,6 +2,7 @@
 #include "pin_config.h"
 #include "crc8.h"
 #include "pi_link.h"
+#include "pi_transport.h"
 #include "bmi088.h"
 #include "ddsm315.h"
 #include "st3215.h"
@@ -42,8 +43,10 @@ static volatile float g_body_gyro[3] = {0.0f, 0.0f, 0.0f};
 #define SERVO_FAIL_LIMIT         3
 
 /* DMA Buffer for Pi Bridge (USART6 RX) */
-#define PI_RX_BUF_SIZE           128
+#define PI_RX_BUF_SIZE           256
 uint8_t g_pi_rx_buf[PI_RX_BUF_SIZE];
+static PiTransport_t g_pi_transport;
+static volatile uint8_t g_pi_poll_requested = 0U;
 
 /* Function Prototypes */
 void SystemClock_Config(void);
@@ -78,6 +81,7 @@ int main(void) {
     /* Initialize drivers, CRC tables and control states */
     crc8_init();
     pi_link_init();
+    pi_transport_init(&g_pi_transport, g_pi_rx_buf, PI_RX_BUF_SIZE);
     safety_state_init();
     lqr_init(&g_lqr);
     mahony_init(&g_mahony, 2.0f, 0.005f); /* Kp = 2.0, Ki = 0.005 */
@@ -124,6 +128,7 @@ int main(void) {
     uint8_t actuator_enable_step = 0U;
     uint8_t actuators_enabled = 0U;
     uint32_t next_actuator_enable_ms = 0U;
+    uint32_t last_pi_poll_ms = 0U;
 
     startup_manager_init(&startup_manager, HAL_GetTick());
 
@@ -133,6 +138,13 @@ int main(void) {
         StartupInputs_t startup_inputs;
         StartupOutputs_t startup_outputs;
         uint8_t startup_servos_online = 1U;
+
+        if (g_pi_poll_requested || startup_now != last_pi_poll_ms) {
+            g_pi_poll_requested = 0U;
+            last_pi_poll_ms = startup_now;
+            (void)pi_transport_poll(&g_pi_transport,
+                                    (uint16_t)__HAL_DMA_GET_COUNTER(&hdma_usart6_rx));
+        }
 
         ddsm_bus_step(&g_ddsm_bus, startup_now);
         st3215_bus_step(&g_st3215_bus, startup_now);
@@ -767,10 +779,8 @@ static void MX_USART6_UART_Init(void) {
     hdma_usart6_rx.Init.MemInc = DMA_MINC_ENABLE;
     hdma_usart6_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
     hdma_usart6_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
-    /* Normal mode is restarted after each IDLE chunk; this makes the NDTR
-     * length calculation lossless instead of pretending a circular buffer starts
-     * at offset zero after every interrupt. */
-    hdma_usart6_rx.Init.Mode = DMA_NORMAL;
+    /* The Pi RX stream is consumed incrementally from a DMA ring. */
+    hdma_usart6_rx.Init.Mode = DMA_CIRCULAR;
     hdma_usart6_rx.Init.Priority = DMA_PRIORITY_HIGH;
     hdma_usart6_rx.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
     if (HAL_DMA_Init(&hdma_usart6_rx) != HAL_OK) {
@@ -790,18 +800,7 @@ static void MX_USART6_UART_Init(void) {
 void USART6_IRQHandler(void) {
     if (__HAL_UART_GET_FLAG(&huart6, UART_FLAG_IDLE) != RESET) {
         __HAL_UART_CLEAR_IDLEFLAG(&huart6);
-
-        /* Determine received size */
-        uint16_t counter = __HAL_DMA_GET_COUNTER(&hdma_usart6_rx);
-        uint16_t rx_len = PI_RX_BUF_SIZE - counter;
-
-        if (rx_len > 0) {
-            pi_link_parse_packet(g_pi_rx_buf, rx_len);
-        }
-
-        /* Reset DMA reception */
-        HAL_UART_DMAStop(&huart6);
-        HAL_UART_Receive_DMA(&huart6, g_pi_rx_buf, PI_RX_BUF_SIZE);
+        g_pi_poll_requested = 1U;
     }
     HAL_UART_IRQHandler(&huart6);
 }

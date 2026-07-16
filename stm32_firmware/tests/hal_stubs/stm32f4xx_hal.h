@@ -21,6 +21,8 @@ typedef enum {
 #define I2C_MEMADD_SIZE_8BIT 1U
 #define __HAL_UART_CLEAR_OREFLAG(huart) ((void)(huart))
 #define __HAL_UART_FLUSH_DRREGISTER(huart) ((void)(huart))
+#define __disable_irq() ((void)0)
+#define __enable_irq() ((void)0)
 
 uint32_t HAL_GetTick(void);
 HAL_StatusTypeDef HAL_I2C_Mem_Write(I2C_HandleTypeDef *hi2c,
@@ -44,5 +46,9 @@ HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *huart,
                                      uint8_t *data,
                                      uint16_t size);
 HAL_StatusTypeDef HAL_UART_Abort(UART_HandleTypeDef *huart);
+HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *huart,
+                                   uint8_t *data,
+                                   uint16_t size,
+                                   uint32_t timeout);
 
 #endif

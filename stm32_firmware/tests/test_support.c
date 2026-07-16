@@ -88,6 +88,14 @@ HAL_StatusTypeDef HAL_UART_Abort(UART_HandleTypeDef *huart) {
     return HAL_OK;
 }
 
+HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *huart,
+                                   uint8_t *data,
+                                   uint16_t size,
+                                   uint32_t timeout) {
+    (void)timeout;
+    return HAL_UART_Transmit_IT(huart, data, size);
+}
+
 HAL_StatusTypeDef HAL_I2C_Mem_Write(I2C_HandleTypeDef *hi2c,
                                     uint16_t dev_address,
                                     uint16_t mem_address,

@@ -12,7 +12,7 @@ static uint16_t tx_sequence = 0;
 static uint16_t last_rx_sequence = 0;
 static uint8_t have_rx_sequence = 0;
 static uint8_t link_compatible = 0;
-static uint8_t rx_stream[2 * PI_MAX_PAYLOAD];
+static uint8_t rx_stream[2 * (12 + PI_MAX_PAYLOAD)];
 static uint16_t rx_stream_len = 0;
 
 static int16_t read_i16_be(const uint8_t *bytes) {

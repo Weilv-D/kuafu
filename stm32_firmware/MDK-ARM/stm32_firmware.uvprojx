@@ -449,6 +449,16 @@
               <FilePath>..\Core\Inc\pi_link.h</FilePath>
             </File>
             <File>
+              <FileName>pi_transport.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\pi_transport.c</FilePath>
+            </File>
+            <File>
+              <FileName>pi_transport.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\pi_transport.h</FilePath>
+            </File>
+            <File>
               <FileName>bmi088.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Core\Src\bmi088.c</FilePath>
