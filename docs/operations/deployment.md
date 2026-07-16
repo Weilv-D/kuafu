@@ -14,12 +14,14 @@ The exporter rejects incompatible checkpoint dimensions, checks bounded finite O
 
 ## Pi5 Runtime
 
-Install `pi5_runtime/requirements.txt`, deploy the repository source tree (at least `kuafu_physics.py`, `rl/`, and `pi5_runtime/`), and copy the ONNX file, its manifest, and the generated `fivebar_ik_table.json` together. Run from that tree or set `PYTHONPATH` explicitly. The actual UART loop is:
+Install `pi5_runtime/requirements.txt`, deploy the repository source tree (at least `kuafu_physics.py`, `rl/`, and `pi5_runtime/`), and copy the ONNX file, its manifest, and the generated `fivebar_ik_table.json` together. Run from that tree or set `PYTHONPATH` explicitly.
+
+The Pi5↔STM32 link runs over the SoC PL011 on the board's 3-pin JST debug connector, which enumerates as `/dev/ttyAMA10`. The runtime user must be in the `dialout` group to open the device (`sudo usermod -aG dialout $USER`, then re-login or use `sg dialout -c '...'`). The UART loop is:
 
 ```bash
 cd /opt/kuafu && PYTHONPATH=/opt/kuafu python -m pi5_runtime.serial_node \
   --model /opt/kuafu/kuafu-policy.onnx \
-  --port /dev/ttyAMA0
+  --port /dev/ttyAMA10
 ```
 
 `PolicyRuntime` validates the ONNX digest and calibration-table digest before startup, sends a model-hash HELLO session frame, maintains the four-frame causal history (reset to `[0, 0, 0, current]`), runs ONNX, clamps the action, and emits heartbeat/action frames with monotonically increasing sequences. Forward velocity and yaw-rate inputs are wheel-odometry estimates; `prev_applied_action` is the delayed action actually sent to actuators.
@@ -35,7 +37,7 @@ Start the serial loop with teleop enabled, then the teleop publisher:
 ```bash
 cd /opt/kuafu && PYTHONPATH=/opt/kuafu python -m pi5_runtime.serial_node \
   --model /opt/kuafu/kuafu-policy.onnx \
-  --port /dev/ttyAMA0 \
+  --port /dev/ttyAMA10 \
   --enable-teleop
 ```
 

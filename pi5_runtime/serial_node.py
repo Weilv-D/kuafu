@@ -172,7 +172,9 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="KUAFU 50 Hz Pi5 serial policy node")
     parser.add_argument("--model", required=True)
-    parser.add_argument("--port", default="/dev/ttyAMA0")
+    parser.add_argument("--port", default="/dev/ttyAMA10",
+                        help="serial device; on the Pi5 this is the SoC PL011 "
+                             "behind the 3-pin JST debug connector")
     parser.add_argument("--baudrate", type=int, default=921600)
     parser.add_argument("--enable-teleop", action="store_true",
                         help="run the project CommandArbiter inside this process, "

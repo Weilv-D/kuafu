@@ -65,11 +65,20 @@ The adapter jumper is in position A. Servo IDs and firmware order are
 
 ## Raspberry Pi 5 Link
 
-| STM32F407ZG | Raspberry Pi 5 | Configuration |
+The Pi5 exposes the SoC PL011 on its 3-pin JST-SH (1.0 mm) debug connector,
+which enumerates as `/dev/ttyAMA10`. The connector pinout is **Pin 1 = TX,
+Pin 2 = GND, Pin 3 = RX** (signal names from the Pi's own perspective). The
+signals cross to the STM32 USART6 pair:
+
+| STM32F407ZG | Raspberry Pi 5 (JST) | Configuration |
 |---|---|---|
-| PC6 / USART6_TX | RX | 921600 baud |
-| PC7 / USART6_RX | TX | Circular DMA reception |
-| GND | GND | Mandatory common ground |
+| PC6 / USART6_TX | Pin 3 / RX | 921600 baud, 8N1, 3.3 V direct |
+| PC7 / USART6_RX | Pin 1 / TX | STM32 circular DMA reception |
+| GND | Pin 2 / GND | Mandatory common ground |
+
+Bluetooth uses a separate UART and the kernel console sits on `tty1`, so this
+PL011 is free for the STM32 link with no overlay changes. Add the runtime user
+to the `dialout` group to open the device (`sudo usermod -aG dialout $USER`).
 
 The Pi must send a compatible model-hash `HELLO`, a fresh heartbeat, and an
 explicit mode request before either wheel can be enabled.
