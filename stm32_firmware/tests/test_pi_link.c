@@ -139,6 +139,8 @@ void run_pi_link_tests(void) {
     health.servo_age_ms[3] = 0x0708U;
     health.imu_errors = 0x090AU;
     health.servo_errors[3] = 0x0B0CU;
+    health.wheel_l_timeout_errors = 0x0D0EU;
+    health.wheel_r_checksum_errors = 0x0F10U;
     pi_link_encode_health_payload(health_payload, &health);
     TEST_EQ_U8(0x12U, health_payload[0]);
     TEST_EQ_U8(0x78U, health_payload[3]);
@@ -152,6 +154,11 @@ void run_pi_link_tests(void) {
     TEST_EQ_U8(0x0AU, health_payload[21]);
     TEST_EQ_U8(0x0BU, health_payload[32]);
     TEST_EQ_U8(0x0CU, health_payload[33]);
+    /* DDSM error breakdown appended after the legacy 34-byte block. */
+    TEST_EQ_U8(0x0DU, health_payload[34]);
+    TEST_EQ_U8(0x0EU, health_payload[35]);
+    TEST_EQ_U8(0x0FU, health_payload[40]);
+    TEST_EQ_U8(0x10U, health_payload[41]);
 }
 
 void run_pi_transport_tests(void) {

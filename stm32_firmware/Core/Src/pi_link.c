@@ -320,6 +320,12 @@ void pi_link_encode_health_payload(uint8_t payload[PI_HEALTH_PAYLOAD_SIZE],
     for (i = 0U; i < 4U; ++i) {
         write_u16_be(&payload[offset], health->servo_errors[i]); offset += 2U;
     }
+    write_u16_be(&payload[offset], health->wheel_l_timeout_errors); offset += 2U;
+    write_u16_be(&payload[offset], health->wheel_l_checksum_errors); offset += 2U;
+    write_u16_be(&payload[offset], health->wheel_l_protocol_errors); offset += 2U;
+    write_u16_be(&payload[offset], health->wheel_r_timeout_errors); offset += 2U;
+    write_u16_be(&payload[offset], health->wheel_r_checksum_errors); offset += 2U;
+    write_u16_be(&payload[offset], health->wheel_r_protocol_errors); offset += 2U;
 }
 
 int pi_link_send_health(UART_HandleTypeDef *huart,

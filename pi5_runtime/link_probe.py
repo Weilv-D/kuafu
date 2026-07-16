@@ -147,6 +147,10 @@ def main() -> None:
                         help="只打印摘要, 不逐帧打印 IMU/Joints")
     parser.add_argument("--loopback", action="store_true",
                         help="回环测试模式: 短接 JST TX/RX 验证 Pi5 UART 硬件")
+    parser.add_argument("--hash", default=None,
+                        help="覆盖 HELLO 帧的 model_hash (16位hex); "
+                             "默认用 kuafu_physics.model_hash()。"
+                             "用于与已烧录但未更新哈希的固件握手")
     args = parser.parse_args()
 
     if args.loopback:
@@ -155,12 +159,14 @@ def main() -> None:
 
     import serial
 
+    model_hash = args.hash if args.hash else P.model_hash()
+
     print("=" * 64)
     print("KUAFU Pi5 <-> STM32 通信探针")
     print("=" * 64)
     print(f"串口: {args.port} @ {args.baudrate}")
     print(f"请求模式: {MODE_NAMES.get(args.mode, args.mode)}")
-    print(f"model_hash (HELLO): {P.model_hash()}")
+    print(f"model_hash (HELLO): {model_hash}", "(覆盖)" if args.hash else "")
     print(f"D0_MIN: {P.D0_MIN} mm")
     print("按 Ctrl-C 停止 (会发 ESTOP)")
     print("-" * 64)
@@ -178,10 +184,10 @@ def main() -> None:
 
     # 1. 发送 HELLO
     ts = int(time.monotonic() * 1000)
-    hello = hello_frame(sequence, ts, P.model_hash()).encode()
+    hello = hello_frame(sequence, ts, model_hash).encode()
     ser.write(hello)
     sequence += 1
-    print(f"[{0:6.2f}s] TX HELLO ({len(hello)}B) model_hash={P.model_hash()}")
+    print(f"[{0:6.2f}s] TX HELLO ({len(hello)}B) model_hash={model_hash}")
 
     # 2. 50Hz 循环: 发 heartbeat+action, 收 telemetry
     period = 0.02
@@ -263,7 +269,7 @@ def _handle_frame(frame: Frame, quiet: bool, elapsed: float) -> None:
         # 顺序 [wheel_L, wheel_R, A_l, A_r, B_l, B_r] 每组 (pos,vel,tau)
         print(f"[{elapsed:6.2f}s] RX JNT  wheelL=({v[0]:+.2f},{v[1]:+.3f}) "
               f"wheelR=({v[3]:+.2f},{v[4]:+.3f})")
-    elif frame.type == TEL_HEALTH and len(frame.payload) == 34:
+    elif frame.type == TEL_HEALTH and len(frame.payload) == 46:
         h = decode_health_payload(frame.payload)
         ages = f"imu={h.imu_age_ms}ms wheel=({h.wheel_age_ms[0]},{h.wheel_age_ms[1]})ms"
         serr = f"servo=({','.join(str(x) for x in h.servo_age_ms)})ms"
@@ -272,6 +278,11 @@ def _handle_frame(frame: Frame, quiet: bool, elapsed: float) -> None:
         print(f"           age: {ages} {serr}")
         print(f"           errs: imu={h.imu_errors} wheel=({h.wheel_errors[0]},{h.wheel_errors[1]}) "
               f"servo=({','.join(str(x) for x in h.servo_errors)})")
+        # DDSM 错误类型细分 (timeout=不回复 / checksum=脏帧 / protocol=硬件错误)
+        lt, lc, lp = h.wheel_error_breakdown[0]
+        rt, rc, rp = h.wheel_error_breakdown[1]
+        print(f"           wheel errs breakdown: L=(t/o={lt},chk={lc},proto={lp}) "
+              f"R=(t/o={rt},chk={rc},proto={rp})")
     elif frame.type == TEL_DIAG and len(frame.payload) == 4:
         bat_mv, temp_c, legacy = struct.unpack(">HBB", frame.payload)
         print(f"[{elapsed:6.2f}s] RX DIAG battery={bat_mv}mV temp={temp_c}C "
@@ -304,13 +315,18 @@ def _print_verdict(counts: dict, health, last_mode: int | None) -> None:
         else:
             print(f"  ⚠️  有故障: {fault_str(health.fault_mask)}")
             print("     对照 docs/architecture/system.md 的十类故障码定位")
-        if last_mode is not None and last_mode >= MODE_STAND:
-            print(f"  ✅ STM32 已推进到 {MODE_NAMES.get(last_mode, last_mode)} "
-                  f"(说明握手成功+设备fresh)")
-        elif last_mode == MODE_INIT:
+        if last_mode == MODE_INIT:
             print(f"  ⚠️  STM32 卡在 INIT —— 某设备未 fresh, 看 Health 的 age/errors")
+        elif last_mode == MODE_STAND:
+            print(f"  ✅ STM32 处于 STAND (设备 fresh, 平衡保持)")
+            print(f"     注: STAND 不需要握手。若请求了 ACTIVE 却停在 STAND,")
+            print(f"     说明 link_compatible=0 (model_hash 不匹配固件)")
+        elif last_mode == MODE_ACTIVE:
+            print(f"  ✅ STM32 已进入 ACTIVE (握手成功, RL 残差策略已启用)")
+        elif last_mode == MODE_FAULT:
+            print(f"  ⚠️  STM32 在 FAULT (见上方故障掩码)")
         else:
-            print(f"  ⚠️  未见模式推进 (last_mode={last_mode})")
+            print(f"  ℹ️  STM32 模式: {MODE_NAMES.get(last_mode, last_mode)}")
 
 
 if __name__ == "__main__":

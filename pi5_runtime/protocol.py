@@ -61,18 +61,23 @@ class FirmwareHealth:
     imu_errors: int
     wheel_errors: tuple[int, int]
     servo_errors: tuple[int, int, int, int]
+    wheel_error_breakdown: tuple  # ((L_timeout,L_checksum,L_protocol),(R_timeout,R_checksum,R_protocol))
 
 
 def decode_health_payload(payload: bytes) -> FirmwareHealth:
-    if len(payload) != 34:
-        raise ValueError("health telemetry payload must be 34 bytes")
-    values = struct.unpack(">IBB14H", payload)
+    if len(payload) != 46:
+        raise ValueError("health telemetry payload must be 46 bytes")
+    values = struct.unpack(">IBB20H", payload)
     return FirmwareHealth(
         fault_mask=values[0], mode=values[1], reset_cause=values[2],
         imu_age_ms=values[3], wheel_age_ms=(values[4], values[5]),
         servo_age_ms=tuple(values[6:10]), imu_errors=values[10],
         wheel_errors=(values[11], values[12]),
         servo_errors=tuple(values[13:17]),
+        wheel_error_breakdown=(
+            (values[17], values[18], values[19]),  # L: timeout, checksum, protocol
+            (values[20], values[21], values[22]),  # R: timeout, checksum, protocol
+        ),
     )
 
 

@@ -546,7 +546,19 @@ def codegen_xml_constants() -> str:
 
 
 def model_hash() -> str:
-    """Hash every source value that can change a trained/deployed behavior."""
+    """Hash every source value that can change a trained/deployed behavior.
+
+    The hash deliberately covers only deterministic source constants — hand-set
+    physical parameters, weight matrices, and the XML model — never the *output*
+    of a numerical solver. ``LQR_K_DT4``/``LQI_KI_DT4`` are produced by
+    ``scipy.linalg.solve_discrete_are`` and can differ in their last digits
+    across scipy/Python versions; folding those into the hash made the digest
+    environment-dependent (the same physics produced different hashes on the
+    training host vs. the Pi5). Their deterministic inputs (the cart-pole plant
+    + Q/R weights + BASE_DT) are hashed instead, so identical physics yields an
+    identical digest everywhere. The solved gains are still validated against
+    golden values by ``rl/verify/verify_controller_golden.py``.
+    """
     from rl.env.contract import ProtocolFrameSpec, SCHEMA_VERSION
 
     xml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rl", "kuafu.xml")
@@ -561,7 +573,9 @@ def model_hash() -> str:
         DR_MASS, DR_COM, DR_INERTIA, DR_FRICTION, DR_WHEEL_R, DR_TORQUE_CONST,
         DR_SERVO_PD, DR_DEADBAND, DR_DELAY_ACT, DR_DELAY_SENSE,
         YAW_KP, YAW_KD, ROLL_KP, ROLL_KD, PHYS_DT, BASE_DT, RL_DT,
-        *LQR_Q_DIAG, LQI_QI, LQR_R, *LQR_K_DT4.tolist(), LQI_KI_DT4,
+        # LQR/LQI deterministic inputs (plant + weights); the solved gains are
+        # validated separately and intentionally excluded from the digest.
+        *LQR_Q_DIAG, LQI_QI, LQR_R,
         ProtocolFrameSpec.version, ProtocolFrameSpec.WHEEL_SPEED_SCALE,
         SCHEMA_VERSION, xml_hash,
     ]

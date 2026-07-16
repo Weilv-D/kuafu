@@ -20,7 +20,7 @@
 #define PI_CMD_TELEMETRY_DIAG    0x83
 #define PI_CMD_TELEMETRY_HEALTH  0x84
 #define PI_CMD_TELEMETRY_FAULT   0x8F
-#define PI_HEALTH_PAYLOAD_SIZE     34U
+#define PI_HEALTH_PAYLOAD_SIZE     46U
 
 typedef struct {
     uint32_t fault_mask;
@@ -34,6 +34,13 @@ typedef struct {
     uint16_t wheel_l_errors;
     uint16_t wheel_r_errors;
     uint16_t servo_errors[4];
+    /* DDSM wheel error breakdown (timeout / checksum / protocol) for diagnostics. */
+    uint16_t wheel_l_timeout_errors;
+    uint16_t wheel_l_checksum_errors;
+    uint16_t wheel_l_protocol_errors;
+    uint16_t wheel_r_timeout_errors;
+    uint16_t wheel_r_checksum_errors;
+    uint16_t wheel_r_protocol_errors;
 } Pi_HealthTelemetry_t;
 
 typedef struct {

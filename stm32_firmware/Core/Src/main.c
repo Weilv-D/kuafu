@@ -526,6 +526,12 @@ int main(void) {
                     health.imu_errors = Device_Error_Count(&g_imu.health);
                     health.wheel_l_errors = Device_Error_Count(&left_feedback.health);
                     health.wheel_r_errors = Device_Error_Count(&right_feedback.health);
+                    health.wheel_l_timeout_errors = Device_Timeout_Count(&left_feedback.health);
+                    health.wheel_l_checksum_errors = Device_Checksum_Count(&left_feedback.health);
+                    health.wheel_l_protocol_errors = Device_Protocol_Count(&left_feedback.health);
+                    health.wheel_r_timeout_errors = Device_Timeout_Count(&right_feedback.health);
+                    health.wheel_r_checksum_errors = Device_Checksum_Count(&right_feedback.health);
+                    health.wheel_r_protocol_errors = Device_Protocol_Count(&right_feedback.health);
                     for (i = 0; i < 4; ++i) {
                         health.servo_age_ms[i] = Device_Age_Ms(&servo_feedback[i].health,
                                                                health_now);
@@ -847,6 +853,18 @@ static uint16_t Device_Error_Count(const DeviceHealth_t *health) {
     if (health == NULL) return UINT16_MAX;
     total = (uint32_t)health->timeout_count + health->checksum_count + health->protocol_count;
     return total > UINT16_MAX ? UINT16_MAX : (uint16_t)total;
+}
+
+static uint16_t Device_Timeout_Count(const DeviceHealth_t *health) {
+    return (health == NULL) ? UINT16_MAX : health->timeout_count;
+}
+
+static uint16_t Device_Checksum_Count(const DeviceHealth_t *health) {
+    return (health == NULL) ? UINT16_MAX : health->checksum_count;
+}
+
+static uint16_t Device_Protocol_Count(const DeviceHealth_t *health) {
+    return (health == NULL) ? UINT16_MAX : health->protocol_count;
 }
 
 static void MX_USART3_UART_Init(void) {
