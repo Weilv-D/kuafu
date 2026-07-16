@@ -42,6 +42,7 @@ def main() -> None:
     addresses["huart3"] = symbol_address("huart3")
     addresses["g_ddsm_bus"] = symbol_address("g_ddsm_bus")
     addresses["huart2"] = symbol_address("huart2")
+    addresses["hi2c1"] = symbol_address("hi2c1")
     session = ConnectHelper.session_with_chosen_probe(
         blocking=False, unique_id=PROBE, target_override=TARGET, frequency=args.frequency)
     if session is None:
@@ -66,6 +67,7 @@ def main() -> None:
             uart3 = bytes(session.target.read_memory_block8(addresses["huart3"], 0x44))
             wheel_bus = bytes(session.target.read_memory_block8(addresses["g_ddsm_bus"], 0x24))
             uart2 = bytes(session.target.read_memory_block8(addresses["huart2"], 0x44))
+            i2c1 = bytes(session.target.read_memory_block8(addresses["hi2c1"], 0x54))
             hal_tick = session.target.read32(addresses["uwTick"])
             records = [("imu", decode_health(imu, 0x20)),
                        ("wheel_l", decode_health(left, 0x14)),
@@ -73,6 +75,14 @@ def main() -> None:
             records += [(f"servo_{i + 1}", decode_health(servos, i * 0x28 + 0x1C)) for i in range(4)]
             session.target.resume()
             print(f"drdy_tick={tick} hal_ms={hal_tick} mode={mode} fault=0x{fault:08x}")
+            accel = struct.unpack_from("<3f", imu, 0x04)
+            gyro = struct.unpack_from("<3f", imu, 0x10)
+            print(f"  bmi088   initialized={imu[0x31]} init_state={imu[0x30]} "
+                  f"accel=({accel[0]:.3f},{accel[1]:.3f},{accel[2]:.3f}) "
+                  f"gyro=({gyro[0]:.4f},{gyro[1]:.4f},{gyro[2]:.4f})")
+            print(f"  i2c1     state=0x{i2c1[0x3D]:02x} mode=0x{i2c1[0x3E]:02x} "
+                  f"error=0x{struct.unpack_from('<I', i2c1, 0x40)[0]:08x} "
+                  f"device=0x{struct.unpack_from('<I', i2c1, 0x44)[0]:02x}")
             print(f"  st_bus   phase={servo_bus[0x134]} tx_len={servo_bus[0x68]} "
                   f"echo={servo_bus[0xC9]} frame={servo_bus[0x12A]}/{servo_bus[0x12B]} "
                   f"rx=0x{servo_bus[0x12C]:02x} uart_rx_left={struct.unpack_from('<H', uart3, 0x2E)[0]} "

@@ -940,7 +940,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     if (huart == &huart2) {
-        ddsm_bus_on_rx_complete(&g_ddsm_bus, HAL_GetTick());
+        ddsm_bus_on_rx_byte(&g_ddsm_bus, HAL_GetTick());
     } else if (huart == &huart3) {
         st3215_bus_on_rx_byte(&g_st3215_bus, HAL_GetTick());
     }

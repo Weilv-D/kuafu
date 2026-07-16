@@ -35,6 +35,8 @@ typedef struct {
     uint8_t rx[DDSM_FRAME_SIZE];
     uint32_t deadline_ms;
     DDSM_BusPhase_t phase;
+    uint8_t rx_byte;
+    uint8_t rx_len;
 } DDSM_Bus_t;
 
 void ddsm_build_torque(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, float torque_nm);
@@ -60,7 +62,7 @@ int ddsm_bus_queue_query(DDSM_Bus_t *bus, DDSM_State_t *target,
                          uint32_t now_ms);
 void ddsm_bus_step(DDSM_Bus_t *bus, uint32_t now_ms);
 void ddsm_bus_on_tx_complete(DDSM_Bus_t *bus);
-void ddsm_bus_on_rx_complete(DDSM_Bus_t *bus, uint32_t now_ms);
+void ddsm_bus_on_rx_byte(DDSM_Bus_t *bus, uint32_t now_ms);
 void ddsm_bus_on_uart_error(DDSM_Bus_t *bus);
 
 #endif

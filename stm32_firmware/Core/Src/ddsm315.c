@@ -22,6 +22,12 @@ static void finish_failure(DDSM_Bus_t *bus, DeviceFailure_t failure) {
     bus->phase = DDSM_BUS_IDLE;
 }
 
+static void arm_rx(DDSM_Bus_t *bus) {
+    if (bus != NULL && bus->huart != NULL) {
+        (void)HAL_UART_Receive_IT(bus->huart, &bus->rx_byte, 1U);
+    }
+}
+
 void ddsm_build_torque(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, float torque_nm) {
     int16_t raw;
     if (torque_nm > DDSM_MAX_TORQUE_NM) torque_nm = DDSM_MAX_TORQUE_NM;
@@ -90,6 +96,7 @@ void ddsm_bus_init(DDSM_Bus_t *bus, UART_HandleTypeDef *huart) {
     memset(bus, 0, sizeof(*bus));
     bus->huart = huart;
     bus->phase = DDSM_BUS_IDLE;
+    arm_rx(bus);
 }
 
 uint8_t ddsm_bus_is_idle(const DDSM_Bus_t *bus) {
@@ -106,6 +113,7 @@ int ddsm_bus_submit(DDSM_Bus_t *bus,
     bus->target = target;
     bus->deadline_ms = now_ms + DDSM_TRANSACTION_TIMEOUT_MS;
     bus->phase = DDSM_BUS_TX;
+    bus->rx_len = 0U;
     if (HAL_UART_Transmit_IT(bus->huart, bus->tx, DDSM_FRAME_SIZE) != HAL_OK) {
         finish_failure(bus, DEVICE_FAILURE_PROTOCOL);
         return -3;
@@ -148,35 +156,56 @@ int ddsm_bus_queue_query(DDSM_Bus_t *bus, DDSM_State_t *target,
 void ddsm_bus_step(DDSM_Bus_t *bus, uint32_t now_ms) {
     if (bus == NULL || bus->phase == DDSM_BUS_IDLE) return;
     if (deadline_reached(now_ms, bus->deadline_ms)) {
-        (void)HAL_UART_Abort(bus->huart);
         finish_failure(bus, DEVICE_FAILURE_TIMEOUT);
+        bus->rx_len = 0U;
     }
 }
 
 void ddsm_bus_on_tx_complete(DDSM_Bus_t *bus) {
     if (bus == NULL || bus->phase != DDSM_BUS_TX) return;
-    __HAL_UART_CLEAR_OREFLAG(bus->huart);
-    __HAL_UART_FLUSH_DRREGISTER(bus->huart);
     bus->phase = DDSM_BUS_RX;
-    if (HAL_UART_Receive_IT(bus->huart, bus->rx, DDSM_FRAME_SIZE) != HAL_OK) {
-        finish_failure(bus, DEVICE_FAILURE_PROTOCOL);
-    }
 }
 
-void ddsm_bus_on_rx_complete(DDSM_Bus_t *bus, uint32_t now_ms) {
+void ddsm_bus_on_rx_byte(DDSM_Bus_t *bus, uint32_t now_ms) {
     int result;
-    if (bus == NULL || bus->phase != DDSM_BUS_RX || bus->target == NULL) return;
-    result = ddsm_parse_feedback(bus->rx, bus->target);
-    if (result == 0) {
-        device_health_mark_valid(&bus->target->health, now_ms);
-        bus->target = NULL;
-        bus->phase = DDSM_BUS_IDLE;
-    } else {
-        finish_failure(bus, result == -1 ? DEVICE_FAILURE_CHECKSUM : DEVICE_FAILURE_PROTOCOL);
+    if (bus == NULL) return;
+    if (bus->rx_len < DDSM_FRAME_SIZE) {
+        bus->rx[bus->rx_len++] = bus->rx_byte;
     }
+    if (bus->rx_len == DDSM_FRAME_SIZE) {
+        if (memcmp(bus->rx, bus->tx, DDSM_FRAME_SIZE) == 0) {
+            bus->rx_len = 0U;
+        } else if ((bus->phase == DDSM_BUS_TX || bus->phase == DDSM_BUS_RX) &&
+                   bus->target != NULL && bus->rx[0] == bus->target->id &&
+                   crc8_calculate(bus->rx, 9U) == bus->rx[9]) {
+            result = ddsm_parse_feedback(bus->rx, bus->target);
+            if (result == 0) {
+                device_health_mark_valid(&bus->target->health, now_ms);
+                bus->target = NULL;
+                bus->phase = DDSM_BUS_IDLE;
+                bus->rx_len = 0U;
+            } else {
+                finish_failure(bus, result == -1 ? DEVICE_FAILURE_CHECKSUM
+                                                 : DEVICE_FAILURE_PROTOCOL);
+                bus->rx_len = 0U;
+            }
+        } else if ((bus->phase == DDSM_BUS_TX || bus->phase == DDSM_BUS_RX) &&
+                   bus->target != NULL && bus->rx[0] == bus->target->id) {
+            finish_failure(bus, DEVICE_FAILURE_CHECKSUM);
+            bus->rx_len = 0U;
+        } else {
+            memmove(bus->rx, &bus->rx[1], DDSM_FRAME_SIZE - 1U);
+            bus->rx_len = DDSM_FRAME_SIZE - 1U;
+        }
+    }
+    arm_rx(bus);
 }
 
 void ddsm_bus_on_uart_error(DDSM_Bus_t *bus) {
-    if (bus == NULL || bus->phase == DDSM_BUS_IDLE) return;
-    finish_failure(bus, DEVICE_FAILURE_PROTOCOL);
+    if (bus == NULL) return;
+    if (bus->phase != DDSM_BUS_IDLE) {
+        finish_failure(bus, DEVICE_FAILURE_PROTOCOL);
+    }
+    bus->rx_len = 0U;
+    arm_rx(bus);
 }

@@ -15,6 +15,15 @@ static void make_feedback(uint8_t frame[DDSM_FRAME_SIZE], uint8_t id) {
     frame[9] = crc8_calculate(frame, 9U);
 }
 
+static void feed_bus(DDSM_Bus_t *bus, const uint8_t *bytes,
+                     uint8_t count, uint32_t now_ms) {
+    uint8_t i;
+    for (i = 0U; i < count; ++i) {
+        test_uart_supply_rx(&bytes[i], 1U);
+        ddsm_bus_on_rx_byte(bus, now_ms);
+    }
+}
+
 void run_ddsm315_tests(void) {
     uint8_t packet[DDSM_FRAME_SIZE];
     uint8_t frame[DDSM_FRAME_SIZE];
@@ -68,9 +77,9 @@ void run_ddsm315_tests(void) {
 
     ddsm_bus_on_tx_complete(&bus);
     TEST_EQ_INT(DDSM_BUS_RX, bus.phase);
+    feed_bus(&bus, bus.tx, DDSM_FRAME_SIZE, 10U); /* self-echo */
     make_feedback(frame, 1U);
-    test_uart_supply_rx(frame, DDSM_FRAME_SIZE);
-    ddsm_bus_on_rx_complete(&bus, 11U);
+    feed_bus(&bus, frame, DDSM_FRAME_SIZE, 11U);
     TEST_TRUE(ddsm_bus_is_idle(&bus));
     TEST_TRUE(state.health.online);
     TEST_EQ_INT(11, (int)state.health.last_valid_ms);
@@ -79,8 +88,7 @@ void run_ddsm315_tests(void) {
     TEST_EQ_INT(0, ddsm_bus_queue_torque(&bus, &right, -0.25f, 12U));
     ddsm_bus_on_tx_complete(&bus);
     make_feedback(frame, 2U);
-    test_uart_supply_rx(frame, DDSM_FRAME_SIZE);
-    ddsm_bus_on_rx_complete(&bus, 13U);
+    feed_bus(&bus, frame, DDSM_FRAME_SIZE, 13U);
     TEST_TRUE(right.health.online);
 
     TEST_EQ_INT(0, ddsm_bus_queue_torque(&bus, &state, 0.0f, 20U));
@@ -90,15 +98,14 @@ void run_ddsm315_tests(void) {
     TEST_EQ_INT(DDSM_BUS_TX, bus.phase);
     ddsm_bus_step(&bus, 23U);
     TEST_TRUE(ddsm_bus_is_idle(&bus));
-    TEST_EQ_INT(1, (int)test_uart_abort_count());
+    TEST_EQ_INT(0, (int)test_uart_abort_count());
     TEST_EQ_INT(1, (int)state.health.timeout_count);
 
     /* A valid transaction after timeout restores online health. */
     TEST_EQ_INT(0, ddsm_bus_queue_torque(&bus, &state, 0.0f, 30U));
     ddsm_bus_on_tx_complete(&bus);
     make_feedback(frame, 1U);
-    test_uart_supply_rx(frame, DDSM_FRAME_SIZE);
-    ddsm_bus_on_rx_complete(&bus, 31U);
+    feed_bus(&bus, frame, DDSM_FRAME_SIZE, 31U);
     TEST_EQ_INT(0, (int)state.health.consecutive_failures);
     TEST_TRUE(state.health.online);
 
@@ -106,8 +113,7 @@ void run_ddsm315_tests(void) {
     ddsm_bus_on_tx_complete(&bus);
     make_feedback(frame, 1U);
     frame[9] ^= 1U;
-    test_uart_supply_rx(frame, DDSM_FRAME_SIZE);
-    ddsm_bus_on_rx_complete(&bus, 41U);
+    feed_bus(&bus, frame, DDSM_FRAME_SIZE, 41U);
     TEST_EQ_INT(1, (int)state.health.checksum_count);
     TEST_TRUE(ddsm_bus_is_idle(&bus));
 }
