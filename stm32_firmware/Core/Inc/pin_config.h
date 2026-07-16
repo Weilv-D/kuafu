@@ -38,7 +38,10 @@
 #define DDSM_LEFT_ID            1
 #define DDSM_RIGHT_ID           2
 
-/* USART3: ST3215 Half-Duplex TTL Bus Servo Port */
+/* USART3: ST3215 Servo Port (full-duplex via Waveshare Bus Servo Adapter A).
+ * The ST3215 single-wire half-duplex bus is converted to a 2-wire UART by the
+ * adapter board; wire STM32 TX(PB10)->adapter TXD, RX(PB11)->adapter RXD
+ * (same-name, per Waveshare wiki), GND common. Adapter jumper must be at A. */
 #define SERVO_USART             USART3
 #define SERVO_USART_CLK_EN()    __HAL_RCC_USART3_CLK_ENABLE()
 #define SERVO_GPIO_CLK_EN()     __HAL_RCC_GPIOB_CLK_ENABLE()

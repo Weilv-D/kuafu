@@ -79,6 +79,11 @@ int st3215_read_state(UART_HandleTypeDef *huart, uint8_t id, ST3215_State_t *sta
         return -1;
     }
 
+    /* Full-duplex: discard any loopback / leftover RX bytes before the servo's
+     * reply arrives on the RX line. */
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    __HAL_UART_FLUSH_DRREGISTER(huart);
+
     /* Receive response (21 bytes) */
     if (HAL_UART_Receive(huart, rx_buf, 21, 2) != HAL_OK) {
         return -1; /* Timeout or RX error */

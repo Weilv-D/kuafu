@@ -51,7 +51,7 @@ static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
-static void MX_USART3_HalfDuplex_Init(void);
+static void MX_USART3_UART_Init(void);
 static void MX_USART6_UART_Init(void);
 static void MX_DMA_Init(void);
 static void MX_IWDG_Init(void);
@@ -74,7 +74,7 @@ int main(void) {
     MX_I2C1_Init();
     MX_USART1_UART_Init();
     MX_USART2_UART_Init();
-    MX_USART3_HalfDuplex_Init();
+    MX_USART3_UART_Init();
     MX_USART6_UART_Init();
     MX_IWDG_Init();
 
@@ -593,7 +593,7 @@ static void MX_USART2_UART_Init(void) {
     }
 }
 
-static void MX_USART3_HalfDuplex_Init(void) {
+static void MX_USART3_UART_Init(void) {
     huart3.Instance = SERVO_USART;
     huart3.Init.BaudRate = 1000000;
     huart3.Init.WordLength = UART_WORDLENGTH_8B;
@@ -606,15 +606,19 @@ static void MX_USART3_HalfDuplex_Init(void) {
     SERVO_GPIO_CLK_EN();
     SERVO_USART_CLK_EN();
 
+    /* Full-duplex: separate TX (PB10) and RX (PB11) lines. The ST3215 bus servos
+     * attach through a Waveshare Bus Servo Adapter (A), which converts the
+     * single-wire half-duplex servo bus into a 2-wire UART (TXD/RXD). Both pins
+     * are AF push-pull; the adapter board drives its own lines. */
     GPIO_InitTypeDef GPIO_InitStruct = {0};
-    GPIO_InitStruct.Pin = SERVO_TX_PIN; /* In Half-Duplex, only the TX pin is used */
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_OD; /* Open-Drain for bidirectional bus line */
+    GPIO_InitStruct.Pin = SERVO_TX_PIN | SERVO_RX_PIN;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_PULLUP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
     GPIO_InitStruct.Alternate = SERVO_USART_AF;
     HAL_GPIO_Init(SERVO_TX_PORT, &GPIO_InitStruct);
 
-    if (HAL_HalfDuplex_Init(&huart3) != HAL_OK) {
+    if (HAL_UART_Init(&huart3) != HAL_OK) {
         Error_Handler();
     }
 }

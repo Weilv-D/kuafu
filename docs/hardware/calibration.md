@@ -2,6 +2,8 @@
 
 Hardware calibration is a release prerequisite, not a post-deployment refinement. Record each result with serial number, firmware schema, physical-model hash, date, operator, raw data path, and fitted uncertainty.
 
+Wiring must match `wiring.md` (and the source of truth `stm32_firmware/Core/Inc/pin_config.h`) before any measurement below. The servo bus in particular only works with the Waveshare adapter jumper at position A and the same-name TX/RX pairing documented there.
+
 ## Required Measurements
 
 1. Confirm positive left/right wheel torque produces positive chassis X motion.
