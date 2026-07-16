@@ -15,6 +15,16 @@ static uint8_t link_compatible = 0;
 static uint8_t rx_stream[2 * (12 + PI_MAX_PAYLOAD)];
 static uint16_t rx_stream_len = 0;
 
+#define PI_TX_QUEUE_DEPTH 4U
+#define PI_MAX_FRAME_SIZE (12U + PI_MAX_PAYLOAD)
+static uint8_t tx_frames[PI_TX_QUEUE_DEPTH][PI_MAX_FRAME_SIZE];
+static uint8_t tx_lengths[PI_TX_QUEUE_DEPTH];
+static uint8_t tx_head = 0U;
+static uint8_t tx_tail = 0U;
+static uint8_t tx_count = 0U;
+static uint8_t tx_active = 0U;
+static UART_HandleTypeDef *tx_uart = NULL;
+
 static int16_t read_i16_be(const uint8_t *bytes) {
     return (int16_t)(((uint16_t)bytes[0] << 8) | bytes[1]);
 }
@@ -44,6 +54,11 @@ void pi_link_init(void) {
     have_rx_sequence = 0;
     link_compatible = 0;
     rx_stream_len = 0;
+    tx_head = 0U;
+    tx_tail = 0U;
+    tx_count = 0U;
+    tx_active = 0U;
+    tx_uart = NULL;
 }
 
 void pi_link_clear_action(void) {
@@ -173,6 +188,32 @@ int pi_link_parse_packet(const uint8_t *buf, uint16_t len) {
     return parsed;
 }
 
+static int start_next_tx(void) {
+    if (tx_active || tx_count == 0U || tx_uart == NULL) return 0;
+    tx_active = 1U;
+    if (HAL_UART_Transmit_IT(tx_uart, tx_frames[tx_head], tx_lengths[tx_head]) != HAL_OK) {
+        tx_active = 0U;
+        return -1;
+    }
+    return 0;
+}
+
+void pi_link_on_tx_complete(UART_HandleTypeDef *huart) {
+    if (!tx_active || huart != tx_uart) return;
+    tx_head = (uint8_t)((tx_head + 1U) % PI_TX_QUEUE_DEPTH);
+    --tx_count;
+    tx_active = 0U;
+    (void)start_next_tx();
+}
+
+void pi_link_on_tx_error(UART_HandleTypeDef *huart) {
+    if (huart != tx_uart || tx_count == 0U) return;
+    tx_head = (uint8_t)((tx_head + 1U) % PI_TX_QUEUE_DEPTH);
+    --tx_count;
+    tx_active = 0U;
+    (void)start_next_tx();
+}
+
 static int pi_link_transmit(UART_HandleTypeDef *huart, uint8_t type,
                             const uint8_t *payload, uint8_t payload_len) {
     uint8_t frame[12 + PI_MAX_PAYLOAD];
@@ -191,7 +232,24 @@ static int pi_link_transmit(UART_HandleTypeDef *huart, uint8_t type,
     if (payload_len > 0) memcpy(&frame[10], payload, payload_len);
     frame[10 + payload_len] = crc8_calculate(&frame[1], (uint16_t)(9u + payload_len));
     frame[11 + payload_len] = PI_FRAME_FOOTER;
-    return HAL_UART_Transmit(huart, frame, (uint16_t)(12u + payload_len), 20) == HAL_OK ? 0 : -1;
+    __disable_irq();
+    if (tx_count >= PI_TX_QUEUE_DEPTH) {
+        __enable_irq();
+        return -1;
+    }
+    memcpy(tx_frames[tx_tail], frame, (uint16_t)(12U + payload_len));
+    tx_lengths[tx_tail] = (uint8_t)(12U + payload_len);
+    tx_tail = (uint8_t)((tx_tail + 1U) % PI_TX_QUEUE_DEPTH);
+    ++tx_count;
+    tx_uart = huart;
+    if (start_next_tx() != 0) {
+        tx_tail = (uint8_t)((tx_tail + PI_TX_QUEUE_DEPTH - 1U) % PI_TX_QUEUE_DEPTH);
+        --tx_count;
+        __enable_irq();
+        return -1;
+    }
+    __enable_irq();
+    return 0;
 }
 
 int pi_link_send_imu(UART_HandleTypeDef *huart, float roll, float pitch, float yaw,

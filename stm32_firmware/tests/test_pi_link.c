@@ -43,6 +43,7 @@ void run_pi_link_tests(void) {
     uint16_t len;
     uint16_t len2;
     int i;
+    UART_HandleTypeDef uart;
 
     test_set_time_ms(100U);
     pi_link_init();
@@ -116,6 +117,15 @@ void run_pi_link_tests(void) {
     memcpy(&joined[2], frame, len); memcpy(&joined[2U + len], second, len2);
     TEST_EQ_INT(2, pi_link_parse_packet(joined, (uint16_t)(2U + len + len2)));
     TEST_EQ_INT(0, pi_link_parse_packet(frame, len));
+
+    test_uart_reset();
+    pi_link_init();
+    TEST_EQ_INT(0, pi_link_send_diag(&uart, 0U, 40U, 0U));
+    TEST_EQ_INT(0, pi_link_send_fault(&uart, 3U));
+    TEST_EQ_INT(1, (int)test_uart_tx_count());
+    pi_link_on_tx_complete(&uart);
+    TEST_EQ_INT(2, (int)test_uart_tx_count());
+    pi_link_on_tx_complete(&uart);
 }
 
 void run_pi_transport_tests(void) {

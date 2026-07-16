@@ -67,6 +67,8 @@ void pi_link_enter_hold(void);
  * @return int Number of successfully parsed packets.
  */
 int pi_link_parse_packet(const uint8_t *buf, uint16_t len);
+void pi_link_on_tx_complete(UART_HandleTypeDef *huart);
+void pi_link_on_tx_error(UART_HandleTypeDef *huart);
 
 /**
  * @brief Packages and transmits IMU telemetry (Roll, Pitch, Yaw, Gyro) to the Pi.

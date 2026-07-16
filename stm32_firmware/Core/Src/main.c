@@ -12,6 +12,7 @@
 #include "safety_state.h"
 #include "servo_mapping.h"
 #include "startup_manager.h"
+#include "firmware_runtime.h"
 
 /* Peripheral Handles */
 I2C_HandleTypeDef hi2c1;
@@ -59,6 +60,9 @@ static void MX_USART6_UART_Init(void);
 static void MX_DMA_Init(void);
 static void MX_IWDG_Init(void);
 static void Pi_Command_Snapshot(Pi_Command_Heartbeat_t *hb, Pi_Command_Action_t *act);
+static void Actuator_Feedback_Snapshot(DDSM_State_t *left,
+                                       DDSM_State_t *right,
+                                       ST3215_State_t servos[4]);
 void Error_Handler(void);
 
 int main(void) {
@@ -114,9 +118,7 @@ int main(void) {
 #endif
 
     uint32_t last_tick = 0;
-    uint32_t last_left_tick = 0;
     uint32_t last_right_tick = 1;
-    uint32_t last_servo_loop_time = 0;
     uint8_t active_servo_query_idx = 0;
     uint32_t last_servo_query_ms = 0U;
     uint8_t fault_servo_disable_idx = 0U;
@@ -129,14 +131,23 @@ int main(void) {
     uint8_t actuators_enabled = 0U;
     uint32_t next_actuator_enable_ms = 0U;
     uint32_t last_pi_poll_ms = 0U;
+    FirmwareRuntime_t firmware_runtime;
+    uint8_t control_deadline_pending = 0U;
+    uint8_t servo_deadline_pending = 0U;
 
     startup_manager_init(&startup_manager, HAL_GetTick());
+    firmware_runtime_init(&firmware_runtime, HAL_GetTick());
 
     /* Main background scheduler loop */
     while (1) {
         uint32_t startup_now = HAL_GetTick();
         StartupInputs_t startup_inputs;
         StartupOutputs_t startup_outputs;
+        FirmwareRuntimeInputs_t runtime_inputs;
+        FirmwareRuntimeOutputs_t runtime_outputs;
+        DDSM_State_t left_feedback;
+        DDSM_State_t right_feedback;
+        ST3215_State_t servo_feedback[4];
         uint8_t startup_servos_online = 1U;
 
         if (g_pi_poll_requested || startup_now != last_pi_poll_ms) {
@@ -148,6 +159,18 @@ int main(void) {
 
         ddsm_bus_step(&g_ddsm_bus, startup_now);
         st3215_bus_step(&g_st3215_bus, startup_now);
+        Actuator_Feedback_Snapshot(&left_feedback, &right_feedback, servo_feedback);
+
+        runtime_inputs.now_ms = startup_now;
+        runtime_inputs.mode = g_safety_state.current_mode;
+        runtime_inputs.link_compatible = pi_link_is_compatible();
+        runtime_inputs.heartbeat_fresh = pi_link_heartbeat_fresh();
+        runtime_inputs.action_fresh = pi_link_action_fresh();
+        runtime_inputs.wheel_bus_idle = ddsm_bus_is_idle(&g_ddsm_bus);
+        runtime_inputs.servo_bus_idle = st3215_bus_is_idle(&g_st3215_bus);
+        runtime_outputs = firmware_runtime_step(&firmware_runtime, &runtime_inputs);
+        if (runtime_outputs.control_due) control_deadline_pending = 1U;
+        if (runtime_outputs.servo_due) servo_deadline_pending = 1U;
 
         if (bmi_init_in_progress) {
             int bmi_result = bmi088_init_step(&g_imu, startup_now);
@@ -157,7 +180,7 @@ int main(void) {
         }
 
         for (int i = 0; i < 4; ++i) {
-            if (!device_health_is_fresh(&g_servos[i].health,
+            if (!device_health_is_fresh(&servo_feedback[i].health,
                                         startup_now,
                                         SAFETY_SERVO_MAX_AGE_MS)) {
                 startup_servos_online = 0U;
@@ -166,10 +189,10 @@ int main(void) {
         startup_inputs.now_ms = startup_now;
         startup_inputs.imu_initialized = g_imu.initialized;
         startup_inputs.gyro_calibrated = g_safety_state.is_gyro_calibrated;
-        startup_inputs.wheel_l_online = device_health_is_fresh(&g_ddsm_left.health,
+        startup_inputs.wheel_l_online = device_health_is_fresh(&left_feedback.health,
                                                                startup_now,
                                                                SAFETY_WHEEL_MAX_AGE_MS);
-        startup_inputs.wheel_r_online = device_health_is_fresh(&g_ddsm_right.health,
+        startup_inputs.wheel_r_online = device_health_is_fresh(&right_feedback.health,
                                                                startup_now,
                                                                SAFETY_WHEEL_MAX_AGE_MS);
         startup_inputs.servos_online = startup_servos_online;
@@ -288,16 +311,16 @@ int main(void) {
 
             /* 3. Run the 250 Hz motor deadline and lower-rate telemetry slots. */
             uint8_t slot = last_tick % 4;
-            uint8_t control_due = (uint32_t)(last_tick - last_left_tick) >= 4u;
+            uint8_t control_due = control_deadline_pending;
             uint8_t right_due = (uint32_t)(last_tick - last_right_tick) >= 4u;
+            if (control_due) control_deadline_pending = 0U;
 
             /* Safety state machine update (at 250 Hz, inside slot scheduler) */
             if (control_due && startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY) {
-                last_left_tick = last_tick;
                 float max_temp = g_imu.temperature;
                 for (int i = 0; i < 4; i++) {
-                    if (g_servos[i].temperature_c > max_temp) {
-                        max_temp = g_servos[i].temperature_c;
+                    if (servo_feedback[i].temperature_c > max_temp) {
+                        max_temp = servo_feedback[i].temperature_c;
                     }
                 }
                 SafetyInputs_t safety_inputs;
@@ -305,7 +328,7 @@ int main(void) {
                 uint32_t safety_now = HAL_GetTick();
                 uint8_t servos_fresh = 1U;
                 for (int i = 0; i < 4; ++i) {
-                    if (!device_health_is_fresh(&g_servos[i].health,
+                    if (!device_health_is_fresh(&servo_feedback[i].health,
                                                 safety_now,
                                                 SAFETY_SERVO_MAX_AGE_MS)) {
                         servos_fresh = 0U;
@@ -320,10 +343,10 @@ int main(void) {
                 safety_inputs.imu_fresh = device_health_is_fresh(&g_imu.health,
                                                                  safety_now,
                                                                  SAFETY_IMU_MAX_AGE_MS);
-                safety_inputs.wheel_l_fresh = device_health_is_fresh(&g_ddsm_left.health,
+                safety_inputs.wheel_l_fresh = device_health_is_fresh(&left_feedback.health,
                                                                      safety_now,
                                                                      SAFETY_WHEEL_MAX_AGE_MS);
-                safety_inputs.wheel_r_fresh = device_health_is_fresh(&g_ddsm_right.health,
+                safety_inputs.wheel_r_fresh = device_health_is_fresh(&right_feedback.health,
                                                                      safety_now,
                                                                      SAFETY_WHEEL_MAX_AGE_MS);
                 safety_inputs.servos_fresh = servos_fresh;
@@ -341,15 +364,15 @@ int main(void) {
 
             /* --- Slot 0: Compute LQR (once/cycle), command & poll Left DDSM --- */
             if (control_due && startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY) {
-                if (g_safety_state.current_mode != STATE_FAULT && g_safety_state.current_mode != STATE_INIT) {
+                if (runtime_outputs.wheel_intent_allowed) {
                     /* Snapshot Pi commands atomically (updated in USART6 ISR) */
                     Pi_Command_Heartbeat_t hb;
                     Pi_Command_Action_t act;
                     Pi_Command_Snapshot(&hb, &act);
                     /* Average wheel velocity in body frame -> forward speed ẋ.
                      * All command and residual fields now use the shared P0 contract. */
-                    float wheel_vel_l = WHEEL_DIR_L * g_ddsm_left.velocity_rads;
-                    float wheel_vel_r = WHEEL_DIR_R * g_ddsm_right.velocity_rads;
+                    float wheel_vel_l = WHEEL_DIR_L * left_feedback.velocity_rads;
+                    float wheel_vel_r = WHEEL_DIR_R * right_feedback.velocity_rads;
                     float yaw_rate = gz;
                     if (!pi_link_is_compatible() || !pi_link_heartbeat_fresh()) {
                         /* Enter a fresh local hold reference immediately; do not
@@ -368,11 +391,9 @@ int main(void) {
                                 yaw_rate,
                                 hb.target_velocity,
                                 hb.target_yaw_rate,
-                                (g_safety_state.current_mode == STATE_ACTIVE &&
-                                 pi_link_is_compatible() && pi_link_heartbeat_fresh() && pi_link_action_fresh())
+                                runtime_outputs.residual_allowed
                                     ? act.delta_torque_common : 0.0f,
-                                (g_safety_state.current_mode == STATE_ACTIVE &&
-                                 pi_link_is_compatible() && pi_link_heartbeat_fresh() && pi_link_action_fresh())
+                                runtime_outputs.residual_allowed
                                     ? act.delta_torque_yaw : 0.0f,
                                 &g_ctrl_tau_l,
                                 &g_ctrl_tau_r);
@@ -394,7 +415,7 @@ int main(void) {
              * one 4 ms control slot. */
             if (right_due && startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY) {
                 last_right_tick = last_tick;
-                if (g_safety_state.current_mode != STATE_FAULT && g_safety_state.current_mode != STATE_INIT) {
+                if (runtime_outputs.wheel_intent_allowed) {
                     (void)ddsm_bus_queue_torque(&g_ddsm_bus, &g_ddsm_right,
                                                 WHEEL_DIR_R * g_ctrl_tau_r,
                                                 last_tick);
@@ -418,18 +439,18 @@ int main(void) {
                  * symmetric with the command contract (mirror + zero applied). */
                 float servo_pos[4], servo_vel[4], servo_cur[4];
                 for (int i = 0; i < 4; i++) {
-                    servo_pos[i] = servo_tick_to_angle(g_servos[i].position_tick, (uint8_t)i);
-                    servo_vel[i] = (float)servo_direction((uint8_t)i) * g_servos[i].velocity_rads;
-                    servo_cur[i] = g_servos[i].current_a;
+                    servo_pos[i] = servo_tick_to_angle(servo_feedback[i].position_tick, (uint8_t)i);
+                    servo_vel[i] = (float)servo_direction((uint8_t)i) * servo_feedback[i].velocity_rads;
+                    servo_cur[i] = servo_feedback[i].current_a;
                 }
 
                 /* Single-turn wheel angle (raw); velocity/torque mapped to body frame */
-                float wheel_l_pos = g_ddsm_left.position_rad;
-                float wheel_r_pos = g_ddsm_right.position_rad;
+                float wheel_l_pos = left_feedback.position_rad;
+                float wheel_r_pos = right_feedback.position_rad;
 
                 pi_link_send_joints(&huart6,
-                                    wheel_l_pos, WHEEL_DIR_L * g_ddsm_left.velocity_rads, WHEEL_DIR_L * g_ddsm_left.torque,
-                                    wheel_r_pos, WHEEL_DIR_R * g_ddsm_right.velocity_rads, WHEEL_DIR_R * g_ddsm_right.torque,
+                                    wheel_l_pos, WHEEL_DIR_L * left_feedback.velocity_rads, WHEEL_DIR_L * left_feedback.torque,
+                                    wheel_r_pos, WHEEL_DIR_R * right_feedback.velocity_rads, WHEEL_DIR_R * right_feedback.torque,
                                     servo_pos, servo_vel, servo_cur);
             }
 
@@ -448,9 +469,8 @@ int main(void) {
 
         /* --- 50 Hz Background Loop: ST3215 Servo Control --- */
         uint32_t current_time = HAL_GetTick();
-        if (startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY &&
-            current_time - last_servo_loop_time >= (1000 / SERVO_LOOP_FREQ)) {
-            last_servo_loop_time = current_time;
+        if (startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY && servo_deadline_pending) {
+            servo_deadline_pending = 0U;
 
             uint8_t ids[4] = {SERVO_LF_ID, SERVO_RF_ID, SERVO_LB_ID, SERVO_RB_ID};
 
@@ -459,7 +479,8 @@ int main(void) {
              * has already disabled torque; feedback polling below still runs. */
             (void)ids;
 #else
-            if (g_safety_state.current_mode == STATE_ACTIVE) {
+            if (g_safety_state.current_mode == STATE_ACTIVE &&
+                runtime_outputs.servo_intent_allowed) {
                 /* Pi supplies bounded workspace residuals.  Project them through
                  * the same dwell-relative (Qx,D0) five-bar IK as the simulator. */
                 Pi_Command_Heartbeat_t hb;
@@ -468,8 +489,7 @@ int main(void) {
                 int16_t pos_ticks[4];
                 uint16_t speed_ticks[4] = {2000, 2000, 2000, 2000};
                 uint8_t accels[4] = {50, 50, 50, 50};
-                float action_scale = (pi_link_is_compatible() && pi_link_heartbeat_fresh() &&
-                                      pi_link_action_fresh()) ? 1.0f : 0.0f;
+                float action_scale = runtime_outputs.residual_allowed ? 1.0f : 0.0f;
                 float d0_max = (fabsf(hb.target_velocity) > D0_GATE_V_THRESH ||
                                 fabsf(hb.target_yaw_rate) > D0_GATE_W_THRESH)
                                    ? D0_GATE_MAX_HIGH * 0.001f : KIN_MAX_LEG_D0;
@@ -494,7 +514,9 @@ int main(void) {
                                                       pos_ticks, speed_ticks, accels);
                 }
             }
-            else if (g_safety_state.current_mode == STATE_STAND || g_safety_state.current_mode == STATE_CLIMB) {
+            else if ((g_safety_state.current_mode == STATE_STAND ||
+                      g_safety_state.current_mode == STATE_CLIMB) &&
+                     runtime_outputs.servo_intent_allowed) {
                 /* Standing/Climbing virtual height mode */
                 Pi_Command_Heartbeat_t hb;
                 Pi_Command_Action_t act;
@@ -714,6 +736,19 @@ static void MX_USART2_UART_Init(void) {
     HAL_NVIC_EnableIRQ(USART2_IRQn);
 }
 
+static void Actuator_Feedback_Snapshot(DDSM_State_t *left,
+                                       DDSM_State_t *right,
+                                       ST3215_State_t servos[4]) {
+    int i;
+    HAL_NVIC_DisableIRQ(USART2_IRQn);
+    HAL_NVIC_DisableIRQ(USART3_IRQn);
+    *left = g_ddsm_left;
+    *right = g_ddsm_right;
+    for (i = 0; i < 4; ++i) servos[i] = g_servos[i];
+    HAL_NVIC_EnableIRQ(USART3_IRQn);
+    HAL_NVIC_EnableIRQ(USART2_IRQn);
+}
+
 static void MX_USART3_UART_Init(void) {
     huart3.Instance = SERVO_USART;
     huart3.Init.BaudRate = 1000000;
@@ -818,6 +853,8 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
         ddsm_bus_on_tx_complete(&g_ddsm_bus);
     } else if (huart == &huart3) {
         st3215_bus_on_tx_complete(&g_st3215_bus);
+    } else if (huart == &huart6) {
+        pi_link_on_tx_complete(huart);
     }
 }
 
@@ -834,6 +871,8 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
         ddsm_bus_on_uart_error(&g_ddsm_bus);
     } else if (huart == &huart3) {
         st3215_bus_on_uart_error(&g_st3215_bus);
+    } else if (huart == &huart6) {
+        pi_link_on_tx_error(huart);
     }
 }
 
