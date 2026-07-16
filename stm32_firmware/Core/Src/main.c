@@ -48,6 +48,7 @@ static volatile float g_body_gyro[3] = {0.0f, 0.0f, 0.0f};
 uint8_t g_pi_rx_buf[PI_RX_BUF_SIZE];
 static PiTransport_t g_pi_transport;
 static volatile uint8_t g_pi_poll_requested = 0U;
+static uint8_t g_reset_cause = 0U;
 
 /* Function Prototypes */
 void SystemClock_Config(void);
@@ -63,11 +64,15 @@ static void Pi_Command_Snapshot(Pi_Command_Heartbeat_t *hb, Pi_Command_Action_t 
 static void Actuator_Feedback_Snapshot(DDSM_State_t *left,
                                        DDSM_State_t *right,
                                        ST3215_State_t servos[4]);
+static uint8_t Read_Reset_Cause(void);
+static uint16_t Device_Age_Ms(const DeviceHealth_t *health, uint32_t now_ms);
+static uint16_t Device_Error_Count(const DeviceHealth_t *health);
 void Error_Handler(void);
 
 int main(void) {
     /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
     HAL_Init();
+    g_reset_cause = Read_Reset_Cause();
 
     /* Configure the system clock to 168 MHz */
     SystemClock_Config();
@@ -123,6 +128,7 @@ int main(void) {
     uint32_t last_servo_query_ms = 0U;
     uint8_t fault_servo_disable_idx = 0U;
     uint32_t temp_refresh_counter = 0;
+    uint8_t health_telemetry_divider = 0U;
     StartupManager_t startup_manager;
     uint8_t bmi_init_in_progress = 0U;
     uint8_t actuator_discovery_step = 0U;
@@ -461,6 +467,28 @@ int main(void) {
                 pi_link_send_diag(&huart6, 0U, (uint8_t)g_imu.temperature,
                                   safety_state_legacy_fault_mask());
 
+                if (++health_telemetry_divider >= 25U) {
+                    Pi_HealthTelemetry_t health;
+                    int i;
+                    uint32_t health_now = HAL_GetTick();
+                    health_telemetry_divider = 0U;
+                    health.fault_mask = g_safety_state.fault_mask;
+                    health.mode = (uint8_t)g_safety_state.current_mode;
+                    health.reset_cause = g_reset_cause;
+                    health.imu_age_ms = Device_Age_Ms(&g_imu.health, health_now);
+                    health.wheel_l_age_ms = Device_Age_Ms(&left_feedback.health, health_now);
+                    health.wheel_r_age_ms = Device_Age_Ms(&right_feedback.health, health_now);
+                    health.imu_errors = Device_Error_Count(&g_imu.health);
+                    health.wheel_l_errors = Device_Error_Count(&left_feedback.health);
+                    health.wheel_r_errors = Device_Error_Count(&right_feedback.health);
+                    for (i = 0; i < 4; ++i) {
+                        health.servo_age_ms[i] = Device_Age_Ms(&servo_feedback[i].health,
+                                                               health_now);
+                        health.servo_errors[i] = Device_Error_Count(&servo_feedback[i].health);
+                    }
+                    (void)pi_link_send_health(&huart6, &health);
+                }
+
                 if (g_safety_state.current_mode == STATE_FAULT) {
                     pi_link_send_fault(&huart6, safety_state_legacy_fault_mask());
                 }
@@ -747,6 +775,33 @@ static void Actuator_Feedback_Snapshot(DDSM_State_t *left,
     for (i = 0; i < 4; ++i) servos[i] = g_servos[i];
     HAL_NVIC_EnableIRQ(USART3_IRQn);
     HAL_NVIC_EnableIRQ(USART2_IRQn);
+}
+
+static uint8_t Read_Reset_Cause(void) {
+    uint8_t cause = 0U;
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_PINRST)) cause |= (1U << 0);
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_PORRST)) cause |= (1U << 1);
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_SFTRST)) cause |= (1U << 2);
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST)) cause |= (1U << 3);
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_WWDGRST)) cause |= (1U << 4);
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_LPWRRST)) cause |= (1U << 5);
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_BORRST)) cause |= (1U << 6);
+    __HAL_RCC_CLEAR_RESET_FLAGS();
+    return cause;
+}
+
+static uint16_t Device_Age_Ms(const DeviceHealth_t *health, uint32_t now_ms) {
+    uint32_t age;
+    if (health == NULL || health->last_valid_ms == 0U) return UINT16_MAX;
+    age = (uint32_t)(now_ms - health->last_valid_ms);
+    return age > UINT16_MAX ? UINT16_MAX : (uint16_t)age;
+}
+
+static uint16_t Device_Error_Count(const DeviceHealth_t *health) {
+    uint32_t total;
+    if (health == NULL) return UINT16_MAX;
+    total = (uint32_t)health->timeout_count + health->checksum_count + health->protocol_count;
+    return total > UINT16_MAX ? UINT16_MAX : (uint16_t)total;
 }
 
 static void MX_USART3_UART_Init(void) {

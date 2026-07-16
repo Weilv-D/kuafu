@@ -198,6 +198,18 @@ static int start_next_tx(void) {
     return 0;
 }
 
+static void write_u16_be(uint8_t *bytes, uint16_t value) {
+    bytes[0] = (uint8_t)(value >> 8);
+    bytes[1] = (uint8_t)value;
+}
+
+static void write_u32_be(uint8_t *bytes, uint32_t value) {
+    bytes[0] = (uint8_t)(value >> 24);
+    bytes[1] = (uint8_t)(value >> 16);
+    bytes[2] = (uint8_t)(value >> 8);
+    bytes[3] = (uint8_t)value;
+}
+
 void pi_link_on_tx_complete(UART_HandleTypeDef *huart) {
     if (!tx_active || huart != tx_uart) return;
     tx_head = (uint8_t)((tx_head + 1U) % PI_TX_QUEUE_DEPTH);
@@ -286,6 +298,37 @@ int pi_link_send_diag(UART_HandleTypeDef *huart, uint16_t battery_mv, uint8_t ma
         (uint8_t)(battery_mv >> 8), (uint8_t)battery_mv, max_temp_c, error_mask
     };
     return pi_link_transmit(huart, PI_CMD_TELEMETRY_DIAG, payload, sizeof(payload));
+}
+
+void pi_link_encode_health_payload(uint8_t payload[PI_HEALTH_PAYLOAD_SIZE],
+                                   const Pi_HealthTelemetry_t *health) {
+    uint8_t offset = 0U;
+    uint8_t i;
+    if (payload == NULL || health == NULL) return;
+    write_u32_be(&payload[offset], health->fault_mask); offset += 4U;
+    payload[offset++] = health->mode;
+    payload[offset++] = health->reset_cause;
+    write_u16_be(&payload[offset], health->imu_age_ms); offset += 2U;
+    write_u16_be(&payload[offset], health->wheel_l_age_ms); offset += 2U;
+    write_u16_be(&payload[offset], health->wheel_r_age_ms); offset += 2U;
+    for (i = 0U; i < 4U; ++i) {
+        write_u16_be(&payload[offset], health->servo_age_ms[i]); offset += 2U;
+    }
+    write_u16_be(&payload[offset], health->imu_errors); offset += 2U;
+    write_u16_be(&payload[offset], health->wheel_l_errors); offset += 2U;
+    write_u16_be(&payload[offset], health->wheel_r_errors); offset += 2U;
+    for (i = 0U; i < 4U; ++i) {
+        write_u16_be(&payload[offset], health->servo_errors[i]); offset += 2U;
+    }
+}
+
+int pi_link_send_health(UART_HandleTypeDef *huart,
+                        const Pi_HealthTelemetry_t *health) {
+    uint8_t payload[PI_HEALTH_PAYLOAD_SIZE];
+    if (health == NULL) return -1;
+    pi_link_encode_health_payload(payload, health);
+    return pi_link_transmit(huart, PI_CMD_TELEMETRY_HEALTH,
+                            payload, PI_HEALTH_PAYLOAD_SIZE);
 }
 
 int pi_link_send_fault(UART_HandleTypeDef *huart, uint8_t fault_code) {

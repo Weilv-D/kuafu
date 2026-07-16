@@ -14,7 +14,9 @@ import time
 import numpy as np
 
 import kuafu_physics as P
-from pi5_runtime.protocol import StreamDecoder, TEL_IMU, TEL_JOINTS
+from pi5_runtime.protocol import (
+    StreamDecoder, TEL_HEALTH, TEL_IMU, TEL_JOINTS, decode_health_payload,
+)
 from pi5_runtime.runtime import PolicyRuntime, Telemetry
 
 
@@ -60,6 +62,7 @@ class SerialPolicyNode:
         self.command = (0.0, 0.0, P.D0_MIN, 2)
         self.imu = None
         self.joints = None
+        self.health = None
         self.last_imu = self.last_joints = 0.0
 
     def set_command(self, vx: float, wz: float, d0_mm: float, mode: int = 2) -> None:
@@ -79,6 +82,8 @@ class SerialPolicyNode:
             elif frame.type == TEL_JOINTS and len(frame.payload) == 36:
                 self.joints = decode_joint_payload(frame.payload)
                 self.last_joints = now
+            elif frame.type == TEL_HEALTH:
+                self.health = decode_health_payload(frame.payload)
 
     def _telemetry(self) -> Telemetry | None:
         if self.imu is None or self.joints is None:

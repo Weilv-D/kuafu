@@ -3,7 +3,10 @@ import struct
 import numpy as np
 import pytest
 
-from pi5_runtime.protocol import CMD_ACTION, CMD_HELLO, StreamDecoder, command_frames, hello_frame
+from pi5_runtime.protocol import (
+    CMD_ACTION, CMD_HELLO, StreamDecoder, command_frames,
+    decode_health_payload, hello_frame,
+)
 from pi5_runtime.serial_node import decode_joint_payload, projected_gravity_from_euler
 import kuafu_physics as P
 from rl.verify.release_gate import wilson_lower_bound
@@ -48,6 +51,12 @@ def test_protocol_rejects_out_of_contract_action_and_hello_round_trip():
     assert decoded[0].payload.decode("ascii") == P.model_hash()
 
 
+def test_hello_starts_a_new_sequence_session():
+    decoder = StreamDecoder()
+    assert decoder.feed(hello_frame(500, 0, P.model_hash()).encode())
+    assert decoder.feed(hello_frame(1, 1, P.model_hash()).encode())
+
+
 def test_relative_fivebar_fk_matches_dwell_and_extension():
     dwell = P.fivebar_fk_relative(0.0, 0.0)
     extended = P.fivebar_fk_relative(*P.fivebar_ik_cmd(P.D0_MAX))
@@ -81,6 +90,22 @@ def test_joint_telemetry_scales_wheel_speed_once():
     assert values[2] == pytest.approx(1.0)
     assert values[4] == pytest.approx(-12.0)
     assert values[5] == pytest.approx(-1.0)
+
+
+def test_health_telemetry_is_big_endian_and_complete():
+    payload = struct.pack(">IBB14H", 0x12345678, 3, 0x21,
+                          1, 2, 3, 4, 5, 6, 7,
+                          8, 9, 10, 11, 12, 13, 14)
+    health = decode_health_payload(payload)
+    assert health.fault_mask == 0x12345678
+    assert health.mode == 3 and health.reset_cause == 0x21
+    assert health.wheel_age_ms == (2, 3)
+    assert health.servo_age_ms == (4, 5, 6, 7)
+    assert health.imu_errors == 8
+    assert health.wheel_errors == (9, 10)
+    assert health.servo_errors == (11, 12, 13, 14)
+    with pytest.raises(ValueError, match="34 bytes"):
+        decode_health_payload(payload[:-1])
 
 
 def test_wilson_gate_is_conservative_for_small_samples():

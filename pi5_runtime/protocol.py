@@ -18,6 +18,7 @@ CMD_HELLO = 0x03
 TEL_IMU = 0x81
 TEL_JOINTS = 0x82
 TEL_DIAG = 0x83
+TEL_HEALTH = 0x84
 TEL_FAULT = 0x8F
 
 
@@ -49,6 +50,32 @@ class Frame:
         return prefix + self.payload + bytes((checksum, FOOTER))
 
 
+@dataclass(frozen=True)
+class FirmwareHealth:
+    fault_mask: int
+    mode: int
+    reset_cause: int
+    imu_age_ms: int
+    wheel_age_ms: tuple[int, int]
+    servo_age_ms: tuple[int, int, int, int]
+    imu_errors: int
+    wheel_errors: tuple[int, int]
+    servo_errors: tuple[int, int, int, int]
+
+
+def decode_health_payload(payload: bytes) -> FirmwareHealth:
+    if len(payload) != 34:
+        raise ValueError("health telemetry payload must be 34 bytes")
+    values = struct.unpack(">IBB14H", payload)
+    return FirmwareHealth(
+        fault_mask=values[0], mode=values[1], reset_cause=values[2],
+        imu_age_ms=values[3], wheel_age_ms=(values[4], values[5]),
+        servo_age_ms=tuple(values[6:10]), imu_errors=values[10],
+        wheel_errors=(values[11], values[12]),
+        servo_errors=tuple(values[13:17]),
+    )
+
+
 class StreamDecoder:
     """Loss-tolerant incremental decoder matching ``pi_link_parse_packet``."""
 
@@ -78,7 +105,8 @@ class StreamDecoder:
                 continue
             del self._buffer[:total]
             sequence = struct.unpack(">H", raw[4:6])[0]
-            if self._last_sequence is not None and not (0 < ((sequence - self._last_sequence) & 0xFFFF) < 0x8000):
+            if (msg_type != CMD_HELLO and self._last_sequence is not None and
+                    not (0 < ((sequence - self._last_sequence) & 0xFFFF) < 0x8000)):
                 continue
             self._last_sequence = sequence
             timestamp_ms = struct.unpack(">I", raw[6:10])[0]

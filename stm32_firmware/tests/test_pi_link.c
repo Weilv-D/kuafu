@@ -44,6 +44,8 @@ void run_pi_link_tests(void) {
     uint16_t len2;
     int i;
     UART_HandleTypeDef uart;
+    Pi_HealthTelemetry_t health;
+    uint8_t health_payload[PI_HEALTH_PAYLOAD_SIZE];
 
     test_set_time_ms(100U);
     pi_link_init();
@@ -126,6 +128,30 @@ void run_pi_link_tests(void) {
     pi_link_on_tx_complete(&uart);
     TEST_EQ_INT(2, (int)test_uart_tx_count());
     pi_link_on_tx_complete(&uart);
+
+    memset(&health, 0, sizeof(health));
+    health.fault_mask = 0x12345678UL;
+    health.mode = 3U;
+    health.reset_cause = 0x21U;
+    health.imu_age_ms = 0x0102U;
+    health.wheel_l_age_ms = 0x0304U;
+    health.wheel_r_age_ms = 0x0506U;
+    health.servo_age_ms[3] = 0x0708U;
+    health.imu_errors = 0x090AU;
+    health.servo_errors[3] = 0x0B0CU;
+    pi_link_encode_health_payload(health_payload, &health);
+    TEST_EQ_U8(0x12U, health_payload[0]);
+    TEST_EQ_U8(0x78U, health_payload[3]);
+    TEST_EQ_U8(3U, health_payload[4]);
+    TEST_EQ_U8(0x21U, health_payload[5]);
+    TEST_EQ_U8(0x01U, health_payload[6]);
+    TEST_EQ_U8(0x02U, health_payload[7]);
+    TEST_EQ_U8(0x07U, health_payload[18]);
+    TEST_EQ_U8(0x08U, health_payload[19]);
+    TEST_EQ_U8(0x09U, health_payload[20]);
+    TEST_EQ_U8(0x0AU, health_payload[21]);
+    TEST_EQ_U8(0x0BU, health_payload[32]);
+    TEST_EQ_U8(0x0CU, health_payload[33]);
 }
 
 void run_pi_transport_tests(void) {

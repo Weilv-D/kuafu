@@ -18,7 +18,23 @@
 #define PI_CMD_TELEMETRY_IMU     0x81
 #define PI_CMD_TELEMETRY_JOINTS  0x82
 #define PI_CMD_TELEMETRY_DIAG    0x83
+#define PI_CMD_TELEMETRY_HEALTH  0x84
 #define PI_CMD_TELEMETRY_FAULT   0x8F
+#define PI_HEALTH_PAYLOAD_SIZE     34U
+
+typedef struct {
+    uint32_t fault_mask;
+    uint8_t mode;
+    uint8_t reset_cause;
+    uint16_t imu_age_ms;
+    uint16_t wheel_l_age_ms;
+    uint16_t wheel_r_age_ms;
+    uint16_t servo_age_ms[4];
+    uint16_t imu_errors;
+    uint16_t wheel_l_errors;
+    uint16_t wheel_r_errors;
+    uint16_t servo_errors[4];
+} Pi_HealthTelemetry_t;
 
 typedef struct {
     uint8_t mode_request;    /* 0=INIT, 1=STAND, 2=ACTIVE, 3=CLIMB, 4=FAULT */
@@ -114,6 +130,10 @@ int pi_link_send_joints(UART_HandleTypeDef *huart,
  * @return int 0 on success, -1 on failure.
  */
 int pi_link_send_diag(UART_HandleTypeDef *huart, uint16_t battery_mv, uint8_t max_temp_c, uint8_t error_mask);
+void pi_link_encode_health_payload(uint8_t payload[PI_HEALTH_PAYLOAD_SIZE],
+                                   const Pi_HealthTelemetry_t *health);
+int pi_link_send_health(UART_HandleTypeDef *huart,
+                        const Pi_HealthTelemetry_t *health);
 
 /**
  * @brief Packages and transmits a critical fault packet to the Pi.
