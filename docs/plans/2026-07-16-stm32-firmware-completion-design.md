@@ -30,8 +30,8 @@ The runtime has four layers:
    LQR/LQI, and applies deterministic degradation for stale or invalid data.
 3. A 50 Hz leg/Pi layer projects Qx/D0 through five-bar IK, schedules servo
    targets and feedback, parses Pi traffic, and publishes telemetry.
-4. A low-rate diagnostic layer filters real battery ADC data and reports
-   temperatures, bus ages, error counters, reset cause, and safety mode.
+4. A low-rate diagnostic layer reports temperatures, bus ages, error counters,
+   reset cause, and safety mode.
 
 ## Startup And Safety Ownership
 
@@ -42,8 +42,8 @@ required health predicates are satisfied. ACTIVE additionally requires a valid
 model-hash HELLO and fresh heartbeat. Learned residuals are always subordinate
 to the STM32 baseline.
 
-FAULT is latched until reset. Tilt, rate, overtemperature, battery limits, IMU
-loss, persistent wheel-feedback loss, persistent servo loss, and emergency stop
+FAULT is latched until reset. Tilt, rate, overtemperature, IMU loss, persistent
+wheel-feedback loss, persistent servo loss, and emergency stop
 have independent fault bits. Stale action clears residuals; stale heartbeat
 commands zero velocity/yaw and returns ACTIVE/CLIMB to STAND while preserving a
 bounded local hold. Initialization failure never transitions silently to STAND.
@@ -62,11 +62,12 @@ reads coherent snapshots rather than mutable driver structures. Short gaps may
 reuse bounded-age feedback; exceeding the configured age produces a documented
 degradation or fault.
 
-Battery voltage comes from a configured ADC divider and low-pass filter. The
-fixed 18.5 V diagnostic value is removed. New diagnostic fields are added only
-through an explicit protocol/schema update synchronized with the executable
-contract and Pi runtime; existing v1.1.0 command semantics and hip wire order
-remain unchanged.
+This robot has no battery-divider hardware and battery monitoring is explicitly
+out of scope. The fixed 18.5 V diagnostic value is removed; the legacy
+`battery_mv` field transmits zero, defined as unavailable/not fitted. New
+diagnostic fields are added only through an explicit protocol/schema update
+synchronized with the executable contract and Pi runtime; existing v1.1.0
+command semantics and hip wire order remain unchanged.
 
 ## Servo Coordinate Contract
 
