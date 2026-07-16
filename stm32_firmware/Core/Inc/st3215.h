@@ -28,6 +28,7 @@
 
 typedef struct {
     uint8_t id;
+    uint16_t position_tick;   /* Present raw position in [0, 4095] */
     float position_rad;      /* Present position in radians */
     float velocity_rads;     /* Present velocity in rad/s */
     float load;              /* Present load/torque ratio */

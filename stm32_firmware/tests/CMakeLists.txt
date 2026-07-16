@@ -5,9 +5,11 @@ enable_testing()
 
 add_executable(firmware_host_tests
     test_main.c
+    test_servo_mapping.c
     test_support.c
     ../Core/Src/crc8.c
     ../Core/Src/kinematics.c
+    ../Core/Src/servo_mapping.c
 )
 
 target_include_directories(firmware_host_tests PRIVATE

@@ -9,6 +9,7 @@
 #include "kinematics.h"
 #include "lqr_controller.h"
 #include "safety_state.h"
+#include "servo_mapping.h"
 
 /* Peripheral Handles */
 I2C_HandleTypeDef hi2c1;
@@ -28,10 +29,6 @@ LQRController_t g_lqr;
 DDSM_State_t g_ddsm_left;
 DDSM_State_t g_ddsm_right;
 ST3215_State_t g_servos[4];
-
-/* Per-servo direction (mirror) and mechanical zero (calibratable, see pin_config.h) */
-static const int8_t  g_servo_dir[4]    = SERVO_DIR_INIT;    /* [LF, RF, LB, RB] */
-static const int16_t g_servo_center[4] = SERVO_CENTER_INIT; /* [LF, RF, LB, RB] */
 
 /* Wheel torque commands computed and sent together at each 250 Hz deadline. */
 static float g_ctrl_tau_l = 0.0f;
@@ -57,8 +54,6 @@ static void MX_DMA_Init(void);
 static void MX_IWDG_Init(void);
 static void System_Initial_Setup(void);
 static void Pi_Command_Snapshot(Pi_Command_Heartbeat_t *hb, Pi_Command_Action_t *act);
-static int16_t Servo_Angle_To_Ticks(float angle_rad, int idx);
-static float Servo_Feedback_Angle(int idx);
 void Error_Handler(void);
 
 int main(void) {
@@ -267,8 +262,8 @@ int main(void) {
                  * symmetric with the command contract (mirror + zero applied). */
                 float servo_pos[4], servo_vel[4], servo_cur[4];
                 for (int i = 0; i < 4; i++) {
-                    servo_pos[i] = Servo_Feedback_Angle(i);
-                    servo_vel[i] = (float)g_servo_dir[i] * g_servos[i].velocity_rads;
+                    servo_pos[i] = servo_tick_to_angle(g_servos[i].position_tick, (uint8_t)i);
+                    servo_vel[i] = (float)servo_direction((uint8_t)i) * g_servos[i].velocity_rads;
                     servo_cur[i] = g_servos[i].current_a;
                 }
 
@@ -332,10 +327,10 @@ int main(void) {
                 float qA_l, qB_l, qA_r, qB_r;
                 if (kinematics_solve_ik_xy(QX_RESIDUAL_SCALE_MM * 0.001f * action_scale * act.qx_l, d0_l, &qA_l, &qB_l) == 0 &&
                     kinematics_solve_ik_xy(QX_RESIDUAL_SCALE_MM * 0.001f * action_scale * act.qx_r, d0_r, &qA_r, &qB_r) == 0) {
-                    pos_ticks[0] = Servo_Angle_To_Ticks(qA_l, 0);
-                    pos_ticks[1] = Servo_Angle_To_Ticks(qA_r, 1);
-                    pos_ticks[2] = Servo_Angle_To_Ticks(qB_l, 2);
-                    pos_ticks[3] = Servo_Angle_To_Ticks(qB_r, 3);
+                    pos_ticks[0] = servo_angle_to_tick(qA_l, 0);
+                    pos_ticks[1] = servo_angle_to_tick(qA_r, 1);
+                    pos_ticks[2] = servo_angle_to_tick(qB_l, 2);
+                    pos_ticks[3] = servo_angle_to_tick(qB_r, 3);
                     st3215_sync_write_pos(&huart3, ids, 4, pos_ticks, speed_ticks, accels);
                 }
             }
@@ -355,10 +350,10 @@ int main(void) {
                     uint16_t speed_ticks[4] = {1500, 1500, 1500, 1500};
                     uint8_t accels[4] = {30, 30, 30, 30};
 
-                    pos_ticks[0] = Servo_Angle_To_Ticks(q_hip_A, 0); /* LF (A chain) */
-                    pos_ticks[1] = Servo_Angle_To_Ticks(q_hip_A, 1); /* RF (A chain) */
-                    pos_ticks[2] = Servo_Angle_To_Ticks(q_hip_B, 2); /* LB (B chain) */
-                    pos_ticks[3] = Servo_Angle_To_Ticks(q_hip_B, 3); /* RB (B chain) */
+                    pos_ticks[0] = servo_angle_to_tick(q_hip_A, 0); /* LF (A chain) */
+                    pos_ticks[1] = servo_angle_to_tick(q_hip_A, 1); /* RF (A chain) */
+                    pos_ticks[2] = servo_angle_to_tick(q_hip_B, 2); /* LB (B chain) */
+                    pos_ticks[3] = servo_angle_to_tick(q_hip_B, 3); /* RB (B chain) */
 
                     st3215_sync_write_pos(&huart3, ids, 4, pos_ticks, speed_ticks, accels);
                 }
@@ -460,24 +455,6 @@ static void Pi_Command_Snapshot(Pi_Command_Heartbeat_t *hb, Pi_Command_Action_t 
     *hb = g_pi_cmd_heartbeat;
     *act = g_pi_cmd_action;
     HAL_NVIC_EnableIRQ(USART6_IRQn);
-}
-
-/**
- * @brief Maps a sim-frame joint angle (dwell = 0) to a servo tick command,
- *        applying the per-servo mirror direction and mechanical zero.
- */
-static int16_t Servo_Angle_To_Ticks(float angle_rad, int idx) {
-    return (int16_t)((float)g_servo_dir[idx] * angle_rad * SERVO_TICKS_PER_RAD) + g_servo_center[idx];
-}
-
-/**
- * @brief Converts a decoded servo position (driver frame, relative to
- *        SERVO_CENTER_TICKS) into the sim/command frame, applying the per-servo
- *        mechanical zero and mirror direction. Inverse of Servo_Angle_To_Ticks.
- */
-static float Servo_Feedback_Angle(int idx) {
-    float center_offset = (float)(SERVO_CENTER_TICKS - g_servo_center[idx]) / SERVO_TICKS_PER_RAD;
-    return (float)g_servo_dir[idx] * (g_servos[idx].position_rad + center_offset);
 }
 
 /**

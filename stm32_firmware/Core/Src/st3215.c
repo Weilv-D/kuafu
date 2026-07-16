@@ -106,6 +106,7 @@ int st3215_read_state(UART_HandleTypeDef *huart, uint8_t id, ST3215_State_t *sta
     /* Parse register block (offset relative to reg 56) */
     /* Reg 56/57: Present Position (unsigned, [0, 4095]) */
     uint16_t raw_pos = ((uint16_t)rx_buf[5 + 1] << 8) | rx_buf[5 + 0];
+    state->position_tick = raw_pos;
     state->position_rad = (float)(raw_pos - SERVO_CENTER_TICKS) * TICK_TO_RAD;
 
     /* Reg 58/59: Present Speed (two's complement int16, bit15 = direction) */
