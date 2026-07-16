@@ -1,71 +1,78 @@
 # Debug Tools
 
-通过 DAPLink (CMSIS-DAP) + pyOCD 经 SWD 非侵入式读取 STM32 运行时内存，
-用于在不改动固件、不占用串口的前提下验证传感器、标定舵机与监控控制状态。
+Non-intrusive STM32 debugging via DAPLink (CMSIS-DAP) + pyOCD over SWD. No
+firmware changes, no UART needed — these scripts read live target memory while
+the firmware runs.
 
-## 依赖
+## Setup
 
-- Python 3
-- pyOCD: `pip install pyocd`
-- STM32F407 设备包（首次使用）: `pyocd pack install stm32f407zgtx`
+- Python 3 + `pip install pyocd`
+- STM32F407 pack (once): `pyocd pack install stm32f407zgtx`
+- DAPLink probe ID is hardcoded as `LU_2022_8888` in each script (`PROBE`); change
+  it if you swap debuggers.
 
-## 连接
+## SWD Debug Method
 
-DAPLink → STM32 SWD 五线：`SWCLK→CLK`、`SWDIO→DIO`、`3V3`、`GND`、`RST`。
-本工程的 DAPLink 唯一 ID 为 `LU_2022_8888`（脚本内已写死，更换调试器时改 `PROBE`）。
+Symbol addresses come from `../stm32_firmware/stm32_firmware.map` (regenerate
+after each build); struct field offsets from
+`fromelf --fieldoffsets ../stm32_firmware/stm32_firmware.axf` (Keil uses
+`-fshort-enums`, so enums are 1 byte — do not assume 4).
 
-目标芯片全速运行（阻塞式 I2C + 看门狗）会使 SWD 初始握手不稳定，所有脚本均用
-`connect-under-reset`（连接时拉 NRST）+ 重试保证可靠附着，连上后恢复核心运行。
+Key globals and their addresses (built 2026-07-16; re-check the .map after rebuild):
+- `g_system_ticks` (0x20000000) — PB1/IMU-DRDY interrupt count; the scheduler
+  heartbeat. If it stops advancing, the main loop is not running.
+- `g_imu` (0x20000218) — BMI088_t (0x20): accel[3]@0x04, gyro[3]@0x10, temp@0x1c
+- `g_mahony` (0x20000238) — MahonyFilter_t (0x30): roll@0x24, pitch@0x28, yaw@0x2c
+- `g_safety_state` (0x200003d8) — SafetyState_t (0x1c): mode@0, fault@1, err@8,
+  gyro_offset[3]@0xc, is_calib@0x18
+- `g_servos[4]` (0x200002cc) — ST3215_State_t[4], stride 0x20: position_rad@0x04,
+  is_online@0x1c, consecutive_failures@0x1d
 
-## read_imu_state.py — IMU/姿态实时监控
+## SWD Reliability Notes
 
-读取并解码关键全局变量（地址取自 `../stm32_firmware/stm32_firmware.map`，
-结构体偏移取自 `fromelf --fieldoffsets`），连续采样输出：
+- The target runs at full speed (blocking I2C + watchdog), so the initial SWD
+  handshake is flaky. The Python API needs `connect_mode='under-reset'` (assert
+  NRST during attach) + retries; `pyocd cmd -v` retries automatically.
+- **With the servo system powered, SWD often becomes unusable** (`Unexpected ACK`,
+  failed reads/writes) — the 1 Mbps servo UART + adapter injects noise onto SWD.
+  Prefer behavioral verification (servo motion) or the DAPLink CDC port when
+  servos are on.
+- If a watchdog reset loop bricks SWD (reset keeps firing before halt takes),
+  flash with `pyocd load --connect under-reset`.
 
-- `g_system_ticks` — PB1(陀螺仪 DRDY) 中断计数，验证调度心跳
-- `g_imu` — 加速度(m/s²) / 陀螺仪(rad/s) / 温度(°C)
-- `g_safety_state` — 陀螺仪零偏、校准完成标志、状态机/故障码
-- `g_mahony` — roll / pitch / yaw 姿态角
-- `g_body_gyro` — 去偏后的机体角速度
+## Scripts
 
-用法：
+### read_imu_state.py — IMU / attitude monitor
+
+Reads and decodes the globals above in one SWD session, printing accel, gyro,
+gyro bias, safety mode, and Mahony roll/pitch/yaw over several samples.
 
 ```bash
-# 默认 5 次，间隔 0.5s
-python read_imu_state.py
-
-# 采集 10 次，间隔 0.3s
-python read_imu_state.py 10 0.3
+python read_imu_state.py            # 5 samples, 0.5 s apart
+python read_imu_state.py 10 0.3     # 10 samples, 0.3 s apart
 ```
 
-判定参考（板子静止水平放置）：
-- 加速度 z ≈ +9.8 m/s²，|a| ≈ 9.8
-- 陀螺仪 ≈ 0 (±0.01 rad/s)，零偏收敛后 calib=1
-- roll/pitch ≈ 0°，yaw 缓慢漂移（无磁力计属正常）
-- 未接舵机时 mode=FAULT/SERVO 属预期，不影响 IMU 验证
+Sanity (board level and still): accel z ≈ +9.8 m/s², |a| ≈ 9.8; gyro ≈ 0
+(±0.005 rad/s) with `calib=1`; roll/pitch ≈ 0°. yaw drifts slowly (no
+magnetometer). `mode=FAULT/SERVO` is expected when servos are absent.
 
-## calib_servo_zero.py — 舵机机械零位（dwell）标定
+### calib_servo_zero.py — servo dwell-zero capture
 
-手动找零：固件在 FAULT/SERVO 下会关闭 4 个 ST3215 的扭矩（自由状态），
-你用手把每条腿摆到 dwell 机械中位，脚本经 SWD 读回各舵机的 present
-position raw tick，即为 `pin_config.h` 里的 `SERVO_CENTER[i]`。
-
-用法：
+While the firmware holds servos torque-free (STATE_FAULT disables torque), this
+reads each servo's present-position tick live. Pose each leg at dwell by hand,
+then Ctrl+C to capture the four `SERVO_CENTER` values for `pin_config.h`.
 
 ```bash
-# 1. 接好 4 个 ST3215（ID 1/2/3/4，USART3 PB10 总线）并供电
-# 2. 上电 STM32（connect-under-reset 会自动复位一次让 is_online 重置）
+# 1. Connect 4x ST3215 (IDs 1/2/3/4, USART3 PB10 bus), powered, common GND
+# 2. Run; pose legs at dwell; Ctrl+C to capture
 python calib_servo_zero.py
-#    实时显示 4 个舵机的 tick，手摆正后 Ctrl+C 捕获
-#    脚本会打印可直接粘贴进 pin_config.h 的 SERVO_CENTER_INIT
-# 3. 改 pin_config.h，重编译重烧
 ```
 
-约定（固件 `st3215.c`）：
-`position_rad = (raw_tick - 2048) * (2π/4096)`，故
-`raw_tick = position_rad / (2π/4096) + 2048`。
+See `../docs/hardware/wiring.md` for the servo adapter wiring and
+`../docs/hardware/calibration.md` for the dwell definition.
 
-注意：
-- 同时也需实测 `SERVO_DIR`（右侧 RF/RB 默认 -1），见 pin_config.h 注释。
-- 舵机离线（is_online=OFF）时 tick 无意义，先确保 4 个都 online 再摆位。
-- 这是 `docs/hardware/calibration.md` Bring-Up 第 3 步，须在低扭矩下进行。
+## Bring-Up Log
+
+`BRINGUP_LOG.md` records the chronological findings and decisions from the
+2026-07-16 bring-up session (bugs found, root-cause analysis, open issues,
+resume checklist). Read it before resuming servo/IMU debugging.
