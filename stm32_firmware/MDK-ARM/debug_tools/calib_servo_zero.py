@@ -5,9 +5,8 @@ firmware runs (in FAULT/SERVO the firmware disables torque, so servos are free
 to be moved by hand). You manually pose each leg at the dwell posture, then the
 script computes the raw tick each servo reports — that tick is SERVO_CENTER[i].
 
-Convention (firmware, st3215.c):
-    position_rad = (raw_tick - 2048) * (2*pi/4096)
-  => raw_tick    = position_rad / (2*pi/4096) + 2048
+The helper reads ``position_tick`` directly. Shared-frame joint angles are
+derived only by the firmware's calibrated ``servo_mapping`` module.
 """
 import re, statistics, struct, time, sys
 from pathlib import Path
@@ -28,12 +27,12 @@ def symbol_address(name):
 # Each ST3215_State_t is 0x28 bytes. Resolve the base from the latest build.
 A_SERVOS = symbol_address("g_servos")
 SERVO_STRIDE = 0x28
-OFF_POS_RAD = 0x04
+OFF_POS_TICK = 0x02
+OFF_LAST_VALID_MS = 0x1C
 OFF_IS_ONLINE = 0x27
 SERVO_NAMES = ["LF (id1, hip_A_l)", "RF (id2, hip_A_r)", "LB (id3, hip_B_l)", "RB (id4, hip_B_r)"]
 
 TICK_TO_RAD = (2.0 * 3.14159265) / 4096.0
-RAD_TO_TICK = 1.0 / TICK_TO_RAD
 
 def read_servos(session):
     """Return list of (is_online, raw_tick, position_rad) for the 4 servos."""
@@ -43,10 +42,10 @@ def read_servos(session):
     out = []
     for i in range(4):
         base = i * SERVO_STRIDE
-        pos_rad = struct.unpack_from("<f", data, base + OFF_POS_RAD)[0]
-        is_online = data[base + OFF_IS_ONLINE]
-        raw_tick = pos_rad * RAD_TO_TICK + 2048.0
-        out.append((is_online, raw_tick, pos_rad))
+        raw_tick = struct.unpack_from("<H", data, base + OFF_POS_TICK)[0]
+        last_valid_ms = struct.unpack_from("<I", data, base + OFF_LAST_VALID_MS)[0]
+        is_online = int(data[base + OFF_IS_ONLINE] != 0 and last_valid_ms != 0)
+        out.append((is_online, float(raw_tick), raw_tick * TICK_TO_RAD))
     return out
 
 def open_session(tries=6):
@@ -88,9 +87,7 @@ def main():
         if n_online > 0:
             break
         time.sleep(0.5)
-    # g_servos[].is_online starts optimistic at 1, so the condition above can
-    # become true before every round-robin feedback slot has replaced the
-    # startup position (0 rad / tick 2048). Allow several complete poll rounds.
+    # Allow several complete round-robin poll cycles after the first valid frame.
     time.sleep(1.0)
     sv = read_servos(session)
 

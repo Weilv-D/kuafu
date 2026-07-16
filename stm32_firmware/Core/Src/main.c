@@ -31,6 +31,7 @@ DDSM_State_t g_ddsm_left;
 DDSM_State_t g_ddsm_right;
 ST3215_State_t g_servos[4];
 static DDSM_Bus_t g_ddsm_bus;
+static ST3215_Bus_t g_st3215_bus;
 
 /* Wheel torque commands computed and sent together at each 250 Hz deadline. */
 static float g_ctrl_tau_l = 0.0f;
@@ -91,6 +92,7 @@ int main(void) {
         device_health_init(&g_servos[i].health);
         g_servos[i].health.online = 1U; /* optimistic discovery; first valid read timestamps it */
     }
+    st3215_bus_init(&g_st3215_bus, &huart3);
 
     /* Start Pi Link bridge USART6 reception via DMA */
     __HAL_UART_ENABLE_IT(&huart6, UART_IT_IDLE);
@@ -112,6 +114,8 @@ int main(void) {
     uint32_t last_right_tick = 1;
     uint32_t last_servo_loop_time = 0;
     uint8_t active_servo_query_idx = 0;
+    uint32_t last_servo_query_ms = 0U;
+    uint8_t fault_servo_disable_idx = 0U;
     uint32_t temp_refresh_counter = 0;
     StartupManager_t startup_manager;
     uint8_t bmi_init_in_progress = 0U;
@@ -131,6 +135,7 @@ int main(void) {
         uint8_t startup_servos_online = 1U;
 
         ddsm_bus_step(&g_ddsm_bus, startup_now);
+        st3215_bus_step(&g_st3215_bus, startup_now);
 
         if (bmi_init_in_progress) {
             int bmi_result = bmi088_init_step(&g_imu, startup_now);
@@ -179,8 +184,8 @@ int main(void) {
                 discovery_result = ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_right,
                                                          0U, startup_now);
             } else if (actuator_discovery_step < 8U) {
-                discovery_result = st3215_set_torque_enable(
-                    &huart3, (uint8_t)(actuator_discovery_step - 3U), 0U);
+                discovery_result = st3215_bus_queue_torque(
+                    &g_st3215_bus, (uint8_t)(actuator_discovery_step - 3U), 0U);
             }
             if (actuator_discovery_step < 8U && discovery_result == 0) {
                 ++actuator_discovery_step;
@@ -199,11 +204,11 @@ int main(void) {
                                                       1U, startup_now);
             } else if (actuator_enable_step < 6U) {
 #if SERVO_ZERO_CALIBRATION_MODE
-                enable_result = st3215_set_torque_enable(
-                    &huart3, (uint8_t)(actuator_enable_step - 1U), 0U);
+                enable_result = st3215_bus_queue_torque(
+                    &g_st3215_bus, (uint8_t)(actuator_enable_step - 1U), 0U);
 #else
-                enable_result = st3215_set_torque_enable(
-                    &huart3, (uint8_t)(actuator_enable_step - 1U), 1U);
+                enable_result = st3215_bus_queue_torque(
+                    &g_st3215_bus, (uint8_t)(actuator_enable_step - 1U), 1U);
 #endif
             }
             if (actuator_enable_step < 6U && enable_result == 0) {
@@ -473,7 +478,8 @@ int main(void) {
                     pos_ticks[1] = servo_angle_to_tick(qA_r, 1);
                     pos_ticks[2] = servo_angle_to_tick(qB_l, 2);
                     pos_ticks[3] = servo_angle_to_tick(qB_r, 3);
-                    st3215_sync_write_pos(&huart3, ids, 4, pos_ticks, speed_ticks, accels);
+                    (void)st3215_bus_queue_sync_write(&g_st3215_bus, ids, 4U,
+                                                      pos_ticks, speed_ticks, accels);
                 }
             }
             else if (g_safety_state.current_mode == STATE_STAND || g_safety_state.current_mode == STATE_CLIMB) {
@@ -497,7 +503,8 @@ int main(void) {
                     pos_ticks[2] = servo_angle_to_tick(q_hip_B, 2); /* LB (B chain) */
                     pos_ticks[3] = servo_angle_to_tick(q_hip_B, 3); /* RB (B chain) */
 
-                    st3215_sync_write_pos(&huart3, ids, 4, pos_ticks, speed_ticks, accels);
+                    (void)st3215_bus_queue_sync_write(&g_st3215_bus, ids, 4U,
+                                                      pos_ticks, speed_ticks, accels);
                 }
             }
             else if (g_safety_state.current_mode == STATE_FAULT) {
@@ -505,38 +512,26 @@ int main(void) {
                  * Sending the disable every 50 Hz cycle floods the full-duplex
                  * bus with echo bytes that desync subsequent read queries, so a
                  * one-shot flag is used instead of repeated transmission. */
-                static uint8_t fault_torque_disabled = 0;
-                if (!fault_torque_disabled) {
-                    for (int i = 0; i < 4; i++) {
-                        st3215_set_torque_enable(&huart3, ids[i], 0);
-                    }
-                    fault_torque_disabled = 1;
+                if (fault_servo_disable_idx < 4U &&
+                    st3215_bus_queue_torque(&g_st3215_bus,
+                                            ids[fault_servo_disable_idx], 0U) == 0) {
+                    ++fault_servo_disable_idx;
                 }
             }
 #endif
+        }
 
-            /* Sequentially query feedback from one online servo to prevent blocking.
-             * A servo that stays unreachable triggers a fatal FAULT lockdown. */
-            ST3215_State_t *qs = &g_servos[active_servo_query_idx];
-            if (qs->health.online) {
-                int read_result = st3215_read_state(&huart3, ids[active_servo_query_idx], qs);
-                if (read_result == 0) {
-                    /* Driver marks the shared health record valid. */
-                } else if (g_safety_state.current_mode == STATE_INIT) {
-                    /* Ignore transient boot races before calibration; keep retrying */
-                    device_health_mark_failure(&qs->health,
-                                               read_result == -2 ? DEVICE_FAILURE_CHECKSUM : DEVICE_FAILURE_TIMEOUT,
-                                               0U);
-                    qs->health.consecutive_failures = 0U;
-                } else {
-                    device_health_mark_failure(&qs->health,
-                                               read_result == -2 ? DEVICE_FAILURE_CHECKSUM : DEVICE_FAILURE_TIMEOUT,
-                                               SERVO_FAIL_LIMIT);
-                    if (!qs->health.online) {
-                        safety_state_trigger_fault(FAULT_SERVO); /* fatal lockdown */
-                    }
-                }
-            }
+        /* Poll every servo round-robin, including offline devices, so a valid
+         * frame can restore health after line noise or a temporary disconnect. */
+        current_time = HAL_GetTick();
+        if (startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY &&
+            current_time - last_servo_query_ms >= 5U &&
+            st3215_bus_queue_read(&g_st3215_bus,
+                                  &g_servos[active_servo_query_idx],
+                                  g_safety_state.current_mode == STATE_INIT
+                                      ? 0U : SERVO_FAIL_LIMIT,
+                                  current_time) == 0) {
+            last_servo_query_ms = current_time;
             active_servo_query_idx = (active_servo_query_idx + 1) % 4;
         }
     }
@@ -735,6 +730,8 @@ static void MX_USART3_UART_Init(void) {
     if (HAL_UART_Init(&huart3) != HAL_OK) {
         Error_Handler();
     }
+    HAL_NVIC_SetPriority(USART3_IRQn, 1, 0);
+    HAL_NVIC_EnableIRQ(USART3_IRQn);
 }
 
 static void MX_USART6_UART_Init(void) {
@@ -813,21 +810,31 @@ void USART2_IRQHandler(void) {
     HAL_UART_IRQHandler(&huart2);
 }
 
+void USART3_IRQHandler(void) {
+    HAL_UART_IRQHandler(&huart3);
+}
+
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
     if (huart == &huart2) {
         ddsm_bus_on_tx_complete(&g_ddsm_bus);
+    } else if (huart == &huart3) {
+        st3215_bus_on_tx_complete(&g_st3215_bus);
     }
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     if (huart == &huart2) {
         ddsm_bus_on_rx_complete(&g_ddsm_bus, HAL_GetTick());
+    } else if (huart == &huart3) {
+        st3215_bus_on_rx_byte(&g_st3215_bus, HAL_GetTick());
     }
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
     if (huart == &huart2) {
         ddsm_bus_on_uart_error(&g_ddsm_bus);
+    } else if (huart == &huart3) {
+        st3215_bus_on_uart_error(&g_st3215_bus);
     }
 }
 
