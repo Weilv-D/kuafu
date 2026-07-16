@@ -30,6 +30,13 @@ requires all of the following:
 4. a fresh heartbeat; and
 5. an explicit `STAND`, `ACTIVE`, or `CLIMB` mode request.
 
+`ACTIVE` is the only mode in which the learned residual is live, so it is the only
+mode in which the robot walks. `STAND` and `CLIMB` both run the LQR/LQI baseline as
+a zero-velocity hold (the Pi commands zero velocity/yaw); `CLIMB` is otherwise a
+reserved placeholder that shares `STAND`'s servo and wheel code path and is not
+trained in the RL policy. See `docs/architecture/system.md` for the full mode table
+and the CLIMB caveat.
+
 Loss of authorization disables both wheels. A stale action removes residual
 commands, while a stale heartbeat removes motion authorization. Temperature must
 remain above 65°C continuously for 100 ms before the over-temperature fault is

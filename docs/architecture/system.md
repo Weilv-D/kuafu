@@ -19,9 +19,25 @@ The runtime runs on four deadline-bounded layers driven by the 1 kHz BMI088 gyro
 3. **50 Hz leg/Pi layer** — projects Qx/D0 residuals through five-bar IK onto ST3215 targets, parses Pi traffic, and publishes telemetry.
 4. **Low-rate diagnostic layer** — reports temperatures, per-device bus ages, error counters, reset cause, and safety mode.
 
-A separate `startup_manager` gates actuator power through `WAIT_POWER → IMU_DISCOVERY → GYRO_CALIBRATION → ACTUATOR_DISCOVERY → READY` (with a `FAILED` terminal that latches FAULT). Torque is never enabled merely because initialization began; the system reaches STAND only once every device reports fresh, and reaches ACTIVE only after a compatible Pi `HELLO` and fresh heartbeat. Wheel torque is a separately armed domain: beyond being in STAND/ACTIVE/CLIMB it additionally requires no latched fault, a compatible model hash, a fresh heartbeat, and an explicit mode request — five conditions whose loss is immediately revoked.
+A separate `startup_manager` gates actuator power through `WAIT_POWER → IMU_DISCOVERY → GYRO_CALIBRATION → ACTUATOR_DISCOVERY → READY` (with a `FAILED` terminal that latches FAULT). Torque is never enabled merely because initialization began; the system reaches STAND only once every device reports fresh. Wheel torque is a separately armed domain: it requires the system to be operational (STAND/ACTIVE/CLIMB), no latched fault, a compatible Pi model hash, a fresh heartbeat, and an explicit mode request — five conditions whose loss is immediately revoked.
 
 Ten independent fault classes (tilt, pitch rate, overtemperature with 100 ms debounce, IMU loss, left/right wheel loss, servo loss, emergency stop, initialization failure, internal-state fault) latch `FAULT` until reset. Degradation short of a fault is explicitly asymmetric: a stale action clears only the learned residual, while a stale heartbeat additionally zeroes velocity and yaw commands and returns ACTIVE/CLIMB to STAND, retaining a bounded local position/heading hold so the robot stays still rather than falling.
+
+### Operating Modes
+
+The state machine distinguishes five modes (`INIT`, `STAND`, `ACTIVE`, `CLIMB`, `FAULT`). The LQR/LQI baseline runs whenever the system is operational (STAND/ACTIVE/CLIMB); what changes between them is whether the Pi commands motion and whether the learned residual is added:
+
+| Mode | Wheel torque | Leg D0 (IK) | RL residual | Entered by |
+|---|:---:|:---:|:---:|---|
+| `INIT` | locked (read-only queries) | — | — | power-on; auto-exits when every device is fresh |
+| `STAND` | LQR/LQI **hold** (zero velocity/yaw command) | follows `target_leg_d0` | off | auto, once startup reaches `READY` |
+| `ACTIVE` | **LQR/LQI tracking** (follows Pi velocity/yaw) | follows `target_leg_d0` + qx/d0 residual | **on** | Pi requests ACTIVE + compatible hash + fresh heartbeat |
+| `CLIMB` | LQR/LQI **hold** (zero velocity/yaw command) | follows `target_leg_d0` | off | Pi requests CLIMB from ACTIVE |
+| `FAULT` | zero | torque disabled (one-shot) | — | any latched fault; reset only |
+
+`ACTIVE` is the only mode in which the learned residual is live, so it is the only mode in which the robot walks. The policy observation is 35-dimensional proprioception with no mode flag; the policy is unaware which mode it runs in, and CLIMB/STAND behaviour comes entirely from the baseline.
+
+> **`CLIMB` is a reserved placeholder, not a distinct behaviour.** In the firmware it shares the same code path as `STAND` (same pure-D0 IK, same wheel hold, no residual — `main.c` servos the identical virtual-height branch for both). The RL environment has no CLIMB concept: terrain traversal (steps and slopes) is trained as a curriculum axis under the ACTIVE policy using D0/Qx residuals, and the policy never emits or observes a mode. Selecting CLIMB today is therefore functionally equivalent to STAND. A future CLIMB implementation would need coordinated changes in firmware (a distinct servo/wheel policy for the mode), training (a mode-conditioned or separate policy), and the Pi runtime.
 
 Roll leveling applies `ΔD0 = -ROLL_KP·roll - ROLL_KD·ωx` with `ROLL_KP = 190 mm/rad` and `ROLL_KD = 5.0`, a conservative initial value derived from the ~196 mm wheel track. A high-speed D0 gate limits D0 to 120 mm whenever `|v| > 0.3 m/s` or `|w| > 0.6 rad/s`, preventing COM-rise topple. LQR/LQI gains, wheel torque limits, five-bar geometry, and the full normative physical model live in `kuafu_physics.py`; the implementation-level runtime, driver, and safety detail lives in `stm32_firmware/README.md`.
 
