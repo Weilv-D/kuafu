@@ -8,12 +8,16 @@ add_executable(firmware_host_tests
     test_servo_mapping.c
     test_device_health.c
     test_safety_state.c
+    test_startup_manager.c
+    test_bmi088.c
     test_support.c
     ../Core/Src/crc8.c
     ../Core/Src/kinematics.c
     ../Core/Src/servo_mapping.c
     ../Core/Src/device_health.c
     ../Core/Src/safety_state.c
+    ../Core/Src/startup_manager.c
+    ../Core/Src/bmi088.c
 )
 
 target_include_directories(firmware_host_tests PRIVATE

@@ -9,78 +9,124 @@
 
 /* Helper write register function */
 static HAL_StatusTypeDef bmi088_write_reg(I2C_HandleTypeDef *hi2c, uint8_t dev_addr, uint8_t reg_addr, uint8_t data) {
-    return HAL_I2C_Mem_Write(hi2c, dev_addr << 1, reg_addr, I2C_MEMADD_SIZE_8BIT, &data, 1, 100);
+    return HAL_I2C_Mem_Write(hi2c, dev_addr << 1, reg_addr, I2C_MEMADD_SIZE_8BIT, &data, 1, 5);
 }
 
 /* Helper read register function */
 static HAL_StatusTypeDef bmi088_read_reg(I2C_HandleTypeDef *hi2c, uint8_t dev_addr, uint8_t reg_addr, uint8_t *data) {
-    return HAL_I2C_Mem_Read(hi2c, dev_addr << 1, reg_addr, I2C_MEMADD_SIZE_8BIT, data, 1, 100);
+    return HAL_I2C_Mem_Read(hi2c, dev_addr << 1, reg_addr, I2C_MEMADD_SIZE_8BIT, data, 1, 5);
 }
 
-int bmi088_init(BMI088_t *imu, I2C_HandleTypeDef *hi2c) {
+enum {
+    BMI_INIT_IDLE = 0,
+    BMI_INIT_ACC_RESET,
+    BMI_INIT_ACC_PWR_CONF,
+    BMI_INIT_ACC_PWR_CTRL,
+    BMI_INIT_ACC_ID,
+    BMI_INIT_ACC_RANGE,
+    BMI_INIT_ACC_CONF,
+    BMI_INIT_GYRO_RESET,
+    BMI_INIT_GYRO_ID,
+    BMI_INIT_GYRO_RANGE,
+    BMI_INIT_GYRO_BW,
+    BMI_INIT_GYRO_INT_CTRL,
+    BMI_INIT_GYRO_IO_CONF,
+    BMI_INIT_GYRO_MAP,
+    BMI_INIT_DONE,
+    BMI_INIT_FAILED
+};
+
+static int bmi_init_write(BMI088_t *imu, uint8_t addr, uint8_t reg, uint8_t value,
+                          uint8_t next_state, uint32_t now_ms, uint32_t delay_ms) {
+    if (bmi088_write_reg(imu->hi2c, addr, reg, value) != HAL_OK) {
+        imu->init_state = BMI_INIT_FAILED;
+        return -1;
+    }
+    imu->init_state = next_state;
+    imu->init_deadline_ms = now_ms + delay_ms;
+    return 0;
+}
+
+void bmi088_begin_init(BMI088_t *imu, I2C_HandleTypeDef *hi2c, uint32_t now_ms) {
     device_health_init(&imu->health);
     imu->hi2c = hi2c;
-    uint8_t chip_id = 0;
+    imu->initialized = 0U;
+    imu->init_state = BMI_INIT_ACC_RESET;
+    imu->init_deadline_ms = now_ms;
+}
 
-    /* ------------------------------------------------------------- */
-    /* 1. Accelerometer Initialization                               */
-    /* ------------------------------------------------------------- */
-    /* Soft Reset Accelerometer */
-    bmi088_write_reg(hi2c, BMI088_ACCEL_ADDR, BMI088_ACC_SOFTRESET, 0xB6);
-    HAL_Delay(50); /* Recommended delay after reset */
-
-    /* Power up Accelerometer (write 0x00 to ACC_PWR_CONF) */
-    bmi088_write_reg(hi2c, BMI088_ACCEL_ADDR, BMI088_ACC_PWR_CONF, 0x00);
-    HAL_Delay(5);
-
-    /* Enable Accelerometer: ACC_PWR_CTRL=0x04 selects "normal/active" mode
-     * (bit2). Writing 0x03 leaves the acc inactive, so data registers read 0.
-     * Per BMI088 datasheet (BST-BMI088-DS001, register 0x7D). */
-    bmi088_write_reg(hi2c, BMI088_ACCEL_ADDR, BMI088_ACC_PWR_CTRL, 0x04);
-    HAL_Delay(50);
-
-    /* Read and verify Accel Chip ID */
-    if (bmi088_read_reg(hi2c, BMI088_ACCEL_ADDR, BMI088_ACC_CHIP_ID, &chip_id) != HAL_OK || chip_id != 0x1E) {
-        return -1; /* Accel identification failed */
+int bmi088_init_step(BMI088_t *imu, uint32_t now_ms) {
+    uint8_t chip_id = 0U;
+    if (imu->initialized) {
+        return 1;
+    }
+    if (imu->init_state == BMI_INIT_IDLE || imu->init_state == BMI_INIT_FAILED) {
+        return -1;
+    }
+    if ((int32_t)(now_ms - imu->init_deadline_ms) < 0) {
+        return 0;
     }
 
-    /* Configure Accel Range to ±24g */
-    bmi088_write_reg(hi2c, BMI088_ACCEL_ADDR, BMI088_ACC_RANGE, 0x03);
-    HAL_Delay(2);
-
-    /* Configure Accel ODR to 1600Hz and Bandwidth to 280Hz (Normal mode) */
-    bmi088_write_reg(hi2c, BMI088_ACCEL_ADDR, BMI088_ACC_CONF, 0xAC);
-    HAL_Delay(2);
-
-    /* ------------------------------------------------------------- */
-    /* 2. Gyroscope Initialization                                  */
-    /* ------------------------------------------------------------- */
-    /* Soft Reset Gyroscope */
-    bmi088_write_reg(hi2c, BMI088_GYRO_ADDR, BMI088_GYRO_SOFTRESET, 0xB6);
-    HAL_Delay(100); /* Recommended delay after reset */
-
-    /* Read and verify Gyro Chip ID */
-    if (bmi088_read_reg(hi2c, BMI088_GYRO_ADDR, BMI088_GYRO_CHIP_ID, &chip_id) != HAL_OK || chip_id != 0x0F) {
-        return -1; /* Gyro identification failed */
+    switch (imu->init_state) {
+        case BMI_INIT_ACC_RESET:
+            return bmi_init_write(imu, BMI088_ACCEL_ADDR, BMI088_ACC_SOFTRESET, 0xB6,
+                                  BMI_INIT_ACC_PWR_CONF, now_ms, 50U);
+        case BMI_INIT_ACC_PWR_CONF:
+            return bmi_init_write(imu, BMI088_ACCEL_ADDR, BMI088_ACC_PWR_CONF, 0x00,
+                                  BMI_INIT_ACC_PWR_CTRL, now_ms, 5U);
+        case BMI_INIT_ACC_PWR_CTRL:
+            return bmi_init_write(imu, BMI088_ACCEL_ADDR, BMI088_ACC_PWR_CTRL, 0x04,
+                                  BMI_INIT_ACC_ID, now_ms, 50U);
+        case BMI_INIT_ACC_ID:
+            if (bmi088_read_reg(imu->hi2c, BMI088_ACCEL_ADDR, BMI088_ACC_CHIP_ID, &chip_id) != HAL_OK ||
+                chip_id != 0x1E) {
+                imu->init_state = BMI_INIT_FAILED;
+                return -1;
+            }
+            imu->init_state = BMI_INIT_ACC_RANGE;
+            return 0;
+        case BMI_INIT_ACC_RANGE:
+            return bmi_init_write(imu, BMI088_ACCEL_ADDR, BMI088_ACC_RANGE, 0x03,
+                                  BMI_INIT_ACC_CONF, now_ms, 2U);
+        case BMI_INIT_ACC_CONF:
+            return bmi_init_write(imu, BMI088_ACCEL_ADDR, BMI088_ACC_CONF, 0xAC,
+                                  BMI_INIT_GYRO_RESET, now_ms, 2U);
+        case BMI_INIT_GYRO_RESET:
+            return bmi_init_write(imu, BMI088_GYRO_ADDR, BMI088_GYRO_SOFTRESET, 0xB6,
+                                  BMI_INIT_GYRO_ID, now_ms, 100U);
+        case BMI_INIT_GYRO_ID:
+            if (bmi088_read_reg(imu->hi2c, BMI088_GYRO_ADDR, BMI088_GYRO_CHIP_ID, &chip_id) != HAL_OK ||
+                chip_id != 0x0F) {
+                imu->init_state = BMI_INIT_FAILED;
+                return -1;
+            }
+            imu->init_state = BMI_INIT_GYRO_RANGE;
+            return 0;
+        case BMI_INIT_GYRO_RANGE:
+            return bmi_init_write(imu, BMI088_GYRO_ADDR, BMI088_GYRO_RANGE, 0x00,
+                                  BMI_INIT_GYRO_BW, now_ms, 2U);
+        case BMI_INIT_GYRO_BW:
+            return bmi_init_write(imu, BMI088_GYRO_ADDR, BMI088_GYRO_BANDWIDTH, 0x02,
+                                  BMI_INIT_GYRO_INT_CTRL, now_ms, 2U);
+        case BMI_INIT_GYRO_INT_CTRL:
+            return bmi_init_write(imu, BMI088_GYRO_ADDR, BMI088_GYRO_INT_CTRL, 0x80,
+                                  BMI_INIT_GYRO_IO_CONF, now_ms, 1U);
+        case BMI_INIT_GYRO_IO_CONF:
+            return bmi_init_write(imu, BMI088_GYRO_ADDR, BMI088_GYRO_INT3_INT4_IO_CONF, 0x01,
+                                  BMI_INIT_GYRO_MAP, now_ms, 1U);
+        case BMI_INIT_GYRO_MAP:
+            if (bmi_init_write(imu, BMI088_GYRO_ADDR, BMI088_GYRO_INT3_INT4_IO_MAP, 0x01,
+                               BMI_INIT_DONE, now_ms, 1U) != 0) {
+                return -1;
+            }
+            return 0;
+        case BMI_INIT_DONE:
+            imu->initialized = 1U;
+            return 1;
+        default:
+            imu->init_state = BMI_INIT_FAILED;
+            return -1;
     }
-
-    /* Configure Gyro Range to ±2000 deg/s */
-    bmi088_write_reg(hi2c, BMI088_GYRO_ADDR, BMI088_GYRO_RANGE, 0x00);
-    HAL_Delay(2);
-
-    /* Configure Gyro ODR to 1000Hz, Filter Bandwidth to 116Hz */
-    bmi088_write_reg(hi2c, BMI088_GYRO_ADDR, BMI088_GYRO_BANDWIDTH, 0x02);
-    HAL_Delay(2);
-
-    /* Configure INT3 Pin for Gyroscope Data Ready Interrupt (Active High, Push-Pull) */
-    bmi088_write_reg(hi2c, BMI088_GYRO_ADDR, BMI088_GYRO_INT_CTRL, 0x80);        /* Enable Gyro DRDY int */
-    HAL_Delay(1);
-    bmi088_write_reg(hi2c, BMI088_GYRO_ADDR, BMI088_GYRO_INT3_INT4_IO_CONF, 0x01); /* Set INT3: Push-Pull, Act High */
-    HAL_Delay(1);
-    bmi088_write_reg(hi2c, BMI088_GYRO_ADDR, BMI088_GYRO_INT3_INT4_IO_MAP, 0x01);  /* Map Gyro DRDY to INT3 */
-    HAL_Delay(1);
-
-    return 0;
 }
 
 int bmi088_read_accel(BMI088_t *imu) {

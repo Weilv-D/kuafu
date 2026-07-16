@@ -519,6 +519,16 @@
               <FilePath>..\Core\Inc\device_health.h</FilePath>
             </File>
             <File>
+              <FileName>startup_manager.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\startup_manager.c</FilePath>
+            </File>
+            <File>
+              <FileName>startup_manager.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\startup_manager.h</FilePath>
+            </File>
+            <File>
               <FileName>kuafu_generated.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Core\Inc\kuafu_generated.h</FilePath>

@@ -96,7 +96,7 @@ SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs) {
             safety_state_trigger_fault(faults & (FAULT_TILT | FAULT_PITCH_RATE | FAULT_OVERTEMP));
             return decision;
         }
-        if (inputs->gyro_calibrated && inputs->imu_fresh &&
+        if (inputs->startup_ready && inputs->gyro_calibrated && inputs->imu_fresh &&
             inputs->wheel_l_fresh && inputs->wheel_r_fresh && inputs->servos_fresh) {
             g_safety_state.current_mode = STATE_STAND;
             g_safety_state.mode_timer_ms = inputs->now_ms;

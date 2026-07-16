@@ -10,6 +10,7 @@
 #include "lqr_controller.h"
 #include "safety_state.h"
 #include "servo_mapping.h"
+#include "startup_manager.h"
 
 /* Peripheral Handles */
 I2C_HandleTypeDef hi2c1;
@@ -52,7 +53,6 @@ static void MX_USART3_UART_Init(void);
 static void MX_USART6_UART_Init(void);
 static void MX_DMA_Init(void);
 static void MX_IWDG_Init(void);
-static void System_Initial_Setup(void);
 static void Pi_Command_Snapshot(Pi_Command_Heartbeat_t *hb, Pi_Command_Action_t *act);
 void Error_Handler(void);
 
@@ -94,8 +94,9 @@ int main(void) {
     __HAL_UART_ENABLE_IT(&huart6, UART_IT_IDLE);
     HAL_UART_Receive_DMA(&huart6, g_pi_rx_buf, PI_RX_BUF_SIZE);
 
-    /* Run initial sensor detection and calibration */
-    System_Initial_Setup();
+    /* Arm gyro data-ready before starting the non-blocking device sequence. */
+    HAL_NVIC_SetPriority(IMU_INT_EXTI_IRQn, 0, 0);
+    HAL_NVIC_EnableIRQ(IMU_INT_EXTI_IRQn);
 
 #if SERVO_ZERO_CALIBRATION_MODE
     /* A calibration image must never leave INIT and start commanding the
@@ -110,16 +111,114 @@ int main(void) {
     uint32_t last_servo_loop_time = 0;
     uint8_t active_servo_query_idx = 0;
     uint32_t temp_refresh_counter = 0;
+    StartupManager_t startup_manager;
+    uint8_t bmi_init_in_progress = 0U;
+    uint8_t actuator_discovery_step = 0U;
+    uint8_t actuator_configured = 0U;
+    uint8_t actuator_enable_step = 0U;
+    uint8_t actuators_enabled = 0U;
+    uint32_t next_actuator_enable_ms = 0U;
+
+    startup_manager_init(&startup_manager, HAL_GetTick());
 
     /* Main background scheduler loop */
     while (1) {
+        uint32_t startup_now = HAL_GetTick();
+        StartupInputs_t startup_inputs;
+        StartupOutputs_t startup_outputs;
+        uint8_t startup_servos_online = 1U;
+
+        if (bmi_init_in_progress) {
+            int bmi_result = bmi088_init_step(&g_imu, startup_now);
+            if (bmi_result != 0) {
+                bmi_init_in_progress = 0U;
+            }
+        }
+
+        for (int i = 0; i < 4; ++i) {
+            if (!device_health_is_fresh(&g_servos[i].health,
+                                        startup_now,
+                                        SAFETY_SERVO_MAX_AGE_MS)) {
+                startup_servos_online = 0U;
+            }
+        }
+        startup_inputs.now_ms = startup_now;
+        startup_inputs.imu_initialized = g_imu.initialized;
+        startup_inputs.gyro_calibrated = g_safety_state.is_gyro_calibrated;
+        startup_inputs.wheel_l_online = device_health_is_fresh(&g_ddsm_left.health,
+                                                               startup_now,
+                                                               SAFETY_WHEEL_MAX_AGE_MS);
+        startup_inputs.wheel_r_online = device_health_is_fresh(&g_ddsm_right.health,
+                                                               startup_now,
+                                                               SAFETY_WHEEL_MAX_AGE_MS);
+        startup_inputs.servos_online = startup_servos_online;
+        startup_inputs.actuator_configured = actuator_configured;
+        startup_outputs = startup_manager_step(&startup_manager, &startup_inputs);
+
+        if (startup_outputs.request_imu_init && !g_imu.initialized && !bmi_init_in_progress) {
+            bmi088_begin_init(&g_imu, &hi2c1, startup_now);
+            bmi_init_in_progress = 1U;
+        }
+
+        if (startup_outputs.request_actuator_discovery && !actuator_configured) {
+            if (actuator_discovery_step == 0U) {
+                (void)ddsm_set_mode(&huart2, DDSM_LEFT_ID, DDSM_MODE_CURRENT);
+            } else if (actuator_discovery_step == 1U) {
+                (void)ddsm_set_enable(&huart2, DDSM_LEFT_ID, 0U);
+            } else if (actuator_discovery_step == 2U) {
+                (void)ddsm_set_mode(&huart2, DDSM_RIGHT_ID, DDSM_MODE_CURRENT);
+            } else if (actuator_discovery_step == 3U) {
+                (void)ddsm_set_enable(&huart2, DDSM_RIGHT_ID, 0U);
+            } else if (actuator_discovery_step < 8U) {
+                (void)st3215_set_torque_enable(&huart3,
+                                               (uint8_t)(actuator_discovery_step - 3U),
+                                               0U);
+            }
+            if (actuator_discovery_step < 8U) {
+                ++actuator_discovery_step;
+            }
+            actuator_configured = (uint8_t)(actuator_discovery_step >= 8U);
+        }
+
+        if (startup_outputs.enable_actuators && !actuators_enabled &&
+            (int32_t)(startup_now - next_actuator_enable_ms) >= 0) {
+            if (actuator_enable_step == 0U) {
+                (void)ddsm_set_enable(&huart2, DDSM_LEFT_ID, 1U);
+            } else if (actuator_enable_step == 1U) {
+                (void)ddsm_set_enable(&huart2, DDSM_RIGHT_ID, 1U);
+            } else if (actuator_enable_step < 6U) {
+#if SERVO_ZERO_CALIBRATION_MODE
+                (void)st3215_set_torque_enable(&huart3, (uint8_t)(actuator_enable_step - 1U), 0U);
+#else
+                (void)st3215_set_torque_enable(&huart3, (uint8_t)(actuator_enable_step - 1U), 1U);
+#endif
+            }
+            if (actuator_enable_step < 6U) {
+                ++actuator_enable_step;
+            }
+            next_actuator_enable_ms = startup_now + 5U;
+            actuators_enabled = (uint8_t)(actuator_enable_step >= 6U);
+        }
+
+        if (startup_outputs.fault_requested) {
+            safety_state_trigger_fault(FAULT_INIT);
+        }
+
+        /* Reaching this point proves the scheduler is alive even before DRDY. */
+        HAL_IWDG_Refresh(&hiwdg);
+
         /* Soft real-time scheduler aligned to system ticks (1ms resolution) */
         if (g_system_ticks != last_tick) {
             /* Use the actual elapsed time; blocking bus I/O can skip ticks */
             uint32_t dticks = g_system_ticks - last_tick;
             last_tick = g_system_ticks;
             float fusion_dt = (float)dticks * 0.001f;
-            HAL_IWDG_Refresh(&hiwdg);
+
+            /* DRDY can arrive while the BMI088 register sequence is still in
+             * progress.  Do not read or calibrate from an uninitialized IMU. */
+            if (!g_imu.initialized) {
+                continue;
+            }
 
             /* 1. Read IMU sensors (safe to do here in the main loop background) */
             bmi088_read_accel(&g_imu);
@@ -163,7 +262,7 @@ int main(void) {
             uint8_t right_due = (uint32_t)(last_tick - last_right_tick) >= 4u;
 
             /* Safety state machine update (at 250 Hz, inside slot scheduler) */
-            if (control_due) {
+            if (control_due && startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY) {
                 last_left_tick = last_tick;
                 float max_temp = g_imu.temperature;
                 for (int i = 0; i < 4; i++) {
@@ -187,6 +286,7 @@ int main(void) {
                 safety_inputs.pitch_rate_rads = body_pitch_rate;
                 safety_inputs.max_temp_c = max_temp;
                 safety_inputs.gyro_calibrated = g_safety_state.is_gyro_calibrated;
+                safety_inputs.startup_ready = actuators_enabled;
                 safety_inputs.imu_fresh = device_health_is_fresh(&g_imu.health,
                                                                  safety_now,
                                                                  SAFETY_IMU_MAX_AGE_MS);
@@ -210,7 +310,7 @@ int main(void) {
             }
 
             /* --- Slot 0: Compute LQR (once/cycle), command & poll Left DDSM --- */
-            if (control_due) {
+            if (control_due && startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY) {
                 if (g_safety_state.current_mode != STATE_FAULT && g_safety_state.current_mode != STATE_INIT) {
                     /* Snapshot Pi commands atomically (updated in USART6 ISR) */
                     Pi_Command_Heartbeat_t hb;
@@ -268,7 +368,7 @@ int main(void) {
             /* The right motor has an independent staggered deadline. This keeps
              * the two blocking half-duplex transactions from routinely sharing
              * one 4 ms control slot. */
-            if (right_due) {
+            if (right_due && startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY) {
                 last_right_tick = last_tick;
                 if (g_safety_state.current_mode != STATE_FAULT && g_safety_state.current_mode != STATE_INIT) {
                     ddsm_set_torque(&huart2, DDSM_RIGHT_ID, WHEEL_DIR_R * g_ctrl_tau_r);
@@ -316,8 +416,9 @@ int main(void) {
 
             /* --- Slot 3: Diagnostic packages & main controller logic --- */
             else if (slot == 3) {
-                uint16_t dummy_battery_mv = 18500; /* Simulated 5S battery (18.5V) */
-                pi_link_send_diag(&huart6, dummy_battery_mv, (uint8_t)g_imu.temperature,
+                /* Battery sensing is not populated on this hardware.  Zero is
+                 * the protocol sentinel for unavailable, not an undervoltage. */
+                pi_link_send_diag(&huart6, 0U, (uint8_t)g_imu.temperature,
                                   safety_state_legacy_fault_mask());
 
                 if (g_safety_state.current_mode == STATE_FAULT) {
@@ -328,7 +429,8 @@ int main(void) {
 
         /* --- 50 Hz Background Loop: ST3215 Servo Control --- */
         uint32_t current_time = HAL_GetTick();
-        if (current_time - last_servo_loop_time >= (1000 / SERVO_LOOP_FREQ)) {
+        if (startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY &&
+            current_time - last_servo_loop_time >= (1000 / SERVO_LOOP_FREQ)) {
             last_servo_loop_time = current_time;
 
             uint8_t ids[4] = {SERVO_LF_ID, SERVO_RF_ID, SERVO_LB_ID, SERVO_RB_ID};
@@ -436,48 +538,6 @@ int main(void) {
             active_servo_query_idx = (active_servo_query_idx + 1) % 4;
         }
     }
-}
-
-/* System Setup and Gyro calibration */
-static void System_Initial_Setup(void) {
-    HAL_Delay(500); /* Wait for supply voltage stabilization */
-
-    /* 1. Initialize BMI088 IMU over I2C */
-    while (bmi088_init(&g_imu, &hi2c1) != 0) {
-        /* Blink an LED or print error if IMU is missing */
-        HAL_IWDG_Refresh(&hiwdg); /* keep the watchdog alive during long init */
-        HAL_Delay(100);
-    }
-
-    /* 2. Configure DDSM315 motors to Current Control Mode and Enable */
-#if !SERVO_ZERO_CALIBRATION_MODE
-    ddsm_set_mode(&huart2, DDSM_LEFT_ID, DDSM_MODE_CURRENT);
-    HAL_Delay(10);
-    ddsm_set_enable(&huart2, DDSM_LEFT_ID, 1);
-    HAL_Delay(10);
-    HAL_IWDG_Refresh(&hiwdg);
-
-    ddsm_set_mode(&huart2, DDSM_RIGHT_ID, DDSM_MODE_CURRENT);
-    HAL_Delay(10);
-    ddsm_set_enable(&huart2, DDSM_RIGHT_ID, 1);
-    HAL_Delay(10);
-    HAL_IWDG_Refresh(&hiwdg);
-#endif
-
-    /* 3. Enable ST3215 torque for operation; keep it off for zero capture. */
-    for (int i = 0; i < 4; i++) {
-#if SERVO_ZERO_CALIBRATION_MODE
-        st3215_set_torque_enable(&huart3, i + 1, 0);
-#else
-        st3215_set_torque_enable(&huart3, i + 1, 1);
-#endif
-        HAL_IWDG_Refresh(&hiwdg);
-        HAL_Delay(5);
-    }
-
-    /* Enable EXTI Line 1 (PB1) Interrupt for Gyro DRDY sync */
-    HAL_NVIC_SetPriority(IMU_INT_EXTI_IRQn, 0, 0); /* Highest priority */
-    HAL_NVIC_EnableIRQ(IMU_INT_EXTI_IRQn);
 }
 
 /**

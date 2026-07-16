@@ -37,6 +37,9 @@ typedef struct {
     float gyro[3];           /* Gyro X, Y, Z in rad/s */
     float temperature;       /* Chip temperature in degC */
     DeviceHealth_t health;
+    uint32_t init_deadline_ms;
+    uint8_t init_state;
+    uint8_t initialized;
 } BMI088_t;
 
 /**
@@ -46,7 +49,11 @@ typedef struct {
  * @param hi2c Pointer to initialized STM32 HAL I2C handle.
  * @return int 0 on success, -1 on failure.
  */
-int bmi088_init(BMI088_t *imu, I2C_HandleTypeDef *hi2c);
+void bmi088_begin_init(BMI088_t *imu, I2C_HandleTypeDef *hi2c, uint32_t now_ms);
+
+/* Advances at most one register transaction when its deadline is reached.
+ * Returns 1 when initialized, 0 while in progress, and -1 on a failed attempt. */
+int bmi088_init_step(BMI088_t *imu, uint32_t now_ms);
 
 /**
  * @brief Reads the raw accelerometer values and converts to m/s^2.

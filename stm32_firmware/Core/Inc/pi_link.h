@@ -106,7 +106,7 @@ int pi_link_send_joints(UART_HandleTypeDef *huart,
  * @brief Packages and transmits diagnostics telemetry to the Pi.
  * 
  * @param huart USART handle.
- * @param battery_mv Battery voltage in millivolts.
+ * @param battery_mv Battery voltage in millivolts; zero means unavailable/not fitted.
  * @param max_temp_c Maximum detected temperature across servos/sensors.
  * @param error_mask Bitmask of diagnostic errors.
  * @return int 0 on success, -1 on failure.

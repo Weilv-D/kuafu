@@ -9,6 +9,7 @@ static SafetyInputs_t healthy_inputs(void) {
     memset(&inputs, 0, sizeof(inputs));
     inputs.now_ms = 100U;
     inputs.gyro_calibrated = 1U;
+    inputs.startup_ready = 1U;
     inputs.imu_fresh = 1U;
     inputs.wheel_l_fresh = 1U;
     inputs.wheel_r_fresh = 1U;

@@ -9,7 +9,7 @@ SWD handshake flaky. We therefore connect UNDER RESET (assert NRST, attach the
 DAP, then resume the core) and retry a few times.
 
 Struct layouts from `fromelf --fieldoffsets` (Keil uses -fshort-enums, 1-byte enums):
-  BMI088_t        (0x2c): hi2c@0  accel@4   gyro@0x10  temp@0x1c  health@0x20
+  BMI088_t        (0x34): hi2c@0 accel@4 gyro@0x10 temp@0x1c health@0x20 init_state@0x30
   MahonyFilter_t  (0x30): q0@0..q3@0xc  Kp@0x10 Ki@0x14 eInt@0x18  roll@0x24 pitch@0x28 yaw@0x2c
   SafetyState_t   (0x1c): mode@0 timer@4 fault_mask@8 offset@0xc is_calib@0x18
 """
