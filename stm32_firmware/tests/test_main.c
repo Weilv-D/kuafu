@@ -4,6 +4,7 @@
 
 void run_servo_mapping_tests(void);
 void run_device_health_tests(void);
+void run_safety_state_tests(void);
 
 static void test_crc8_maxim_known_vector(void) {
     const uint8_t bytes[] = {0x01, 0x02, 0x03, 0x04};
@@ -30,6 +31,7 @@ int main(void) {
     test_fivebar_dwell_and_extension_signs();
     run_servo_mapping_tests();
     run_device_health_tests();
+    run_safety_state_tests();
 
     if (g_test_failures != 0) {
         fprintf(stderr, "%d firmware host test(s) failed\n", g_test_failures);

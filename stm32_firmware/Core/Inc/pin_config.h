@@ -158,8 +158,12 @@
 /*                            Safety Thresholds                               */
 /* ========================================================================== */
 #define SAFETY_MAX_PITCH_RAD    0.785398f       /* 45 degrees */
+#define SAFETY_MAX_PITCH_RATE_RAD_S 8.0f
 #define SAFETY_MAX_TEMP_C       65.0f
 #define SAFETY_HEARTBEAT_MS     200U            /* Pi heartbeat timeout */
 #define SAFETY_ACTION_MS        80U             /* RL action freshness timeout */
+#define SAFETY_IMU_MAX_AGE_MS   20U
+#define SAFETY_WHEEL_MAX_AGE_MS 50U
+#define SAFETY_SERVO_MAX_AGE_MS 250U
 
 #endif /* PIN_CONFIG_H */

@@ -11,7 +11,7 @@ DAP, then resume the core) and retry a few times.
 Struct layouts from `fromelf --fieldoffsets` (Keil uses -fshort-enums, 1-byte enums):
   BMI088_t        (0x2c): hi2c@0  accel@4   gyro@0x10  temp@0x1c  health@0x20
   MahonyFilter_t  (0x30): q0@0..q3@0xc  Kp@0x10 Ki@0x14 eInt@0x18  roll@0x24 pitch@0x28 yaw@0x2c
-  SafetyState_t   (0x1c): mode@0 fault@1 timer@4 err@8  offset@0xc  is_calib@0x18
+  SafetyState_t   (0x1c): mode@0 timer@4 fault_mask@8 offset@0xc is_calib@0x18
 """
 import re, struct, time, sys
 from pathlib import Path
@@ -41,7 +41,11 @@ def f(b, o): return struct.unpack_from("<f", b, o)[0]
 def u(b, o): return struct.unpack_from("<I", b, o)[0]
 
 MODE_NAMES = {0:"INIT",1:"STAND",2:"ACTIVE",3:"CLIMB",4:"FAULT"}
-FAULT_NAMES = {0x00:"NONE",0x01:"TILT",0x02:"HEARTBEAT",0x04:"OVERTEMP",0x08:"EMERGENCY",0x10:"SERVO"}
+FAULT_NAMES = {
+    0x001:"TILT", 0x002:"HEARTBEAT", 0x004:"OVERTEMP", 0x008:"EMERGENCY",
+    0x010:"SERVO", 0x020:"IMU", 0x040:"WHEEL_L", 0x080:"WHEEL_R",
+    0x100:"PITCH_RATE", 0x200:"INIT", 0x400:"INTERNAL",
+}
 
 def snapshot(session):
     def rd(addr, size):
@@ -58,13 +62,12 @@ def snapshot(session):
     temp = f(imu,0x1c)
     roll,pitch,yaw = f(mah,0x24),f(mah,0x28),f(mah,0x2c)
     mode = saf[0]
-    fault = saf[1]
-    err = saf[8]
+    fault = u(saf, 0x08)
     off0,off1,off2 = f(saf,0xc),f(saf,0x10),f(saf,0x14)
     calib = u(saf,0x18)
     bgx,bgy,bgz = f(bg,0),f(bg,4),f(bg,8)
     return dict(ticks=ticks, ax=ax,ay=ay,az=az, gx=gx,gy=gy,gz=gz, temp=temp,
-                roll=roll,pitch=pitch,yaw=yaw, mode=mode, fault=fault, err=err,
+                roll=roll,pitch=pitch,yaw=yaw, mode=mode, fault=fault,
                 off=(off0,off1,off2), calib=calib, bg=(bgx,bgy,bgz))
 
 def open_session(tries=6):
@@ -139,7 +142,7 @@ def main():
             print(f"    gyro_bias    x={d['off'][0]:+.5f} y={d['off'][1]:+.5f} z={d['off'][2]:+.5f}  calib={d['calib']}")
             print(f"    body_gyro    x={d['bg'][0]:+.4f} y={d['bg'][1]:+.4f} z={d['bg'][2]:+.4f}")
             print(f"    attitude(deg) roll={d['roll']*57.2958:+7.2f} pitch={d['pitch']*57.2958:+7.2f} yaw={d['yaw']*57.2958:+7.2f}")
-            print(f"    mode={MODE_NAMES.get(d['mode'],d['mode'])} fault={fdesc} err={d['err']:#x} temp={d['temp']:.1f}C")
+            print(f"    mode={MODE_NAMES.get(d['mode'],d['mode'])} fault={fdesc} mask={d['fault']:#x} temp={d['temp']:.1f}C")
             print()
             if i < n-1: time.sleep(interval)
     finally:

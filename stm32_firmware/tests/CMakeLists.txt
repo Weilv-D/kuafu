@@ -7,11 +7,13 @@ add_executable(firmware_host_tests
     test_main.c
     test_servo_mapping.c
     test_device_health.c
+    test_safety_state.c
     test_support.c
     ../Core/Src/crc8.c
     ../Core/Src/kinematics.c
     ../Core/Src/servo_mapping.c
     ../Core/Src/device_health.c
+    ../Core/Src/safety_state.c
 )
 
 target_include_directories(firmware_host_tests PRIVATE

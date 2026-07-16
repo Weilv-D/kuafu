@@ -11,55 +11,56 @@ typedef enum {
     STATE_FAULT = 4
 } RobotMode_t;
 
-typedef enum {
-    FAULT_NONE = 0x00,
-    FAULT_TILT = 0x01,          /* Tilt / Pitch too high (> 45 degrees) */
-    FAULT_HEARTBEAT = 0x02,     /* Pi link heartbeat lost */
-    FAULT_OVERTEMP = 0x04,      /* Servo/sensor overtemperature */
-    FAULT_EMERGENCY = 0x08,     /* Emergency stop request from Pi */
-    FAULT_SERVO = 0x10          /* Hip servo communication lost */
-} FaultCode_t;
+typedef uint32_t FaultMask_t;
+
+#define FAULT_NONE          ((FaultMask_t)0U)
+#define FAULT_TILT          ((FaultMask_t)1U << 0)
+#define FAULT_HEARTBEAT     ((FaultMask_t)1U << 1) /* legacy bit; stale heartbeat is recoverable */
+#define FAULT_OVERTEMP      ((FaultMask_t)1U << 2)
+#define FAULT_EMERGENCY     ((FaultMask_t)1U << 3)
+#define FAULT_SERVO         ((FaultMask_t)1U << 4)
+#define FAULT_IMU           ((FaultMask_t)1U << 5)
+#define FAULT_WHEEL_LEFT    ((FaultMask_t)1U << 6)
+#define FAULT_WHEEL_RIGHT   ((FaultMask_t)1U << 7)
+#define FAULT_PITCH_RATE    ((FaultMask_t)1U << 8)
+#define FAULT_INIT          ((FaultMask_t)1U << 9)
+#define FAULT_INTERNAL      ((FaultMask_t)1U << 10)
 
 typedef struct {
     RobotMode_t current_mode;
-    FaultCode_t active_fault;
-    uint32_t mode_timer_ms;     /* Time spent in current mode */
-    uint8_t error_mask;         /* Bitmask of all triggered faults */
-    float gyro_calib_offset[3]; /* Calibrated gyroscope offsets */
-    int is_gyro_calibrated;
+    uint32_t mode_timer_ms;
+    FaultMask_t fault_mask;
+    float gyro_calib_offset[3];
+    uint8_t is_gyro_calibrated;
 } SafetyState_t;
+
+typedef struct {
+    uint32_t now_ms;
+    float pitch_rad;
+    float pitch_rate_rads;
+    float max_temp_c;
+    uint8_t gyro_calibrated;
+    uint8_t imu_fresh;
+    uint8_t wheel_l_fresh;
+    uint8_t wheel_r_fresh;
+    uint8_t servos_fresh;
+    uint8_t link_compatible;
+    uint8_t heartbeat_fresh;
+    uint8_t action_fresh;
+    uint8_t requested_mode;
+} SafetyInputs_t;
+
+typedef struct {
+    uint8_t enter_hold;
+    uint8_t clear_action;
+} SafetyDecision_t;
 
 extern SafetyState_t g_safety_state;
 
-/**
- * @brief Initializes the safety state machine.
- */
 void safety_state_init(void);
+void safety_state_trigger_fault(FaultMask_t fault);
+void safety_state_gyro_calib_update(float gx, float gy, float gz, uint32_t now_ms);
+SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs);
+uint8_t safety_state_legacy_fault_mask(void);
 
-/**
- * @brief Updates the robot state machine and executes transitions based on telemetry.
- * 
- * @param pitch_rad Current pitch angle of the body (from fusion).
- * @param gyro_y_rads Current pitch rate.
- * @param max_temp_c Maximum detected system temperature.
- * @param dt Loop time step (seconds).
- */
-void safety_state_update(float pitch_rad, float gyro_y_rads, float max_temp_c, float dt);
-
-/**
- * @brief Checks if gyro calibration is in progress and processes raw samples.
- * 
- * @param gx Gyro x reading.
- * @param gy Gyro y reading.
- * @param gz Gyro z reading.
- */
-void safety_state_gyro_calib_update(float gx, float gy, float gz);
-
-/**
- * @brief Force transitions the state machine to FAULT state.
- * 
- * @param fault Target fault code to trigger.
- */
-void safety_state_trigger_fault(FaultCode_t fault);
-
-#endif /* SAFETY_STATE_H */
+#endif

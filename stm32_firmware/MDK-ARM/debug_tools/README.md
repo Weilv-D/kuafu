@@ -24,8 +24,8 @@ Key globals and their addresses (built 2026-07-16; re-check the .map after rebui
 - `g_imu` (0x2000021c) — BMI088_t (0x2c): accel[3]@0x04, gyro[3]@0x10, temp@0x1c,
   health@0x20
 - `g_mahony` (0x20000248) — MahonyFilter_t (0x30): roll@0x24, pitch@0x28, yaw@0x2c
-- `g_safety_state` (0x20000418) — SafetyState_t (0x1c): mode@0, fault@1, err@8,
-  gyro_offset[3]@0xc, is_calib@0x18
+- `g_safety_state` (0x20000418) — SafetyState_t (0x1c): mode@0, timer@4,
+  fault_mask@8, gyro_offset[3]@0xc, is_calib@0x18
 - `g_servos[4]` (0x200002ec) — ST3215_State_t[4], stride 0x28: position_tick@0x02,
   position_rad@0x04, health.consecutive_failures@0x26, health.online@0x27
 

@@ -145,7 +145,7 @@ int main(void) {
                               g_imu.accel[0], g_imu.accel[1], g_imu.accel[2],
                               gx, gy, gz, fusion_dt);
             } else {
-                safety_state_gyro_calib_update(gx, gy, gz);
+                safety_state_gyro_calib_update(gx, gy, gz, HAL_GetTick());
             }
             g_body_gyro[0] = gx;
             g_body_gyro[1] = gy;
@@ -171,7 +171,42 @@ int main(void) {
                         max_temp = g_servos[i].temperature_c;
                     }
                 }
-                safety_state_update(body_pitch, body_pitch_rate, max_temp, 0.004f);
+                SafetyInputs_t safety_inputs;
+                SafetyDecision_t safety_decision;
+                uint32_t safety_now = HAL_GetTick();
+                uint8_t servos_fresh = 1U;
+                for (int i = 0; i < 4; ++i) {
+                    if (!device_health_is_fresh(&g_servos[i].health,
+                                                safety_now,
+                                                SAFETY_SERVO_MAX_AGE_MS)) {
+                        servos_fresh = 0U;
+                    }
+                }
+                safety_inputs.now_ms = safety_now;
+                safety_inputs.pitch_rad = body_pitch;
+                safety_inputs.pitch_rate_rads = body_pitch_rate;
+                safety_inputs.max_temp_c = max_temp;
+                safety_inputs.gyro_calibrated = g_safety_state.is_gyro_calibrated;
+                safety_inputs.imu_fresh = device_health_is_fresh(&g_imu.health,
+                                                                 safety_now,
+                                                                 SAFETY_IMU_MAX_AGE_MS);
+                safety_inputs.wheel_l_fresh = device_health_is_fresh(&g_ddsm_left.health,
+                                                                     safety_now,
+                                                                     SAFETY_WHEEL_MAX_AGE_MS);
+                safety_inputs.wheel_r_fresh = device_health_is_fresh(&g_ddsm_right.health,
+                                                                     safety_now,
+                                                                     SAFETY_WHEEL_MAX_AGE_MS);
+                safety_inputs.servos_fresh = servos_fresh;
+                safety_inputs.link_compatible = pi_link_is_compatible();
+                safety_inputs.heartbeat_fresh = pi_link_heartbeat_fresh();
+                safety_inputs.action_fresh = pi_link_action_fresh();
+                safety_inputs.requested_mode = g_pi_cmd_heartbeat.mode_request;
+                safety_decision = safety_state_update(&safety_inputs);
+                if (safety_decision.enter_hold) {
+                    pi_link_enter_hold();
+                } else if (safety_decision.clear_action) {
+                    pi_link_clear_action();
+                }
             }
 
             /* --- Slot 0: Compute LQR (once/cycle), command & poll Left DDSM --- */
@@ -282,10 +317,11 @@ int main(void) {
             /* --- Slot 3: Diagnostic packages & main controller logic --- */
             else if (slot == 3) {
                 uint16_t dummy_battery_mv = 18500; /* Simulated 5S battery (18.5V) */
-                pi_link_send_diag(&huart6, dummy_battery_mv, (uint8_t)g_imu.temperature, g_safety_state.error_mask);
+                pi_link_send_diag(&huart6, dummy_battery_mv, (uint8_t)g_imu.temperature,
+                                  safety_state_legacy_fault_mask());
 
                 if (g_safety_state.current_mode == STATE_FAULT) {
-                    pi_link_send_fault(&huart6, g_safety_state.active_fault);
+                    pi_link_send_fault(&huart6, safety_state_legacy_fault_mask());
                 }
             }
         }
