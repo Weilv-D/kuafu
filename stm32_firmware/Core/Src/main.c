@@ -352,9 +352,16 @@ int main(void) {
                 }
             }
             else if (g_safety_state.current_mode == STATE_FAULT) {
-                /* Lockdown: Disable servo torque to allow gravity lock */
-                for (int i = 0; i < 4; i++) {
-                    st3215_set_torque_enable(&huart3, ids[i], 0);
+                /* Lockdown: disable servo torque once to allow gravity lock.
+                 * Sending the disable every 50 Hz cycle floods the full-duplex
+                 * bus with echo bytes that desync subsequent read queries, so a
+                 * one-shot flag is used instead of repeated transmission. */
+                static uint8_t fault_torque_disabled = 0;
+                if (!fault_torque_disabled) {
+                    for (int i = 0; i < 4; i++) {
+                        st3215_set_torque_enable(&huart3, ids[i], 0);
+                    }
+                    fault_torque_disabled = 1;
                 }
             }
 
@@ -387,6 +394,7 @@ static void System_Initial_Setup(void) {
     /* 1. Initialize BMI088 IMU over I2C */
     while (bmi088_init(&g_imu, &hi2c1) != 0) {
         /* Blink an LED or print error if IMU is missing */
+        HAL_IWDG_Refresh(&hiwdg); /* keep the watchdog alive during long init */
         HAL_Delay(100);
     }
 
@@ -395,15 +403,18 @@ static void System_Initial_Setup(void) {
     HAL_Delay(10);
     ddsm_set_enable(&huart2, DDSM_LEFT_ID, 1);
     HAL_Delay(10);
+    HAL_IWDG_Refresh(&hiwdg);
 
     ddsm_set_mode(&huart2, DDSM_RIGHT_ID, DDSM_MODE_CURRENT);
     HAL_Delay(10);
     ddsm_set_enable(&huart2, DDSM_RIGHT_ID, 1);
     HAL_Delay(10);
+    HAL_IWDG_Refresh(&hiwdg);
 
     /* 3. Enable ST3215 servos torque */
     for (int i = 0; i < 4; i++) {
         st3215_set_torque_enable(&huart3, i + 1, 1);
+        HAL_IWDG_Refresh(&hiwdg);
         HAL_Delay(5);
     }
 
