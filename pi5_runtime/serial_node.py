@@ -1,8 +1,15 @@
 """Serial adapter for the Pi5 Actor runtime.
 
-This process intentionally keeps navigation/ROS outside the balance loop.  A command
+This process intentionally keeps navigation/ROS outside the balance loop. A command
 source updates ``set_command``; the 50 Hz loop consumes only fresh STM32 telemetry,
 runs ONNX, and transmits the paired heartbeat/action frames.
+
+With ``--enable-teleop`` the project :class:`~rl.teleop.arbiter.CommandArbiter` runs
+inside this process, fed by :class:`~rl.teleop.ipc_source.IPCCommandSource` (raw
+gamepad commands over a Unix socket) and the AutonomousSource stub. The arbiter —
+not the teleop process — owns the safety layer (ramp / limit / estop / timeout),
+so a teleop-process crash or a dropped Bluetooth link degrades to the arbiter's
+safe default instead of holding the last command.
 """
 
 from __future__ import annotations
@@ -18,6 +25,39 @@ from pi5_runtime.protocol import (
     StreamDecoder, TEL_HEALTH, TEL_IMU, TEL_JOINTS, decode_health_payload,
 )
 from pi5_runtime.runtime import PolicyRuntime, Telemetry
+
+
+def _mode_to_firmware_mode(arbiter_mode) -> int:
+    """Map a teleop :class:`Mode` to the firmware/protocol mode code.
+
+    MANUAL / ASSISTED / AUTONOMOUS all mean "operator or planner wants motion",
+    which on the firmware side is ``ACTIVE`` (2): only ACTIVE drives wheel torque
+    and the learned residual. ESTOP maps to ``FAULT`` (4) — the firmware's
+    strongest stop path — so the STM32 latches FAULT and disables actuators.
+    """
+    # Imported lazily so that ``serial_node`` stays importable when the teleop
+    # package (and its pygame dependency) is not installed on the policy host.
+    from rl.teleop.command import Mode
+
+    if arbiter_mode == Mode.ESTOP:
+        return 4  # STATE_FAULT
+    return 2      # STATE_ACTIVE
+
+
+def _build_arbiter(cmd_socket: str):
+    """Construct the CommandArbiter used when ``--enable-teleop`` is set.
+
+    Returns ``(arbiter, ipc_source)``; the caller closes ``ipc_source`` on exit.
+    Order matters: the manual (IPC) source precedes the autonomous stub so the
+    arbiter's "manual preempts autonomous" rule fires correctly.
+    """
+    from rl.teleop.ipc_source import IPCCommandSource
+    from rl.teleop.autonomous_source import AutonomousSource
+    from rl.teleop.arbiter import CommandArbiter
+
+    ipc = IPCCommandSource(cmd_socket)
+    autonomous = AutonomousSource()
+    return CommandArbiter([ipc, autonomous]), ipc
 
 
 def _i16s(payload: bytes) -> tuple[int, ...]:
@@ -128,18 +168,39 @@ class SerialPolicyNode:
 
 
 def main() -> None:
+    from pi5_runtime.command_socket import COMMAND_SOCKET_PATH
+
     parser = argparse.ArgumentParser(description="KUAFU 50 Hz Pi5 serial policy node")
     parser.add_argument("--model", required=True)
     parser.add_argument("--port", default="/dev/ttyAMA0")
     parser.add_argument("--baudrate", type=int, default=921600)
+    parser.add_argument("--enable-teleop", action="store_true",
+                        help="run the project CommandArbiter inside this process, "
+                             "fed by the teleop Unix socket")
+    parser.add_argument("--cmd-socket", default=COMMAND_SOCKET_PATH,
+                        help="path to the teleop command Unix socket")
     args = parser.parse_args()
     node = SerialPolicyNode(args.model, args.port, args.baudrate)
+
+    arbiter = None
+    ipc_source = None
+    if args.enable_teleop:
+        arbiter, ipc_source = _build_arbiter(args.cmd_socket)
+
     period = 0.02
     deadline = time.monotonic()
-    while True:
-        node.tick()
-        deadline += period
-        time.sleep(max(0.0, deadline - time.monotonic()))
+    try:
+        while True:
+            if arbiter is not None:
+                cmd = arbiter.poll()
+                node.set_command(cmd.v, cmd.omega, cmd.d0,
+                                 _mode_to_firmware_mode(cmd.mode))
+            node.tick()
+            deadline += period
+            time.sleep(max(0.0, deadline - time.monotonic()))
+    finally:
+        if ipc_source is not None:
+            ipc_source.close()
 
 
 if __name__ == "__main__":
