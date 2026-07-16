@@ -14,6 +14,19 @@
 
 All protocol values use SI units except `D0`, which is explicitly millimetres in the command and observation contract.
 
+### Five-Bar Joint Signs And Servo Order
+
+The A-chain pivot is at `x=-26 mm`, the B-chain pivot is at `x=+26 mm`, and
+dwell is `(Qx,D0)=(0,58 mm)`. Hip angles are dwell-relative. Increasing `D0`
+therefore requires `qA<0` and `qB>0` on both sides.
+
+Firmware control and UART telemetry use hip wire order `[A_l,A_r,B_l,B_r]`.
+The Pi runtime reorders it to Actor order `[A_l,B_l,A_r,B_r]`. ST3215 raw tick
+direction is a hardware mapping beneath this contract; with the current
+`SERVO_DIR_INIT={+1,-1,+1,-1}`, extension must produce raw tick changes
+`[decrease,increase,increase,decrease]`. Firmware converts feedback back into
+the shared dwell-relative joint signs before transmission.
+
 ## Command
 
 | Field | Range | Note |

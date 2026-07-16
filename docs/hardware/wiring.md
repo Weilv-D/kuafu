@@ -65,6 +65,11 @@ single-wire bus into a 2-wire UART. The firmware therefore uses USART3 in
 
 Servo IDs: LF=1, RF=2, LB=3, RB=4. Bus speed 1 Mbps, 8N1.
 
+These are firmware slot labels: `[LF,RF,LB,RB]` maps to joint wire order
+`[A_l,A_r,B_l,B_r]`. Use the A/B joint name and the direction table in
+`calibration.md` when checking motion; clockwise/counter-clockwise descriptions
+are ambiguous across the mirrored left and right mounting faces.
+
 Requirements / gotchas:
 - The adapter's **jumper must be in position A** (UART mode); position B is for
   USB and will not pass UART traffic.

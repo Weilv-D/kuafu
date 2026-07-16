@@ -21,69 +21,53 @@ file is the narrative; that file is the reference). Read both before resuming.
 - Fixed: `HAL_UART_Init`, enable PB10 (TX) + PB11 (RX). Driver already used the
   full-duplex HAL API. Wiring: jumper at A, same-name PB10→TXD / PB11→RXD.
 
-## Servo Communication — Open Issue
+## Servo Bus State
 
-### Confirmed by SWD isolation
-- Single id1, 25 s: ~100% success, no crash.
-- Single id2, 20 s: ~99% success, no crash.
-- All 4 rotated at 50 Hz: **always crashes at ~9 s (~358th query)** — RX fills
-  with NE (noise) + garbage, all servos go offline → `FAULT_SERVO`.
+The Waveshare adapter uses full-duplex USART3 with PB10→TXD, PB11→RXD, jumper A,
+and a common ground. IDs 1/2/3/4 were all read successfully in firmware order
+`[A_l,A_r,B_l,B_r]`. Two software faults found during isolation are fixed:
 
-### Root cause (high confidence)
-The `STATE_FAULT` branch disabled all 4 servo torques **every 50 Hz cycle**. In
-full-duplex each TX leaves echo bytes on RX; 4 packets × 50 Hz floods the bus and
-desyncs every subsequent `read_state` — a snowball. Single-servo tests never
-enter FAULT (force-kept online), which is why they are stable.
+- `System_Initial_Setup` refreshes the IWDG during blocking peripheral setup.
+- FAULT sends the four torque-disable packets once instead of flooding the
+  echoed full-duplex receive path every 20 ms.
 
-Second factor: `System_Initial_Setup` did not refresh the IWDG, so slow UART
-blocking during init exceeded the ~512 ms watchdog (PR=0, RLR=4095, LSI 32 kHz)
-and reset the chip in a loop — which also made SWD unhalt-able.
+The formal firmware was rebuilt, flashed, and behaviorally verified with wheel
+power disconnected. All four servos enabled without a visible jump and held the
+measured dwell pose steadily. Powered-servo SWD remains electrically marginal:
+even at 100 kHz it can lose ACK after successful reads. Behavioral verification
+or the DAPLink CDC path is therefore preferred while the servo bus is powered.
 
-### Fixes written (committed, unverified)
-- IWDG refresh calls through `System_Initial_Setup`.
-- FAULT torque-disable made one-shot (`static fault_torque_disabled`).
-- `st3215.c` is at the committed baseline; the experimental header-sync /
-  bus-quiet / RX-drain logic was reverted (added blocking, did not survive the
-  watchdog loop). Re-add carefully after the two fixes above are confirmed.
+## Servo Calibration State
 
-Unverified because SWD is unusable with servos powered (noise) and the chip
-resets with servos unpowered (adapter pulls PB10/PB11 low, stalling init).
+Dwell is `(Qx,D0)=(0,58 mm)`, with `qA=qB=0`. Two consistent nine-sample median
+captures produced:
 
-## Servo Zero (dwell) — Not Yet Done
+```text
+SERVO_CENTER_INIT = {275, 1097, 2809, 1023}  // [A_l,A_r,B_l,B_r]
+```
 
-- Dwell = D0 = 58 mm (shortest virtual leg), per `kuafu_physics.py` and
-  `kinematics.c`. The only correct zero: sim/firmware/physics define joint
-  angles relative to it. At dwell qA=qB=0; extending makes qA<0, qB>0.
-- `SERVO_CENTER_INIT` is still `{2048,2048,2048,2048}` — must measure per robot.
-- `SERVO_DIR_INIT = {+1,-1,+1,-1}` also needs bench verification.
-- ST3215 ship with ID=0; must re-address to 1/2/3/4.
+The centers and dwell hold are verified. The intended mirror mapping is
+`SERVO_DIR_INIT={+1,-1,+1,-1}`. For increasing D0, the shared joint signs must
+be `[A_l<0,A_r<0,B_l>0,B_r>0]` and raw ticks must
+`[decrease,increase,increase,decrease]`. This direction mapping still requires the reduced-torque
+physical test in `docs/hardware/calibration.md`; center values must not be used
+to compensate for a direction error.
 
-## IMU — Open Issue
+## IMU State
 
-At session end `g_system_ticks` was stuck at 1 — PB1 DRDY fired once then
-stopped, i.e. the BMI088 gyro stopped producing data-ready. Earlier the IMU was
-healthy (accel z≈9.8, calib=1). Likely a loose IMU connection (PB1/VCC)
-disturbed while wiring servos.
+After reseating the wiring, PB1 data-ready recovered. Formal-firmware reads
+showed `g_system_ticks` advancing at approximately 1038 Hz and acceleration
+magnitude near 9.96 m/s². The board was resting on its side, so gravity appeared
+primarily on the sensor X axis. The earlier single-interrupt condition is no
+longer present.
 
-## Resume Checklist (in this order)
+## Next Bench Gates
 
-1. **Re-seat all wiring** — IMU (PB8/PB9/PB1/VCC/GND); confirm common GND
-   between STM32 / servo supply / DAPLink (continuity beep). Most intermittent
-   faults here trace to ground/reference issues.
-2. Power only STM32+IMU+DAPLink (servos OFF). Run `read_imu_state.py`: ticks
-   advancing, accel z≈9.8. Re-confirms the BMI088 fix and IMU wiring.
-3. Flash the working-tree firmware (watchdog + one-shot FAULT) with servos OFF
-   via `pyocd load --connect under-reset`.
-4. Power servos ON. Verify by **behavior** (no SWD): servos hold steady without
-   twitching. That is the real success criterion.
-5. If stable, calibrate dwell zero with `calib_servo_zero.py`.
-6. Only then re-attempt SWD-based measurement; if SWD still dies with servos on,
-   accept behavioral verification + the CDC port.
-
-## Key Lesson
-
-The full-duplex adapter + 1 Mbps + 20 cm unterminated TX/RX pair is marginal.
-If servo comms stay flaky after the watchdog/one-shot fixes, the next lever is
-**electrical**: shorten/twist the TX/RX pair, add a common-ground bus bar, or
-lower the baud rate (re-configure ST3215 via vendor tool + match
-`huart3.Init.BaudRate`). Do not pile software workarounds on a noisy physical layer.
+1. Keep wheel power off and verify the four servo directions with a small move
+   from `D0=58 mm` to `D0=63 mm` at reduced torque, speed, and acceleration.
+2. Confirm telemetry signs and raw tick changes against the calibration table.
+3. Expand gradually to the five-bar range sweep, monitoring closure, current,
+   temperature, and clearance.
+4. Improve the servo/SWD electrical path before relying on long powered SWD
+   sessions: shorten or twist TX/RX, use a common-ground bus bar, and consider a
+   lower servo baud rate configured consistently in the servos and firmware.

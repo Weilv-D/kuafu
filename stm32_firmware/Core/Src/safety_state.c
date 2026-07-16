@@ -42,9 +42,12 @@ void safety_state_gyro_calib_update(float gx, float gy, float gz) {
         g_safety_state.gyro_calib_offset[2] = calibration_sum[2] / 1000.0f;
         g_safety_state.is_gyro_calibrated = 1;
         
-        /* Auto transition from INIT to STAND */
-        g_safety_state.current_mode = STATE_STAND;
-        g_safety_state.mode_timer_ms = HAL_GetTick();
+        /* Auto transition only if INIT is still active. Never clear a fault
+         * that was raised while gyro calibration was in progress. */
+        if (g_safety_state.current_mode == STATE_INIT) {
+            g_safety_state.current_mode = STATE_STAND;
+            g_safety_state.mode_timer_ms = HAL_GetTick();
+        }
     }
 }
 

@@ -21,6 +21,12 @@ dqB / dD0 > 0
 
 `rl/verify/calibrate_fivebar.py` regenerates a 256-point dwell-relative table and refuses an output that violates endpoint, continuity, FK/IK closure, limit, or sign guards. Servo electrical zero and mirror direction are separate physical calibration values.
 
+The shared joint convention is independent of servo mounting. At extension,
+both A joints become negative and both B joints become positive. Firmware uses
+per-servo center and mirror values to translate this convention to ST3215 raw
+ticks, then applies the inverse translation to feedback. The exact mapping and
+bench acceptance test are defined in `docs/hardware/calibration.md`.
+
 ## Timing
 
 | Layer | Period | Rate |

@@ -100,6 +100,13 @@ int main(void) {
     /* Run initial sensor detection and calibration */
     System_Initial_Setup();
 
+#if SERVO_ZERO_CALIBRATION_MODE
+    /* A calibration image must never leave INIT and start commanding the
+     * placeholder center ticks. FAULT keeps wheel commands at zero while the
+     * background servo feedback poll remains active. */
+    safety_state_trigger_fault(FAULT_SERVO);
+#endif
+
     uint32_t last_tick = 0;
     uint32_t last_left_tick = 0;
     uint32_t last_right_tick = 1;
@@ -293,6 +300,11 @@ int main(void) {
 
             uint8_t ids[4] = {SERVO_LF_ID, SERVO_RF_ID, SERVO_LB_ID, SERVO_RB_ID};
 
+#if SERVO_ZERO_CALIBRATION_MODE
+            /* Position commands are intentionally suppressed. System setup
+             * has already disabled torque; feedback polling below still runs. */
+            (void)ids;
+#else
             if (g_safety_state.current_mode == STATE_ACTIVE) {
                 /* Pi supplies bounded workspace residuals.  Project them through
                  * the same dwell-relative (Qx,D0) five-bar IK as the simulator. */
@@ -334,8 +346,8 @@ int main(void) {
                 Pi_Command_Snapshot(&hb, &act);
                 (void)act;
 
-                float q_hip_A = 0.0f; /* front chain (LF, RF) */
-                float q_hip_B = 0.0f; /* back chain  (LB, RB) */
+                float q_hip_A = 0.0f; /* A chain, pivot x=-c (LF, RF) */
+                float q_hip_B = 0.0f; /* B chain, pivot x=+c (LB, RB) */
 
                 /* Compute inverse kinematics mapping for target height */
                 if (kinematics_solve_ik(hb.target_leg_d0, &q_hip_A, &q_hip_B) == 0) {
@@ -364,6 +376,7 @@ int main(void) {
                     fault_torque_disabled = 1;
                 }
             }
+#endif
 
             /* Sequentially query feedback from one online servo to prevent blocking.
              * A servo that stays unreachable triggers a fatal FAULT lockdown. */
@@ -399,6 +412,7 @@ static void System_Initial_Setup(void) {
     }
 
     /* 2. Configure DDSM315 motors to Current Control Mode and Enable */
+#if !SERVO_ZERO_CALIBRATION_MODE
     ddsm_set_mode(&huart2, DDSM_LEFT_ID, DDSM_MODE_CURRENT);
     HAL_Delay(10);
     ddsm_set_enable(&huart2, DDSM_LEFT_ID, 1);
@@ -410,10 +424,15 @@ static void System_Initial_Setup(void) {
     ddsm_set_enable(&huart2, DDSM_RIGHT_ID, 1);
     HAL_Delay(10);
     HAL_IWDG_Refresh(&hiwdg);
+#endif
 
-    /* 3. Enable ST3215 servos torque */
+    /* 3. Enable ST3215 torque for operation; keep it off for zero capture. */
     for (int i = 0; i < 4; i++) {
+#if SERVO_ZERO_CALIBRATION_MODE
+        st3215_set_torque_enable(&huart3, i + 1, 0);
+#else
         st3215_set_torque_enable(&huart3, i + 1, 1);
+#endif
         HAL_IWDG_Refresh(&hiwdg);
         HAL_Delay(5);
     }

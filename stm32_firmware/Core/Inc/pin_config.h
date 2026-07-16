@@ -123,19 +123,25 @@
 #define SERVO_CENTER_TICKS      2048
 #define SERVO_TICKS_PER_RAD     (4096.0f / (2.0f * 3.14159265f))
 
+/* Bench-only mode for measuring the per-servo dwell zero. While enabled the
+ * firmware keeps wheel actuation inactive, disables all ST3215 torque, and
+ * only polls servo feedback. Set back to 0 after SERVO_CENTER_INIT is filled. */
+#define SERVO_ZERO_CALIBRATION_MODE 0
+
 /* --------------------------------------------------------------------------
  * Servo interface contract (firmware is the source of truth):
  *   Pi sends sim-frame joint angles (dwell = 0), order [LF, RF, LB, RB] =
  *   [hip_A_l, hip_A_r, hip_B_l, hip_B_r]. Firmware maps each servo as:
  *     tick = SERVO_DIR[i] * q[i] * SERVO_TICKS_PER_RAD + SERVO_CENTER[i]
- *   - SERVO_DIR: right-side (_r) servos are mirror mounted -> negated.
+ *   - SERVO_DIR: maps the shared joint sign to each servo's raw tick sign.
+ *     For extension (qA<0, qB>0), the expected raw tick changes are
+ *     [LF decreases, RF increases, LB increases, RB decreases]. Do not use
+ *     viewing-dependent CW/CCW.
  *   - SERVO_CENTER: per-servo mechanical zero tick (dwell posture).
- *   NOTE: SERVO_DIR signs and SERVO_CENTER values MUST be verified/calibrated
- *         on the physical robot. Defaults below are placeholders.
+ *   See docs/hardware/calibration.md for ordering and the physical test.
  * ------------------------------------------------------------------------ */
 #define SERVO_DIR_INIT          { +1, -1, +1, -1 }   /* [LF, RF, LB, RB] */
-#define SERVO_CENTER_INIT       { SERVO_CENTER_TICKS, SERVO_CENTER_TICKS, \
-                                  SERVO_CENTER_TICKS, SERVO_CENTER_TICKS }
+#define SERVO_CENTER_INIT       { 275, 1097, 2809, 1023 } /* [LF, RF, LB, RB], 2026-07-16 */
 
 /* ========================================================================== */
 /*                     IMU Attitude Axis Mapping (calibratable)               */

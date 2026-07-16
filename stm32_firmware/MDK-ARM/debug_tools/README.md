@@ -1,8 +1,8 @@
 # Debug Tools
 
-Non-intrusive STM32 debugging via DAPLink (CMSIS-DAP) + pyOCD over SWD. No
-firmware changes, no UART needed — these scripts read live target memory while
-the firmware runs.
+DAPLink (CMSIS-DAP) and pyOCD tools for reading live STM32 state. The IMU tool
+is non-intrusive. Servo zero capture requires the dedicated torque-free firmware
+mode described below.
 
 ## Setup
 
@@ -13,19 +13,19 @@ the firmware runs.
 
 ## SWD Debug Method
 
-Symbol addresses come from `../stm32_firmware/stm32_firmware.map` (regenerate
-after each build); struct field offsets from
+The scripts resolve symbol addresses from `../stm32_firmware/stm32_firmware.map`
+at startup (regenerate it with each build); struct field offsets come from
 `fromelf --fieldoffsets ../stm32_firmware/stm32_firmware.axf` (Keil uses
 `-fshort-enums`, so enums are 1 byte — do not assume 4).
 
 Key globals and their addresses (built 2026-07-16; re-check the .map after rebuild):
-- `g_system_ticks` (0x20000000) — PB1/IMU-DRDY interrupt count; the scheduler
+- `g_system_ticks` (0x20000004) — PB1/IMU-DRDY interrupt count; the scheduler
   heartbeat. If it stops advancing, the main loop is not running.
-- `g_imu` (0x20000218) — BMI088_t (0x20): accel[3]@0x04, gyro[3]@0x10, temp@0x1c
-- `g_mahony` (0x20000238) — MahonyFilter_t (0x30): roll@0x24, pitch@0x28, yaw@0x2c
-- `g_safety_state` (0x200003d8) — SafetyState_t (0x1c): mode@0, fault@1, err@8,
+- `g_imu` (0x2000021c) — BMI088_t (0x20): accel[3]@0x04, gyro[3]@0x10, temp@0x1c
+- `g_mahony` (0x2000023c) — MahonyFilter_t (0x30): roll@0x24, pitch@0x28, yaw@0x2c
+- `g_safety_state` (0x200003dc) — SafetyState_t (0x1c): mode@0, fault@1, err@8,
   gyro_offset[3]@0xc, is_calib@0x18
-- `g_servos[4]` (0x200002cc) — ST3215_State_t[4], stride 0x20: position_rad@0x04,
+- `g_servos[4]` (0x200002d0) — ST3215_State_t[4], stride 0x20: position_rad@0x04,
   is_online@0x1c, consecutive_failures@0x1d
 
 ## SWD Reliability Notes
@@ -58,21 +58,32 @@ magnetometer). `mode=FAULT/SERVO` is expected when servos are absent.
 
 ### calib_servo_zero.py — servo dwell-zero capture
 
-While the firmware holds servos torque-free (STATE_FAULT disables torque), this
-reads each servo's present-position tick live. Pose each leg at dwell by hand,
-then Ctrl+C to capture the four `SERVO_CENTER` values for `pin_config.h`.
+Zero capture must use a firmware image built with
+`SERVO_ZERO_CALIBRATION_MODE=1`. That mode leaves wheel actuation inactive,
+disables ST3215 torque during startup, suppresses all servo position commands,
+and keeps feedback polling active. Do not run zero capture against ordinary
+control firmware whose centers have not yet been measured.
+
+Connect IDs 1/2/3/4, place both five-bars at `Qx=0`, `D0=58 mm`, and take a
+short median capture:
 
 ```bash
-# 1. Connect 4x ST3215 (IDs 1/2/3/4, USART3 PB10 bus), powered, common GND
-# 2. Run; pose legs at dwell; Ctrl+C to capture
-python calib_servo_zero.py
+python calib_servo_zero.py --capture
 ```
 
-See `../docs/hardware/wiring.md` for the servo adapter wiring and
-`../docs/hardware/calibration.md` for the dwell definition.
+The tool waits for round-robin feedback to replace startup values, reads all
+four servo structures in one SWD transfer at 100 kHz, and reports the median of
+nine samples in firmware order `[LF,RF,LB,RB]=[A_l,A_r,B_l,B_r]`. Interactive
+monitoring remains available with `python calib_servo_zero.py`; press Ctrl+C to
+capture the displayed pose.
+
+After writing the measured centers, set `SERVO_ZERO_CALIBRATION_MODE=0`, rebuild,
+flash with servo power off, and verify dwell hold with wheel power disconnected.
+Direction is a separate calibration: extension must make joint signs
+`A_l<0, A_r<0, B_l>0, B_r>0`. See `../../../docs/hardware/wiring.md` and
+`../../../docs/hardware/calibration.md` for the complete procedure.
 
 ## Bring-Up Log
 
-`BRINGUP_LOG.md` records the chronological findings and decisions from the
-2026-07-16 bring-up session (bugs found, root-cause analysis, open issues,
-resume checklist). Read it before resuming servo/IMU debugging.
+`BRINGUP_LOG.md` records the 2026-07-16 findings, current verified hardware
+state, and remaining bench gates. Read it before resuming servo/IMU work.

@@ -13,19 +13,29 @@ Struct layouts from `fromelf --fieldoffsets` (Keil uses -fshort-enums, 1-byte en
   MahonyFilter_t  (0x30): q0@0..q3@0xc  Kp@0x10 Ki@0x14 eInt@0x18  roll@0x24 pitch@0x28 yaw@0x2c
   SafetyState_t   (0x1c): mode@0 fault@1 timer@4 err@8  offset@0xc  is_calib@0x18
 """
-import struct, time, sys
+import re, struct, time, sys
+from pathlib import Path
 
 from pyocd.core.helpers import ConnectHelper
 
 PROBE = "LU_2022_8888"
 TARGET = "stm32f407zgtx"
 
-# Addresses from stm32_firmware.map (built 2026-07-16)
-A_SYS_TICKS = 0x20000000  # uint32 g_system_ticks
-A_BODY_GYRO = 0x2000003c  # float[3] g_body_gyro
-A_IMU       = 0x20000218  # BMI088_t 0x20
-A_MAHONY    = 0x20000238  # MahonyFilter_t 0x30
-A_SAFETY    = 0x200003d8  # SafetyState_t 0x1c
+MAP_PATH = Path(__file__).resolve().parents[1] / "stm32_firmware" / "stm32_firmware.map"
+
+def symbol_address(name):
+    text = MAP_PATH.read_text(encoding="utf-8", errors="replace")
+    match = re.search(rf"^\s+{re.escape(name)}\s+(0x[0-9a-fA-F]+)\s+Data\b", text, re.MULTILINE)
+    if match is None:
+        raise RuntimeError(f"cannot find {name} in {MAP_PATH}")
+    return int(match.group(1), 16)
+
+# Resolve addresses from the latest build instead of keeping stale literals.
+A_SYS_TICKS = symbol_address("g_system_ticks")
+A_BODY_GYRO = symbol_address("g_body_gyro")
+A_IMU       = symbol_address("g_imu")
+A_MAHONY    = symbol_address("g_mahony")
+A_SAFETY    = symbol_address("g_safety_state")
 
 def f(b, o): return struct.unpack_from("<f", b, o)[0]
 def u(b, o): return struct.unpack_from("<I", b, o)[0]
@@ -97,15 +107,20 @@ def main():
         # (1000 DRDY samples ≈ 1 s) so the first snapshot reflects steady state.
         print("waiting for gyro calibration (calib=1) ...", flush=True)
         waited = 0.0
+        calibrated = False
         while waited < 5.0:
             try:
                 d0 = snapshot(session)
             except Exception:
                 d0 = None
             if d0 and d0['calib'] == 1:
+                calibrated = True
                 break
             time.sleep(0.3); waited += 0.3
-        print(f"  (calib reached after ~{waited:.1f}s)\n")
+        if calibrated:
+            print(f"  (calib reached after ~{waited:.1f}s)\n")
+        else:
+            print(f"  (calib not reached after ~{waited:.1f}s; continuing)\n")
         prev_ticks = None
         for i in range(n):
             try:

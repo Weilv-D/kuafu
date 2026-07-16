@@ -9,14 +9,24 @@ Convention (firmware, st3215.c):
     position_rad = (raw_tick - 2048) * (2*pi/4096)
   => raw_tick    = position_rad / (2*pi/4096) + 2048
 """
-import struct, time, sys
+import re, statistics, struct, time, sys
+from pathlib import Path
 from pyocd.core.helpers import ConnectHelper
 
 PROBE = "LU_2022_8888"
 TARGET = "stm32f407zgtx"
 
-# g_servos[4] @ 0x200002cc, each ST3215_State_t is 0x20 bytes
-A_SERVOS = 0x200002cc
+MAP_PATH = Path(__file__).resolve().parents[1] / "stm32_firmware" / "stm32_firmware.map"
+
+def symbol_address(name):
+    text = MAP_PATH.read_text(encoding="utf-8", errors="replace")
+    match = re.search(rf"^\s+{re.escape(name)}\s+(0x[0-9a-fA-F]+)\s+Data\b", text, re.MULTILINE)
+    if match is None:
+        raise RuntimeError(f"cannot find {name} in {MAP_PATH}")
+    return int(match.group(1), 16)
+
+# Each ST3215_State_t is 0x20 bytes. Resolve the base from the latest build.
+A_SERVOS = symbol_address("g_servos")
 SERVO_STRIDE = 0x20
 OFF_POS_RAD = 0x04
 OFF_IS_ONLINE = 0x1c
@@ -27,13 +37,14 @@ RAD_TO_TICK = 1.0 / TICK_TO_RAD
 
 def read_servos(session):
     """Return list of (is_online, raw_tick, position_rad) for the 4 servos."""
+    # One contiguous SWD transfer is much more reliable than eight small reads
+    # when the powered 1 Mbps servo bus is injecting noise near SWD wiring.
+    data = bytes(session.target.read_memory_block8(A_SERVOS, 4 * SERVO_STRIDE))
     out = []
     for i in range(4):
-        base = A_SERVOS + i * SERVO_STRIDE
-        pos_bytes = bytes(session.target.read_memory_block8(base + OFF_POS_RAD, 4))
-        onl_byte = bytes(session.target.read_memory_block8(base + OFF_IS_ONLINE, 1))
-        pos_rad = struct.unpack("<f", pos_bytes)[0]
-        is_online = onl_byte[0]
+        base = i * SERVO_STRIDE
+        pos_rad = struct.unpack_from("<f", data, base + OFF_POS_RAD)[0]
+        is_online = data[base + OFF_IS_ONLINE]
         raw_tick = pos_rad * RAD_TO_TICK + 2048.0
         out.append((is_online, raw_tick, pos_rad))
     return out
@@ -43,7 +54,7 @@ def open_session(tries=6):
     for _ in range(tries):
         try:
             s = ConnectHelper.session_with_chosen_probe(
-                blocking=False, unique_id=PROBE, target_override=TARGET, frequency=1_000_000)
+                blocking=False, unique_id=PROBE, target_override=TARGET, frequency=100_000)
             if s is None:
                 raise RuntimeError("probe not found")
             s.options.set('connect_mode', 'under-reset')
@@ -77,11 +88,33 @@ def main():
         if n_online > 0:
             break
         time.sleep(0.5)
+    # g_servos[].is_online starts optimistic at 1, so the condition above can
+    # become true before every round-robin feedback slot has replaced the
+    # startup position (0 rad / tick 2048). Allow several complete poll rounds.
+    time.sleep(1.0)
     sv = read_servos(session)
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--capture":
+        samples = []
+        for _ in range(9):
+            samples.append(read_servos(session))
+            time.sleep(0.1)
+        print("\n=== CAPTURED (median of 9 samples) ===")
+        ticks = []
+        for i in range(4):
+            online = all(sample[i][0] for sample in samples)
+            raw_tick = statistics.median(sample[i][1] for sample in samples)
+            tick = max(0, min(4095, int(round(raw_tick))))
+            ticks.append(tick)
+            print(f"  {SERVO_NAMES[i]}: online={int(online)}  raw_tick={raw_tick:.1f} -> {tick}")
+        print("\nPut these into pin_config.h (replace SERVO_CENTER_INIT):")
+        print(f'  #define SERVO_CENTER_INIT  {{ {ticks[0]}, {ticks[1]}, {ticks[2]}, {ticks[3]} }}')
+        session.close()
+        return
 
     print("\nServo present-position monitor. Pose each leg at DWELL (mechanical")
     print("center) by hand — servos are free (torque off in FAULT/SERVO).")
-    print("Live tick values update below. Press ENTER to capture, Ctrl+C to quit.\n")
+    print("Live tick values update below. Press Ctrl+C to capture.\n")
 
     try:
         while True:

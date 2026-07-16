@@ -46,7 +46,7 @@ int kinematics_solve_ik_xy(float qx, float D0, float *q_hip_A, float *q_hip_B) {
     /* Safety clamping on D0 virtual leg length */
     float d0_clamped = clamp_float(D0, KIN_MIN_LEG_D0, KIN_MAX_LEG_D0);
 
-    /* Hip pivots: A chain (front) at -c, B chain (back) at +c, per sim model
+    /* Hip pivots: A chain at -c, B chain at +c, per sim model
      * (servo_LF/RF at x=-0.026, servo_LB/RB at x=+0.026). */
     const float hip_x_A = -KIN_LEG_C;
     const float hip_x_B = +KIN_LEG_C;
@@ -71,8 +71,8 @@ int kinematics_solve_ik_xy(float qx, float D0, float *q_hip_A, float *q_hip_B) {
 
     /* Dwell-relative angle, sign-matched to the sim/RL joint convention
      * (extension: hip_A negative, hip_B positive; see rl/env hip_*_target). */
-    *q_hip_A = -wrapped_delta(abs_A, ref_A); /* front chain, 0 at dwell */
-    *q_hip_B = -wrapped_delta(abs_B, ref_B); /* back chain, 0 at dwell */
+    *q_hip_A = -wrapped_delta(abs_A, ref_A); /* A chain, 0 at dwell */
+    *q_hip_B = -wrapped_delta(abs_B, ref_B); /* B chain, 0 at dwell */
 
     return 0;
 }

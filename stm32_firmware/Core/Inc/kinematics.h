@@ -7,8 +7,8 @@
  *        angles (radians), matching the sim/servo zero convention (dwell = 0).
  *
  * @param D0 Target virtual leg length (meters, range: 0.058m to 0.207m).
- * @param q_hip_A Out: Front (A-chain) crank angle, dwell-relative (radians).
- * @param q_hip_B Out: Back (B-chain) crank angle, dwell-relative (radians).
+ * @param q_hip_A Out: A-chain (pivot x=-c) crank angle, dwell-relative (radians).
+ * @param q_hip_B Out: B-chain (pivot x=+c) crank angle, dwell-relative (radians).
  * @return int 0 on success, -1 on failure (out of reachable workspace).
  */
 int kinematics_solve_ik(float D0, float *q_hip_A, float *q_hip_B);
