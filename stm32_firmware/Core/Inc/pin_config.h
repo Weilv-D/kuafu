@@ -38,6 +38,12 @@
 #define DDSM_LEFT_ID            1
 #define DDSM_RIGHT_ID           2
 
+/* Bench-only DDSM315 ID assignment. Set to 1..253, connect exactly one motor
+ * to the RS485 bus, power-cycle that motor, flash once, then restore to 0.
+ * The firmware sends the official ID-set frame five times while all wheel
+ * actuation remains disabled. */
+#define DDSM_ID_CALIBRATION_TARGET 0
+
 /* USART3: ST3215 Servo Port (full-duplex via Waveshare Bus Servo Adapter A).
  * The ST3215 single-wire half-duplex bus is converted to a 2-wire UART by the
  * adapter board; wire STM32 TX(PB10)->adapter TXD, RX(PB11)->adapter RXD
@@ -160,6 +166,7 @@
 #define SAFETY_MAX_PITCH_RAD    0.785398f       /* 45 degrees */
 #define SAFETY_MAX_PITCH_RATE_RAD_S 8.0f
 #define SAFETY_MAX_TEMP_C       65.0f
+#define SAFETY_OVERTEMP_DEBOUNCE_MS 100U
 #define SAFETY_HEARTBEAT_MS     200U            /* Pi heartbeat timeout */
 #define SAFETY_ACTION_MS        80U             /* RL action freshness timeout */
 #define SAFETY_IMU_MAX_AGE_MS   20U

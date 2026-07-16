@@ -1,29 +1,66 @@
 # KUAFU STM32 Firmware
 
-The STM32F407 owns baseline stabilization and actuator safety. The Pi5 supplies high-level commands and bounded residual actions; it does not send direct servo angles.
+The STM32F407ZG firmware owns actuator safety, device discovery, state estimation,
+baseline balance control, leg kinematics, and the real-time link to the Raspberry
+Pi 5. The firmware reached electronics bring-up acceptance on 2026-07-16 with the
+BMI088, two DDSM315 wheel motors, and four ST3215 servos powered together.
 
-## Control
+## Runtime
 
-- 250 Hz discrete LQR/LQI on position, pitch, velocity, and pitch rate.
-- Jerk-limited velocity/yaw references integrate to position/heading hold references.
-- Wheel decomposition is common torque plus yaw torque, with `tau_R > tau_L` defined as positive yaw.
-- 50 Hz leg control maps independent Qx/D0 residuals through five-bar IK.
-- Action freshness clears only learned residuals. Heartbeat freshness additionally commands zero velocity/yaw while preserving baseline hold. Hard actuator shutdown is reserved for true faults.
+- BMI088 sampling and Mahony attitude estimation run from the 1 kHz gyro DRDY
+  timebase.
+- LQR/LQI command calculation runs at 250 Hz.
+- The shared DDSM315 bus runs one request/response transaction every 4 ms and
+  alternates left ID 1 and right ID 2. Each wheel is therefore serviced at
+  125 Hz. Adapter echo and misaligned bytes are handled by a sliding CRC window.
+- ST3215 feedback is polled at 50 Hz. Startup broadcasts torque-disable to all
+  servos, completes discovery, then enables IDs 1–4 individually.
+- The Pi bridge uses USART6 at 921600 baud with circular DMA reception.
 
-`Core/Inc/kuafu_generated.h` is generated from `../kuafu_physics.py`. Verify it before firmware builds:
+## Actuator Safety
 
-```bash
-rl/.venv/bin/python rl/verify/generate_artifacts.py
+Wheel power is a separately authorized domain. Startup, `INIT`, `FAULT`, and a
+missing or incompatible Pi link use read-only DDSM feedback queries; they do not
+send a zero-current motion command and do not enable either wheel. Wheel enable
+requires all of the following:
+
+1. startup phase `READY`;
+2. no latched safety fault;
+3. a compatible Pi `HELLO` model hash;
+4. a fresh heartbeat; and
+5. an explicit `STAND`, `ACTIVE`, or `CLIMB` mode request.
+
+Loss of authorization disables both wheels. A stale action removes residual
+commands, while a stale heartbeat removes motion authorization. Temperature must
+remain above 65°C continuously for 100 ms before the over-temperature fault is
+latched, which rejects isolated telemetry spikes without weakening sustained
+over-temperature protection.
+
+## Calibrated Hardware Values
+
+- DDSM315 IDs: left 1, right 2.
+- ST3215 IDs and firmware order: `[1,2,3,4] = [A_l,A_r,B_l,B_r]`.
+- Servo dwell centers: `{275,1097,2809,1023}`.
+- Servo directions: `{+1,-1,+1,-1}`.
+- Increasing leg extension produces raw tick changes
+  `[decrease,increase,increase,decrease]`.
+- Battery voltage sensing is not populated. `battery_mv=0` means unavailable and
+  is never an undervoltage fault input.
+
+## Build And Test
+
+Run the host test suite and target build from the repository root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File stm32_firmware\tests\run_host_tests.ps1
+powershell -ExecutionPolicy Bypass -File stm32_firmware\tools\build_keil.ps1
 ```
 
-## UART
+The target project is `MDK-ARM/stm32_firmware.uvprojx`. The accepted build has
+zero compiler errors and zero warnings. Flash and inspect it with the tools under
+`MDK-ARM/debug_tools`. The final evidence is recorded in
+`../docs/validation/stm32-firmware-2026-07-16.md`.
 
-Frames are `A5 | version | type | length | seq:u16 | timestamp:u32 | payload | crc8 | 5A`. The streaming parser retains partial DMA-IDLE fragments, rejects CRC failures and replayed sequences, and separates heartbeat from action freshness. The normative payload and scale definitions are in `../docs/contracts/interface.md`.
-
-## Build And Bring-Up
-
-The checked-in target project is `MDK-ARM/stm32_firmware.uvprojx`. Host syntax checks can validate controller, kinematics, and protocol C files, but a Keil/ARM target build and HIL loopback remain required before flashing.
-
-Use `powershell -ExecutionPolicy Bypass -File tools/build_keil.ps1` for a warning-free reproducible target build. Read-only SWD health inspection and dry-run-first protocol cases are under `MDK-ARM/debug_tools`; follow `HIL_CHECKLIST.md` in order and keep wheel power off through the initial flash and IMU gate.
-
-Follow `../docs/hardware/calibration.md` and `../docs/validation/acceptance.md`; servo centers, mirror signs, IMU axes, and motor direction require hardware calibration. Battery sensing is not fitted, so diagnostic `battery_mv` is always the unavailable sentinel `0` and is never used as a fault input.
+The electronics gate does not replace mechanical motion acceptance. Wheel
+direction, yaw sign, tethered balance, and the five-bar range sweep remain ordered
+tests in `../docs/hardware/calibration.md` and `../docs/validation/acceptance.md`.

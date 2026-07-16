@@ -1,102 +1,81 @@
-# Hardware Wiring
+# STM32 Hardware Wiring
 
-Physical connections between the STM32F407ZG and the robot peripherals. Pin
-assignments are the source of truth in `stm32_firmware/Core/Inc/pin_config.h`;
-this document records the cable-level wiring and the gotchas that cost time
-during bring-up. Update it whenever a cable or adapter changes.
+`stm32_firmware/Core/Inc/pin_config.h` is the firmware pin source of truth. This
+document records the cable-level configuration that passed powered bring-up on
+2026-07-16.
 
-## Debug / Flash — DAPLink (CMSIS-DAP)
+## DAPLink
 
-SWD five-wire to the DAPLink. Required for flashing with pyOCD and for the
-non-intrusive memory reads used by `MDK-ARM/debug_tools/`.
+| DAPLink | STM32F407ZG | Note |
+|---|---|---|
+| SWCLK | PA14 / SWCLK | Debug clock |
+| SWDIO | PA13 / SWDIO | Debug data |
+| NRST | NRST | Required for reliable connect-under-reset |
+| GND | GND | Mandatory common ground |
+| 3V3 sense | 3V3 | Voltage reference; do not back-power a powered board |
 
-| DAPLink | STM32 | Note |
-|---------|-------|------|
-| SWCLK | SWCLK (PA14) | board pin usually labeled `CLK` |
-| SWDIO | SWDIO (PA13) | board pin usually labeled `DIO` |
-| 3V3 | 3V3 | only if the board is not self-powered |
-| GND | GND | mandatory, common ground |
-| RST/NRST | NRST | recommended; lets pyOCD reset the target |
+Probe ID is `LU_2022_8888`; target name is `stm32f407zgtx`.
 
-Gotcha: the board's SWD header may be labeled `GND 3V3 RST DIO CLK`. `RXD/TXD`
-next to it are the UART pair, not SWD — do not wire DAPLink UART pins to SWD.
-While the target runs at full speed (blocking I2C + watchdog) the initial SWD
-handshake is flaky; connect-under-reset (assert NRST during attach) is required.
+## BMI088
 
-## IMU — BMI088 (I2C)
+| STM32F407ZG | BMI088 | Configuration |
+|---|---|---|
+| PB8 | SCL | I2C1, 400 kHz |
+| PB9 | SDA | I2C1 |
+| PB1 | gyro INT3 | 1 kHz data-ready |
+| 3V3 | VCC | Sensor supply |
+| GND | GND | Common ground |
 
-| STM32 | BMI088 | Note |
-|-------|--------|------|
-| PB8 (I2C1_SCL) | SCL | AF4, open-drain, 400 kHz |
-| PB9 (I2C1_SDA) | SDA | AF4, open-drain |
-| PB1 (EXTI1) | GYRO INT3 | 1 kHz data-ready interrupt; drives the whole scheduler |
-| 3V3 / GND | VCC / GND | |
+The accelerometer address is `0x18`; the gyroscope address is `0x68`.
 
-The accelerometer and gyroscope are two dies at I2C addresses 0x18 and 0x68.
-`ACC_PWR_CTRL` (reg 0x7D) must be written 0x04 (not 0x03) or the accelerometer
-stays inactive and its data registers read zero — see `bmi088.c`. The PB1 DRDY
-interrupt increments `g_system_ticks`; if it does not fire, the main loop body
-never runs and no sensor is read.
+## DDSM315 Wheel Bus
 
-## Wheel Motors — DDSM315 (RS485)
+The installed RS485 board is an auto-direction module whose TTL labels describe
+electrical direction. The TTL pair must therefore be crossed:
 
-| STM32 | DDSM315 bus | Note |
-|-------|-------------|------|
-| PA2 (USART2_TX) | RS485 TX | half-duplex RS485, 115200 baud |
-| PA3 (USART2_RX) | RS485 RX | self-echo is discarded before each read |
-| GND | GND | |
+| STM32F407ZG | RS485 module | Configuration |
+|---|---|---|
+| PA2 / USART2_TX | RX | 115200 baud, 8N1 |
+| PA3 / USART2_RX | TX | Continuous receive |
+| GND | GND | Mandatory common ground |
 
-Left motor ID = 1, right motor ID = 2. Torque command is current-mode; the
-firmware maps body-frame torque to per-motor current. Direction signs
-`WHEEL_DIR_L/R` must be verified on the bench (calibration step 1).
+The differential pair that passed bring-up is:
 
-## Hip Servos — ST3215 (via Waveshare Bus Servo Adapter A)
+| RS485 module | DDSM315 bus |
+|---|---|
+| A | B |
+| B | A |
 
-The ST3215 is a single-wire half-duplex TTL bus servo. It connects to the
-STM32 through a **Waveshare Bus Servo Adapter (A)**, which converts the
-single-wire bus into a 2-wire UART. The firmware therefore uses USART3 in
-**full-duplex** mode (TX + RX on separate pins).
+Left motor ID is 1 and right motor ID is 2. Both motors share the differential
+pair. Change an ID only with one motor connected to the bus.
 
-| STM32 | Adapter board | Note |
-|-------|---------------|------|
-| PB10 (USART3_TX) | TXD | **same-name** (TX→TXD), per Waveshare wiki |
-| PB11 (USART3_RX) | RXD | **same-name** (RX→RXD) |
-| GND | GND | mandatory common ground |
+## ST3215 Servo Bus
 
-Servo IDs: LF=1, RF=2, LB=3, RB=4. Bus speed 1 Mbps, 8N1.
+The Waveshare Bus Servo Adapter A converts the single-wire servo bus to a
+two-wire UART. Its labels are used directly:
 
-These are firmware slot labels: `[LF,RF,LB,RB]` maps to joint wire order
-`[A_l,A_r,B_l,B_r]`. Use the A/B joint name and the direction table in
-`calibration.md` when checking motion; clockwise/counter-clockwise descriptions
-are ambiguous across the mirrored left and right mounting faces.
+| STM32F407ZG | Adapter A | Configuration |
+|---|---|---|
+| PB10 / USART3_TX | TXD | 1 Mbps, 8N1 |
+| PB11 / USART3_RX | RXD | Full-duplex UART side |
+| GND | GND | Mandatory common ground |
 
-Requirements / gotchas:
-- The adapter's **jumper must be in position A** (UART mode); position B is for
-  USB and will not pass UART traffic.
-- Wire same-name (MCU TX → board TXD, MCU RX → board RXD). The adapter crosses
-  the pair internally; crossing again on the MCU side breaks communication.
-- Servo power is independent of the STM32 3V3; share GND only.
-- ST3215 ships with ID = 0; each servo must be re-addressed to 1/2/3/4 with the
-  vendor tool before the firmware can query it.
-- The firmware was originally `HAL_HalfDuplex_Init` on PB10 only (single-wire).
-  Driving the single-wire bus directly works for native ST3215 without an
-  adapter, but with this adapter board a 2-wire full-duplex UART is required.
+The adapter jumper is in position A. Servo IDs and firmware order are
+`[1,2,3,4]=[A_l,A_r,B_l,B_r]`.
 
-## Pi5 Bridge — UART
+## Raspberry Pi 5 Link
 
-| STM32 | Pi5 | Note |
-|-------|-----|------|
-| PC6 (USART6_TX) | Pi RX | AF8, 921600 baud |
-| PC7 (USART6_RX) | Pi TX | RX uses DMA + IDLE line detection |
-| GND | GND | |
+| STM32F407ZG | Raspberry Pi 5 | Configuration |
+|---|---|---|
+| PC6 / USART6_TX | RX | 921600 baud |
+| PC7 / USART6_RX | TX | Circular DMA reception |
+| GND | GND | Mandatory common ground |
 
-Frames are `A5 | version | type | length | seq:u16 | timestamp:u32 | payload |
-crc8 | 5A`. The Pi must send a HELLO frame whose 16-byte payload equals
-`KUAFU_MODEL_HASH` before heartbeat/action traffic is accepted. See
-`docs/contracts/interface.md`.
+The Pi must send a compatible model-hash `HELLO`, a fresh heartbeat, and an
+explicit mode request before either wheel can be enabled.
 
-## Power / Common Ground
+## Power
 
-Every peripheral supply shares GND with the STM32. Servo and motor power must
-not be drawn from the STM32 3V3 rail. Verify battery sag under load as part of
-calibration (required measurement 7).
+Servo and wheel power are independent of the STM32 3V3 rail. All supplies share
+one ground reference. Battery voltage measurement is not wired; firmware reports
+`battery_mv=0` as unavailable and performs no battery-voltage fault check.

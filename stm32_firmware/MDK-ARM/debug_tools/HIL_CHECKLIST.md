@@ -1,33 +1,42 @@
 # STM32 Firmware HIL Checklist
 
-Record date, operator, firmware commit, HEX SHA-256, power state, and observed result for every gate. Stop immediately on unexpected motion, heat, noise, reset loops, or communication loss.
+Stop immediately on unexpected motion, heat, noise, resets, or communication
+loss. Keep the robot supported until the ordered motion gates explicitly allow
+ground contact.
 
-## Gate 1 — STM32 and IMU only
+## Electronics Gate
 
-- Wheels: unpowered. Servo power: off.
-- Flash under reset, then run `read_health.py` without `--under-reset`.
-- Expect advancing ticks, calibrated gyro, fresh IMU, INIT followed by actuator-discovery failure because actuators are absent, and no motion.
+- Flash with DAPLink connect-under-reset.
+- Confirm startup phase 4 (`READY`), fault mask zero, and safe `STAND`.
+- Confirm BMI088 initialized with age below 20 ms.
+- Confirm wheel IDs 1 and 2 are online with age below 50 ms.
+- Confirm servo IDs 1–4 are online with age below 250 ms.
+- Confirm temperatures remain below 65°C.
+- With no compatible Pi heartbeat, confirm both wheels remain disabled and still.
 
-## Gate 2 — Servo communication
+The 2026-07-16 accepted run met this gate: BMI088 0–1 ms, wheels 0–12 ms,
+servos 0–20 ms, BMI088 33.1–33.4°C, servos 41–43°C.
 
-- Wheels: unpowered. Robot mechanically supported. Servo adapter and servo power: on.
-- Confirm IDs 1–4, calibrated centers `{275,1097,2809,1023}`, and expected raw extension signs `[decrease,increase,increase,decrease]`.
-- Expect all four health ages to refresh. Torque direction must be checked at low torque before allowing position motion. Stop on any unexpected direction.
+## Servo Motion Gate
 
-## Gate 3 — Unloaded wheels
+- Robot supported; wheels remain unauthorized.
+- Start from centers `{275,1097,2809,1023}`.
+- A small extension must produce joint signs `[-,-,+,+]` and raw tick changes
+  `[decrease,increase,increase,decrease]`.
+- Return to dwell and verify no binding, skew, or sustained current rise.
 
-- Robot lifted clear of the ground; wheel direction cannot propel the chassis. Servos may remain supported.
-- Apply wheel power only after confirming INIT/FAULT commands are zero torque.
-- Confirm both wheel health records refresh and body-frame positive command/feedback signs agree. Do not perform a ground balance test here.
+## Wheel Motion Gate
 
-## Gate 4 — Pi protocol loopback
+- Robot lifted clear of the ground with immediate power cutoff available.
+- Establish a compatible Pi link and explicitly request a mode only for the
+  supervised test.
+- Verify one wheel at a time, then forward and yaw signs together.
+- Remove the heartbeat and confirm wheel authorization is revoked.
 
-- Robot supported; wheels unpowered unless Gate 3 already passed.
-- Run `hil_protocol.py` without `--send` first. Then select one scenario at a time with `--send --port COMx`.
-- Expect wrong hash/version/CRC/replay to be rejected, stale action to remove only residuals, stale heartbeat to enter hold, and emergency mode to latch FAULT.
+## Ground Gate
 
-## Gate 5 — Tethered ground test
-
-- Requires explicit operator authorization, mechanical tether, clear area, emergency power cut, and successful Gates 1–4.
-- Begin in STAND with zero velocity/yaw and no learned residual. Progress to ACTIVE only after sign checks.
-- Hardware acceptance remains incomplete until all P9 items in `docs/validation/acceptance.md` pass.
+- Requires passed electronics, servo motion, and wheel motion gates.
+- Use a tether, clear area, emergency power cutoff, zero learned residual, and
+  zero velocity/yaw command.
+- Progress from dwell hold to low-speed tracking, disturbances, slopes, and
+  steps in the order defined by `docs/validation/acceptance.md`.

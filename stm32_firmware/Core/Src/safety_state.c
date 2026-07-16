@@ -9,6 +9,8 @@ SafetyState_t g_safety_state;
 
 static uint32_t calibration_samples_count = 0U;
 static float calibration_sum[3] = {0.0f, 0.0f, 0.0f};
+static uint32_t overtemp_started_ms = 0U;
+static uint8_t overtemp_active = 0U;
 
 void safety_state_init(void) {
     memset(&g_safety_state, 0, sizeof(g_safety_state));
@@ -17,6 +19,8 @@ void safety_state_init(void) {
     calibration_sum[0] = 0.0f;
     calibration_sum[1] = 0.0f;
     calibration_sum[2] = 0.0f;
+    overtemp_started_ms = 0U;
+    overtemp_active = 0U;
 }
 
 void safety_state_trigger_fault(FaultMask_t fault) {
@@ -52,7 +56,15 @@ static FaultMask_t runtime_faults(const SafetyInputs_t *inputs) {
         faults |= FAULT_PITCH_RATE;
     }
     if (inputs->max_temp_c > SAFETY_MAX_TEMP_C) {
-        faults |= FAULT_OVERTEMP;
+        if (!overtemp_active) {
+            overtemp_active = 1U;
+            overtemp_started_ms = inputs->now_ms;
+        } else if ((uint32_t)(inputs->now_ms - overtemp_started_ms) >=
+                   SAFETY_OVERTEMP_DEBOUNCE_MS) {
+            faults |= FAULT_OVERTEMP;
+        }
+    } else {
+        overtemp_active = 0U;
     }
     if (!inputs->imu_fresh) {
         faults |= FAULT_IMU;

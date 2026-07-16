@@ -1,101 +1,65 @@
-# Hardware Calibration
-
-Hardware calibration is a release prerequisite. Record the robot serial number,
-firmware schema, physical-model hash, date, operator, raw measurements, and
-measurement uncertainty. Wiring must first match `wiring.md`; firmware pin and
-actuator settings live in `stm32_firmware/Core/Inc/pin_config.h`.
+# STM32 Hardware Calibration
 
 ## Servo Coordinate Contract
 
-Each side is a planar five-bar with an A-chain pivot at `x=-26 mm`, a B-chain
-pivot at `x=+26 mm`, and output point `(Qx,-D0)`. Dwell is `Qx=0`, `D0=58 mm`.
-Joint angles are relative to dwell, so all four reported joint positions are
-zero at that pose. Increasing `D0` means extending the leg and must satisfy:
+Each five-bar side has A and B chains. Dwell is `Qx=0`, `D0=58 mm`, where all
+four shared-frame joint angles are zero. Increasing `D0` extends the leg and
+requires:
 
 ```text
-qA < 0, dqA/dD0 < 0
-qB > 0, dqB/dD0 > 0
+A_l < 0    A_r < 0    B_l > 0    B_r > 0
 ```
 
-The firmware servo-array and UART wire order is `[A_l,A_r,B_l,B_r]`, represented
-by the legacy slot labels `[LF,RF,LB,RB]`. The Actor order is different:
-`[A_l,B_l,A_r,B_r]`. Do not interchange these orders, and do not infer the
-geometric chain from the `F/B` letters; `A/B` plus the pivot coordinate is the
-authoritative naming.
+Firmware and UART order is `[A_l,A_r,B_l,B_r]`, also represented by legacy slot
+names `[LF,RF,LB,RB]`. Do not use the Actor order or infer direction from the
+letters `F/B`.
 
-For servo index `i`, command and feedback use inverse mappings:
+Command and feedback use the inverse mapping:
 
 ```text
 raw_tick = center[i] + dir[i] * q[i] * 4096/(2*pi)
 q[i]     = dir[i] * (raw_tick - center[i]) * 2*pi/4096
 ```
 
-Because `dir` is either `+1` or `-1`, the same sign correctly maps both command
-and feedback. Clockwise/counter-clockwise wording is deliberately avoided: the
-left and right servos are viewed from opposite mounting faces. Raw tick change
-and five-bar motion are the unambiguous bench criteria.
+## Accepted Servo Zero And Direction Mapping
 
-## Calibrated Servo Mapping
-
-The dwell centers were measured on 2026-07-16 at `Qx=0`, `D0=58 mm`, using two
-consistent nine-sample median captures. The current mapping is:
-
-| Index | Slot / joint | ID | Dwell center | `dir` | Expected raw tick change when `D0` increases |
+| Index | Joint | ID | Dwell center | Direction | Raw tick when `D0` increases |
 |---:|---|---:|---:|---:|---|
-| 0 | LF / `A_l` | 1 | 275 | `+1` | decreases |
-| 1 | RF / `A_r` | 2 | 1097 | `-1` | increases |
-| 2 | LB / `B_l` | 3 | 2809 | `+1` | increases |
-| 3 | RB / `B_r` | 4 | 1023 | `-1` | decreases |
+| 0 | `A_l` | 1 | 275 | `+1` | decreases |
+| 1 | `A_r` | 2 | 1097 | `-1` | increases |
+| 2 | `B_l` | 3 | 2809 | `+1` | increases |
+| 3 | `B_r` | 4 | 1023 | `-1` | decreases |
 
-The centers and dwell hold are physically verified. The `dir` values express
-the intended mirrored mounting and are not considered physically accepted until
-the reduced-torque direction test below passes.
+The centers were measured from two consistent nine-sample median captures and
+the dwell pose held steadily. Direction is defined by the joint signs and tick
+changes above. Clockwise/counter-clockwise descriptions are intentionally not
+used because mirrored mounting faces reverse the observer's view.
 
-## Servo Direction Verification
+## Wheel Calibration State
 
-1. Keep wheel-motor power off, support the chassis, and provide immediate servo
-   power cutoff. Start at the measured dwell pose.
-2. Use reduced torque, speed, and acceleration. Command a small workspace move
-   such as `Qx=0`, `D0=63 mm`; do not test by sending arbitrary raw ticks.
-3. Both output points must move away from the hip-pivot line without lateral
-   skew or linkage binding. The expected raw tick pattern is
-   `LF down, RF up, LB up, RB down`.
-4. Telemetry in the shared joint frame must show `A_l<0`, `A_r<0`, `B_l>0`,
-   and `B_r>0`. Returning to `D0=58 mm` must return all four joint angles to
-   approximately zero and all raw ticks to their measured centers.
-5. If one actuator moves the wrong way, stop power immediately. Correct only
-   that actuator's `SERVO_DIR_INIT` entry; do not change its center to compensate
-   for a sign error.
-6. Repeat on both sides, then expand the sweep gradually toward `D0=207 mm` while
-   checking closure gap, current, temperature, and mechanical clearance.
+Left DDSM315 is ID 1 and right DDSM315 is ID 2. Both return valid 10-byte CRC
+frames. `WHEEL_DIR_L` and `WHEEL_DIR_R` remain `+1`; body-frame forward and yaw
+signs must be confirmed during the supervised unloaded-wheel motion gate before
+ground contact.
 
-## Remaining Required Measurements
+## Ordered Motion Gates
 
-1. Confirm positive left/right wheel torque produces positive chassis X motion.
-2. Confirm right torque greater than left produces positive yaw.
-3. Determine BMI088 axis permutation and signs for projected gravity, pitch
-   rate, roll rate, and yaw rate.
-4. Measure loaded wheel radius and the current/torque/speed curve of each
-   DDSM315.
-5. Verify ST3215 direction, range, velocity, acceleration, current/torque
-   relation, and thermal limit.
-6. Sweep the five-bar workspace at low torque and verify `D0=58-207 mm`, Qx
-   range, closure gap, and the joint-sign rules above on the physical assembly.
-7. Measure mass, COM, pitch inertia, wheel-ground friction, battery sag, and
-   telemetry age/jitter.
+1. Lift and secure the robot. Confirm both wheels remain disabled without Pi
+   authorization.
+2. At reduced servo speed and acceleration, command `Qx=0`, `D0=63 mm` and
+   confirm joint signs `[-,-,+,+]` and raw ticks `[down,up,up,down]`.
+3. Return to `D0=58 mm` and confirm all joint angles return near zero and raw
+   positions return to their calibrated centers.
+4. Apply a small positive command to one unloaded wheel at a time. Confirm the
+   configured body-frame velocity sign; stop immediately on the wrong direction.
+5. Confirm right torque greater than left produces the defined positive yaw.
+6. Expand the five-bar sweep gradually toward `D0=207 mm`, monitoring linkage
+   closure, current, temperature, and clearance.
+7. Perform tethered zero-command balance before flat-ground tracking.
 
-Physical geometry and controller parameters change only in `kuafu_physics.py`
-and require regenerated artifacts. Servo centers and mirror signs are
-robot-specific firmware calibration values. Domain-randomization ranges are
-centered on measured distributions rather than guessed broad intervals.
+The electronics bring-up record does not claim these motion gates. A failed
+direction, thermal, freshness, or mechanical-clearance check returns testing to
+the preceding safe gate.
 
-## Bring-Up Sequence
-
-1. Firmware protocol loopback with motors disabled.
-2. IMU and encoder sign checks.
-3. Servo dwell zero and reduced-torque direction verification.
-4. Reduced-torque five-bar range sweep.
-5. Tethered baseline hold at dwell.
-6. Low-speed forward, reverse, and yaw tracking.
-7. Residual action enable with watchdog fault injection.
-8. Pushes, slopes, then single steps.
+Battery-voltage calibration is not applicable because the sensing input is not
+connected.

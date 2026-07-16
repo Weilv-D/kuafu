@@ -8,6 +8,7 @@
 #define ST_INST_READ               0x02U
 #define ST_INST_WRITE              0x03U
 #define ST_INST_SYNC_WRITE         0x83U
+#define ST3215_BROADCAST_ID        0xFEU
 #define ST_REG_TORQUE_ENABLE       40U
 #define ST_REG_ACC                 41U
 #define ST_REG_PRESENT_POSITION_L  56U

@@ -56,6 +56,11 @@ void run_st3215_tests(void) {
     TEST_EQ_U8(ST_REG_TORQUE_ENABLE, packet[5]); TEST_EQ_U8(1U, packet[6]);
     TEST_EQ_U8(st_checksum(&packet[2], 5U), packet[7]);
 
+    TEST_EQ_INT(8, st3215_build_torque(packet, ST3215_BROADCAST_ID, 0U));
+    TEST_EQ_U8(ST3215_BROADCAST_ID, packet[2]);
+    TEST_EQ_U8(0U, packet[6]);
+    TEST_EQ_U8(st_checksum(&packet[2], 5U), packet[7]);
+
     memset(&state, 0, sizeof(state));
     state.id = 1U;
     device_health_init(&state.health);

@@ -73,6 +73,15 @@ void ddsm_build_query(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id) {
     packet[9] = crc8_calculate(packet, 9U);
 }
 
+void ddsm_build_set_id(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id) {
+    memset(packet, 0, DDSM_FRAME_SIZE);
+    packet[0] = 0xAAU;
+    packet[1] = 0x55U;
+    packet[2] = 0x53U;
+    packet[3] = id;
+    packet[9] = crc8_calculate(packet, 9U);
+}
+
 int ddsm_parse_feedback(const uint8_t packet[DDSM_FRAME_SIZE], DDSM_State_t *state) {
     int16_t raw_current;
     int16_t raw_speed;
@@ -191,8 +200,16 @@ void ddsm_bus_on_rx_byte(DDSM_Bus_t *bus, uint32_t now_ms) {
             }
         } else if ((bus->phase == DDSM_BUS_TX || bus->phase == DDSM_BUS_RX) &&
                    bus->target != NULL && bus->rx[0] == bus->target->id) {
-            finish_failure(bus, DEVICE_FAILURE_CHECKSUM);
-            bus->rx_len = 0U;
+            /* An auto-direction adapter can leave a partial echo directly in
+             * front of the motor reply. A target-ID byte at the start of one
+             * invalid window is therefore not a transaction boundary. Record
+             * the bad candidate and keep sliding until a complete frame or
+             * the bounded transaction deadline is reached. */
+            device_health_mark_failure(&bus->target->health,
+                                       DEVICE_FAILURE_CHECKSUM,
+                                       DDSM_OFFLINE_AFTER);
+            memmove(bus->rx, &bus->rx[1], DDSM_FRAME_SIZE - 1U);
+            bus->rx_len = DDSM_FRAME_SIZE - 1U;
         } else {
             memmove(bus->rx, &bus->rx[1], DDSM_FRAME_SIZE - 1U);
             bus->rx_len = DDSM_FRAME_SIZE - 1U;

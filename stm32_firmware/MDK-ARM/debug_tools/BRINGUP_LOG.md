@@ -1,73 +1,72 @@
-# Bring-Up Log — 2026-07-16
+# STM32 Bring-Up Record — 2026-07-16
 
-Chronological record of findings and decisions from the STM32 bring-up session.
-Debug method, SWD addresses, and reliability notes live in `README.md` (this
-file is the narrative; that file is the reference). Read both before resuming.
+## Accepted Configuration
 
-## Bugs Found And Fixed (committed to main)
+The STM32F407ZG runs with the BMI088, four ST3215 servos, and two DDSM315 wheel
+motors powered together. DAPLink probe `LU_2022_8888` provides SWD flashing and
+read-only runtime inspection. The accepted firmware starts in 1.739 seconds,
+reaches `READY`, enters safe `STAND`, and reports no fault. Wheel enable remains
+revoked until a compatible Pi explicitly authorizes a mode with a fresh
+heartbeat.
 
-### BMI088 accelerometer never enabled (commit cae3bb3)
-- SWD showed `g_imu.accel` all zeros while gyro was fine.
-- Root cause: `bmi088.c` wrote `0x03` to `ACC_PWR_CTRL` (0x7D); datasheet
-  requires `0x04` (bit2 = normal/active). The acc stayed inactive, so Mahony
-  lost its gravity reference and could not correct pitch/roll.
-- Fixed `0x03 → 0x04`. Verified: accel z ≈ +9.8 m/s² level, roll/pitch track tilt.
+## Physical Interfaces
 
-### USART3 half-duplex vs full-duplex adapter (commit 4cdb77b)
-- SWD showed every servo hit `consecutive_failures=3` → `FAULT_SERVO`.
-- Root cause: ST3215 servos sit behind a Waveshare Bus Servo Adapter (A) that
-  converts the single-wire servo bus to a 2-wire UART, but firmware used
-  `HAL_HalfDuplex_Init` on PB10 only (no RX).
-- Fixed: `HAL_UART_Init`, enable PB10 (TX) + PB11 (RX). Driver already used the
-  full-duplex HAL API. Wiring: jumper at A, same-name PB10→TXD / PB11→RXD.
+- BMI088: PB8 SCL, PB9 SDA, PB1 gyro DRDY.
+- DDSM315 auto-direction RS485 module: PA2 TX to module RX, PA3 RX from module
+  TX, common ground. The verified differential polarity is module A to motor B
+  and module B to motor A.
+- ST3215 Waveshare Bus Servo Adapter A: PB10 to TXD, PB11 to RXD, jumper A,
+  common ground, 1 Mbps.
+- DDSM315 IDs are left 1 and right 2. Each ID was assigned while only that motor
+  was connected to the RS485 bus.
+- ST3215 IDs are 1–4 in `[A_l,A_r,B_l,B_r]` order.
 
-## Servo Bus State
+## Servo Geometry
 
-The Waveshare adapter uses full-duplex USART3 with PB10→TXD, PB11→RXD, jumper A,
-and a common ground. IDs 1/2/3/4 were all read successfully in firmware order
-`[A_l,A_r,B_l,B_r]`. Two software faults found during isolation are fixed:
+The measured dwell pose is `(Qx,D0)=(0,58 mm)` with centers
+`{275,1097,2809,1023}` and directions `{+1,-1,+1,-1}`. Increasing `D0` requires
+joint signs `[A_l<0,A_r<0,B_l>0,B_r>0]` and raw tick changes
+`[decrease,increase,increase,decrease]`. The centers define zero; they are never
+used to compensate for an incorrect direction.
 
-- `System_Initial_Setup` refreshes the IWDG during blocking peripheral setup.
-- FAULT sends the four torque-disable packets once instead of flooding the
-  echoed full-duplex receive path every 20 ms.
+## DDSM315 Bus Behavior
 
-The formal firmware was rebuilt, flashed, and behaviorally verified with wheel
-power disconnected. All four servos enabled without a visible jump and held the
-measured dwell pose steadily. Powered-servo SWD remains electrically marginal:
-even at 100 kHz it can lose ACK after successful reads. Behavioral verification
-or the DAPLink CDC path is therefore preferred while the servo bus is powered.
+The bus uses 115200 baud, 10-byte frames, CRC-8/MAXIM, and one request followed
+by one response. A read-only `0x74` query is used whenever wheels are not
+authorized. The driver continuously receives bytes, removes exact local echo,
+and slides a 10-byte CRC window across shifted data. A malformed candidate does
+not prematurely terminate the transaction.
 
-## Servo Calibration State
+The total bus request rate is 250 Hz. Transactions alternate left and right, so
+each wheel is refreshed at 125 Hz. The transaction timeout is 4 ms, matching the
+vendor example. Final feedback age remained 0–12 ms for both motors.
 
-Dwell is `(Qx,D0)=(0,58 mm)`, with `qA=qB=0`. Two consistent nine-sample median
-captures produced:
+## Startup And Safety
 
-```text
-SERVO_CENTER_INIT = {275, 1097, 2809, 1023}  // [A_l,A_r,B_l,B_r]
-```
+Startup waits for power stabilization, initializes BMI088, collects 1000 gyro
+samples, configures both wheels disabled, broadcasts ST3215 torque-disable, and
+then begins regular feedback polling. Configuration commands are retried while
+their bus is busy and the step advances only after a command is accepted.
 
-The centers and dwell hold are verified. The intended mirror mapping is
-`SERVO_DIR_INIT={+1,-1,+1,-1}`. For increasing D0, the shared joint signs must
-be `[A_l<0,A_r<0,B_l>0,B_r>0]` and raw ticks must
-`[decrease,increase,increase,decrease]`. This direction mapping still requires the reduced-torque
-physical test in `docs/hardware/calibration.md`; center values must not be used
-to compensate for a direction error.
+The earlier uncontrolled wheel motion occurred when startup enabled the wheels
+and entered balance control without explicit Pi authorization. The accepted
+firmware separates wheel authorization from startup readiness. No Pi
+authorization means no wheel enable and no wheel torque command.
 
-## IMU State
+Battery voltage sensing is not connected. Diagnostic value zero is the defined
+unavailable sentinel and does not create a voltage fault.
 
-After reseating the wiring, PB1 data-ready recovered. Formal-firmware reads
-showed `g_system_ticks` advancing at approximately 1038 Hz and acceleration
-magnitude near 9.96 m/s². The board was resting on its side, so gravity appeared
-primarily on the sensor X axis. The earlier single-interrupt condition is no
-longer present.
+## Final Evidence
 
-## Next Bench Gates
+- Host firmware test suite: 100% passed.
+- Keil target build: 0 errors, 0 warnings.
+- Final HEX size: 69,523 bytes.
+- pyOCD flash: 32,768 bytes erased and 25,600 bytes programmed.
+- Startup: `READY` at 1.739 s, safe `STAND`, fault mask `0x00000000`.
+- BMI088: initialized, 0–1 ms age, 33.1–33.4°C.
+- DDSM315: both online, 0–12 ms age, wheels stationary without Pi authorization.
+- ST3215: all four online, 0–20 ms age, 41–43°C.
 
-1. Keep wheel power off and verify the four servo directions with a small move
-   from `D0=58 mm` to `D0=63 mm` at reduced torque, speed, and acceleration.
-2. Confirm telemetry signs and raw tick changes against the calibration table.
-3. Expand gradually to the five-bar range sweep, monitoring closure, current,
-   temperature, and clearance.
-4. Improve the servo/SWD electrical path before relying on long powered SWD
-   sessions: shorten or twist TX/RX, use a common-ground bus bar, and consider a
-   lower servo baud rate configured consistently in the servos and firmware.
+This completes STM32 firmware and electronics bring-up. Mechanical motion gates
+remain ordered and supervised: servo direction motion, wheel body-frame signs,
+tethered balance, and the five-bar range sweep.

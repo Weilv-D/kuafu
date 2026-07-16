@@ -37,7 +37,7 @@ def main() -> None:
     from pyocd.core.helpers import ConnectHelper
 
     addresses = {name: symbol_address(name) for name in
-                 ("g_system_ticks", "uwTick", "g_imu", "g_ddsm_left", "g_ddsm_right", "g_servos", "g_safety_state")}
+                 ("g_system_ticks", "uwTick", "g_imu", "g_ddsm_left", "g_ddsm_right", "g_servos", "g_safety_state", "g_startup_manager", "g_actuator_discovery_step", "g_actuator_configured")}
     addresses["g_st3215_bus"] = symbol_address("g_st3215_bus")
     addresses["huart3"] = symbol_address("huart3")
     addresses["g_ddsm_bus"] = symbol_address("g_ddsm_bus")
@@ -59,6 +59,9 @@ def main() -> None:
             tick = session.target.read32(addresses["g_system_ticks"])
             mode = session.target.read8(addresses["g_safety_state"])
             fault = session.target.read32(addresses["g_safety_state"] + 8)
+            startup = bytes(session.target.read_memory_block8(addresses["g_startup_manager"], 12))
+            actuator_step = session.target.read8(addresses["g_actuator_discovery_step"])
+            actuator_configured = session.target.read8(addresses["g_actuator_configured"])
             imu = bytes(session.target.read_memory_block8(addresses["g_imu"], 0x34))
             left = bytes(session.target.read_memory_block8(addresses["g_ddsm_left"], 0x20))
             right = bytes(session.target.read_memory_block8(addresses["g_ddsm_right"], 0x20))
@@ -75,9 +78,13 @@ def main() -> None:
             records += [(f"servo_{i + 1}", decode_health(servos, i * 0x28 + 0x1C)) for i in range(4)]
             session.target.resume()
             print(f"drdy_tick={tick} hal_ms={hal_tick} mode={mode} fault=0x{fault:08x}")
+            startup_phase, startup_since, startup_next = struct.unpack_from("<III", startup)
+            print(f"  startup  phase={startup_phase} since_ms={startup_since} next_ms={startup_next} "
+                  f"actuator_step={actuator_step} configured={actuator_configured}")
             accel = struct.unpack_from("<3f", imu, 0x04)
             gyro = struct.unpack_from("<3f", imu, 0x10)
             print(f"  bmi088   initialized={imu[0x31]} init_state={imu[0x30]} "
+                  f"temp_c={struct.unpack_from('<f', imu, 0x1C)[0]:.1f} "
                   f"accel=({accel[0]:.3f},{accel[1]:.3f},{accel[2]:.3f}) "
                   f"gyro=({gyro[0]:.4f},{gyro[1]:.4f},{gyro[2]:.4f})")
             print(f"  i2c1     state=0x{i2c1[0x3D]:02x} mode=0x{i2c1[0x3E]:02x} "
@@ -93,8 +100,12 @@ def main() -> None:
             for name, health in records:
                 age = "never" if health["last"] == 0 else str((hal_tick - health["last"]) & 0xFFFFFFFF)
                 errors = health["timeout"] + health["checksum"] + health["protocol"]
+                temp = ""
+                if name.startswith("servo_"):
+                    index = int(name[-1]) - 1
+                    temp = f" temp_c={struct.unpack_from('<f', servos, index * 0x28 + 0x10)[0]:.1f}"
                 print(f"  {name:8s} online={health['online']} age_ms={age:>5} "
-                      f"errors={errors} consecutive={health['consecutive']}")
+                      f"errors={errors} consecutive={health['consecutive']}{temp}")
             time.sleep(args.interval)
     finally:
         session.close()

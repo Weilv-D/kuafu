@@ -55,6 +55,13 @@ void run_ddsm315_tests(void) {
     TEST_EQ_U8(0x74U, packet[1]);
     TEST_EQ_U8(crc8_calculate(packet, 9U), packet[9]);
 
+    ddsm_build_set_id(packet, 2U);
+    TEST_EQ_U8(0xAAU, packet[0]);
+    TEST_EQ_U8(0x55U, packet[1]);
+    TEST_EQ_U8(0x53U, packet[2]);
+    TEST_EQ_U8(2U, packet[3]);
+    TEST_EQ_U8(0x92U, packet[9]);
+
     make_feedback(frame, 1U);
     TEST_EQ_INT(0, ddsm_parse_feedback(frame, &state));
     TEST_TRUE(state.torque < 0.0f);
@@ -97,6 +104,8 @@ void run_ddsm315_tests(void) {
     ddsm_bus_step(&bus, 22U);
     TEST_EQ_INT(DDSM_BUS_TX, bus.phase);
     ddsm_bus_step(&bus, 23U);
+    TEST_EQ_INT(DDSM_BUS_TX, bus.phase);
+    ddsm_bus_step(&bus, 24U);
     TEST_TRUE(ddsm_bus_is_idle(&bus));
     TEST_EQ_INT(0, (int)test_uart_abort_count());
     TEST_EQ_INT(1, (int)state.health.timeout_count);
@@ -115,5 +124,9 @@ void run_ddsm315_tests(void) {
     frame[9] ^= 1U;
     feed_bus(&bus, frame, DDSM_FRAME_SIZE, 41U);
     TEST_EQ_INT(1, (int)state.health.checksum_count);
+    TEST_EQ_INT(DDSM_BUS_RX, bus.phase);
+    make_feedback(frame, 1U);
+    feed_bus(&bus, frame, DDSM_FRAME_SIZE, 42U);
     TEST_TRUE(ddsm_bus_is_idle(&bus));
+    TEST_EQ_INT(0, (int)state.health.consecutive_failures);
 }

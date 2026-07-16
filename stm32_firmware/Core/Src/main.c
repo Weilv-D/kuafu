@@ -32,6 +32,9 @@ LQRController_t g_lqr;
 DDSM_State_t g_ddsm_left;
 DDSM_State_t g_ddsm_right;
 ST3215_State_t g_servos[4];
+StartupManager_t g_startup_manager;
+uint8_t g_actuator_discovery_step;
+uint8_t g_actuator_configured;
 static DDSM_Bus_t g_ddsm_bus;
 static ST3215_Bus_t g_st3215_bus;
 
@@ -99,6 +102,19 @@ int main(void) {
     g_ddsm_right.id = DDSM_RIGHT_ID;
     device_health_init(&g_ddsm_left.health);
     device_health_init(&g_ddsm_right.health);
+#if DDSM_ID_CALIBRATION_TARGET > 0
+    {
+        uint8_t id_packet[DDSM_FRAME_SIZE];
+        uint8_t repeat;
+        ddsm_build_set_id(id_packet, DDSM_ID_CALIBRATION_TARGET);
+        safety_state_trigger_fault(FAULT_WHEEL_LEFT | FAULT_WHEEL_RIGHT);
+        HAL_Delay(250U);
+        for (repeat = 0U; repeat < 5U; ++repeat) {
+            (void)HAL_UART_Transmit(&huart2, id_packet, DDSM_FRAME_SIZE, 20U);
+            HAL_Delay(4U);
+        }
+    }
+#endif
     ddsm_bus_init(&g_ddsm_bus, &huart2);
     for (int i = 0; i < 4; i++) {
         g_servos[i].id = i + 1; /* IDs: 1, 2, 3, 4 */
@@ -123,16 +139,14 @@ int main(void) {
 #endif
 
     uint32_t last_tick = 0;
-    uint32_t next_right_tick = 6U;
+    uint32_t next_wheel_tx_ms = 0U;
+    uint8_t next_wheel_is_right = 0U;
     uint8_t active_servo_query_idx = 0;
     uint32_t last_servo_query_ms = 0U;
     uint8_t fault_servo_disable_idx = 0U;
     uint32_t temp_refresh_counter = 0;
     uint8_t health_telemetry_divider = 0U;
-    StartupManager_t startup_manager;
     uint8_t bmi_init_in_progress = 0U;
-    uint8_t actuator_discovery_step = 0U;
-    uint8_t actuator_configured = 0U;
     uint8_t servo_enable_step = 0U;
     uint8_t servos_enabled = 0U;
     uint8_t wheel_enable_mask = 0U;
@@ -142,7 +156,7 @@ int main(void) {
     uint8_t control_deadline_pending = 0U;
     uint8_t servo_deadline_pending = 0U;
 
-    startup_manager_init(&startup_manager, HAL_GetTick());
+    startup_manager_init(&g_startup_manager, HAL_GetTick());
     firmware_runtime_init(&firmware_runtime, HAL_GetTick());
 
     /* Main background scheduler loop */
@@ -172,7 +186,7 @@ int main(void) {
         Actuator_Feedback_Snapshot(&left_feedback, &right_feedback, servo_feedback);
         Pi_Command_Snapshot(&runtime_heartbeat, &runtime_action);
         (void)runtime_action;
-        wheel_authorized = (uint8_t)(startup_manager.phase == STARTUP_READY &&
+        wheel_authorized = (uint8_t)(g_startup_manager.phase == STARTUP_READY &&
                                      g_safety_state.current_mode != STATE_FAULT &&
                                      pi_link_is_compatible() && pi_link_heartbeat_fresh() &&
                                      runtime_heartbeat.mode_request >= (uint8_t)STATE_STAND &&
@@ -214,36 +228,37 @@ int main(void) {
                                                                startup_now,
                                                                SAFETY_WHEEL_MAX_AGE_MS);
         startup_inputs.servos_online = startup_servos_online;
-        startup_inputs.actuator_configured = actuator_configured;
-        startup_outputs = startup_manager_step(&startup_manager, &startup_inputs);
+        startup_inputs.actuator_configured = g_actuator_configured;
+        startup_outputs = startup_manager_step(&g_startup_manager, &startup_inputs);
 
         if (startup_outputs.request_imu_init && !g_imu.initialized && !bmi_init_in_progress) {
             bmi088_begin_init(&g_imu, &hi2c1, startup_now);
             bmi_init_in_progress = 1U;
         }
 
-        if (startup_outputs.request_actuator_discovery && !actuator_configured) {
+        if (g_startup_manager.phase == STARTUP_ACTUATOR_DISCOVERY &&
+            !g_actuator_configured) {
             int discovery_result = -1;
-            if (actuator_discovery_step == 0U) {
+            if (g_actuator_discovery_step == 0U) {
                 discovery_result = ddsm_bus_queue_mode(&g_ddsm_bus, &g_ddsm_left,
                                                        DDSM_MODE_CURRENT, startup_now);
-            } else if (actuator_discovery_step == 1U) {
+            } else if (g_actuator_discovery_step == 1U) {
                 discovery_result = ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_left,
                                                          0U, startup_now);
-            } else if (actuator_discovery_step == 2U) {
+            } else if (g_actuator_discovery_step == 2U) {
                 discovery_result = ddsm_bus_queue_mode(&g_ddsm_bus, &g_ddsm_right,
                                                        DDSM_MODE_CURRENT, startup_now);
-            } else if (actuator_discovery_step == 3U) {
+            } else if (g_actuator_discovery_step == 3U) {
                 discovery_result = ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_right,
                                                          0U, startup_now);
-            } else if (actuator_discovery_step < 8U) {
+            } else if (g_actuator_discovery_step == 4U) {
                 discovery_result = st3215_bus_queue_torque(
-                    &g_st3215_bus, (uint8_t)(actuator_discovery_step - 3U), 0U);
+                    &g_st3215_bus, ST3215_BROADCAST_ID, 0U);
             }
-            if (actuator_discovery_step < 8U && discovery_result == 0) {
-                ++actuator_discovery_step;
+            if (g_actuator_discovery_step < 5U && discovery_result == 0) {
+                ++g_actuator_discovery_step;
             }
-            actuator_configured = (uint8_t)(actuator_discovery_step >= 8U);
+            g_actuator_configured = (uint8_t)(g_actuator_discovery_step >= 5U);
         }
 
         if (startup_outputs.enable_actuators && !servos_enabled &&
@@ -283,6 +298,30 @@ int main(void) {
                 }
             } else if (ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_right, 0U, startup_now) == 0) {
                 wheel_enable_mask &= (uint8_t)~0x02U;
+            }
+        }
+
+        /* The DDSM315 bus permits at most one request/response transaction per
+         * 4 ms.  Dispatch exactly one motor at each bus deadline and alternate
+         * sides after every successful submission.  This keeps both feedback
+         * ages bounded even when one motor times out or adapter echo shifts a
+         * frame, and avoids two independent deadlines becoming phase-locked. */
+        if (g_actuator_discovery_step >= 4U && ddsm_bus_is_idle(&g_ddsm_bus) &&
+            (int32_t)(startup_now - next_wheel_tx_ms) >= 0) {
+            int wheel_result;
+            DDSM_State_t *wheel = next_wheel_is_right ? &g_ddsm_right : &g_ddsm_left;
+            float torque = next_wheel_is_right
+                         ? WHEEL_DIR_R * g_ctrl_tau_r
+                         : WHEEL_DIR_L * g_ctrl_tau_l;
+            if (runtime_outputs.wheel_intent_allowed) {
+                wheel_result = ddsm_bus_queue_torque(&g_ddsm_bus, wheel,
+                                                     torque, startup_now);
+            } else {
+                wheel_result = ddsm_bus_queue_query(&g_ddsm_bus, wheel, startup_now);
+            }
+            if (wheel_result == 0) {
+                next_wheel_is_right ^= 1U;
+                next_wheel_tx_ms = startup_now + 4U;
             }
         }
 
@@ -345,11 +384,10 @@ int main(void) {
             /* 3. Run the 250 Hz motor deadline and lower-rate telemetry slots. */
             uint8_t slot = last_tick % 4;
             uint8_t control_due = control_deadline_pending;
-            uint8_t right_due = (uint8_t)((int32_t)(last_tick - next_right_tick) >= 0);
             if (control_due) control_deadline_pending = 0U;
 
             /* Safety state machine update (at 250 Hz, inside slot scheduler) */
-            if (control_due && startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY) {
+            if (control_due && g_startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY) {
                 float max_temp = g_imu.temperature;
                 for (int i = 0; i < 4; i++) {
                     if (servo_feedback[i].temperature_c > max_temp) {
@@ -395,8 +433,8 @@ int main(void) {
                 }
             }
 
-            /* --- Slot 0: Compute LQR (once/cycle), command & poll Left DDSM --- */
-            if (control_due && startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY) {
+            /* --- Control deadline: compute and cache both wheel commands --- */
+            if (control_due && g_startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY) {
                 if (runtime_outputs.wheel_intent_allowed) {
                     /* Snapshot Pi commands atomically (updated in USART6 ISR) */
                     Pi_Command_Heartbeat_t hb;
@@ -431,28 +469,10 @@ int main(void) {
                                 &g_ctrl_tau_l,
                                 &g_ctrl_tau_r);
 
-                    (void)ddsm_bus_queue_torque(&g_ddsm_bus, &g_ddsm_left,
-                                                WHEEL_DIR_L * g_ctrl_tau_l,
-                                                last_tick);
                 } else {
                     /* Safe stop wheels if in FAULT or INIT */
                     g_ctrl_tau_l = 0.0f;
                     g_ctrl_tau_r = 0.0f;
-                    (void)ddsm_bus_queue_query(&g_ddsm_bus, &g_ddsm_left, last_tick);
-                }
-            }
-
-            /* The right motor has an independent staggered deadline. This keeps
-             * the two blocking half-duplex transactions from routinely sharing
-             * one 4 ms control slot. */
-            if (right_due && startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY) {
-                next_right_tick = last_tick + 4U;
-                if (runtime_outputs.wheel_intent_allowed) {
-                    (void)ddsm_bus_queue_torque(&g_ddsm_bus, &g_ddsm_right,
-                                                WHEEL_DIR_R * g_ctrl_tau_r,
-                                                last_tick);
-                } else {
-                    (void)ddsm_bus_queue_query(&g_ddsm_bus, &g_ddsm_right, last_tick);
                 }
             }
 
@@ -522,7 +542,7 @@ int main(void) {
 
         /* --- 50 Hz Background Loop: ST3215 Servo Control --- */
         uint32_t current_time = HAL_GetTick();
-        if (startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY && servo_deadline_pending) {
+        if (g_actuator_configured && servo_deadline_pending) {
             servo_deadline_pending = 0U;
 
             uint8_t ids[4] = {SERVO_LF_ID, SERVO_RF_ID, SERVO_LB_ID, SERVO_RB_ID};
@@ -611,7 +631,7 @@ int main(void) {
         /* Poll every servo round-robin, including offline devices, so a valid
          * frame can restore health after line noise or a temporary disconnect. */
         current_time = HAL_GetTick();
-        if (startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY &&
+        if (g_startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY &&
             current_time - last_servo_query_ms >= 5U &&
             st3215_bus_queue_read(&g_st3215_bus,
                                   &g_servos[active_servo_query_idx],

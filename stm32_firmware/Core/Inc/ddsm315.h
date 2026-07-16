@@ -10,7 +10,7 @@
 #define DDSM_MODE_POSITION       3U
 #define DDSM_MODE_DISABLE        9U
 #define DDSM_FRAME_SIZE         10U
-#define DDSM_TRANSACTION_TIMEOUT_MS 3U
+#define DDSM_TRANSACTION_TIMEOUT_MS 4U
 
 typedef struct {
     uint8_t id;
@@ -44,6 +44,7 @@ void ddsm_build_speed(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, float rpm);
 void ddsm_build_enable(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, uint8_t enable);
 void ddsm_build_mode(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, uint8_t mode);
 void ddsm_build_query(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id);
+void ddsm_build_set_id(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id);
 int ddsm_parse_feedback(const uint8_t packet[DDSM_FRAME_SIZE], DDSM_State_t *state);
 
 void ddsm_bus_init(DDSM_Bus_t *bus, UART_HandleTypeDef *huart);
