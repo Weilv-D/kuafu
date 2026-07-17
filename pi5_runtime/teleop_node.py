@@ -39,7 +39,14 @@ def _make_source(device: str):
     # device == "gamepad": fall back to keyboard if no joystick is present.
     try:
         from rl.teleop.gamepad_source import GamepadSource
-        return GamepadSource()
+        src = GamepadSource()
+        print(f"[teleop] {src._joy.get_name()}: "
+              f"v=ax{src._axis_v}{'(inv)' if src._invert_v else ''} "
+              f"w=ax{src._axis_w} lt=ax{src._axis_lt} rt=ax{src._axis_rt} "
+              f"estop=btn{src._btn_estop}")
+        print("[teleop] (override with KUAFU_AXIS_V/W/LT/RT, "
+              "KUAFU_BTN_ESTOP, KUAFU_AXIS_V_INVERT)")
+        return src
     except RuntimeError:
         print("[teleop] no gamepad detected; falling back to keyboard")
         from rl.teleop.keyboard_source import KeyboardSource
