@@ -35,13 +35,22 @@ D0_CMD_RANGE = (P.D0_MIN, P.D0_MAX)        # (58, 207) mm
 class Mode(Enum):
     """命令源工作模式。
 
-    MANUAL     - 手柄/键盘直接控制(人全程操控)
+    模式到固件 wire mode 的映射(见 serial_node._mode_to_firmware_mode):
+      MANUAL     -> ACTIVE(2): 轮出力 + RL 残差, 摇杆跟踪命令
+      IDLE       -> STAND(1) : LQR 保持平衡(轮仍输出平衡扭矩), 摇杆不跟走, RL 残差关
+      AUTONOMOUS -> ACTIVE(2): 自主规划器驱动
+      ASSISTED   -> ACTIVE(2): 保留: 自主主速度 + 人叠加微调(本期不实现)
+      ESTOP      -> FAULT(4) : 急停锁存, 需重启解锁
+
+    MANUAL     - 操作者 ARMED: 手柄/键盘直接控制(人全程操控)
+    IDLE       - 操作者 DISARMED: 请求 STAND 保平衡但不出行走命令
     AUTONOMOUS - 自主规划器控制(机器自己走)
     ASSISTED   - 保留: 自主给主速度 + 人叠加微调(本期不实现)
-    ESTOP      - 急停: 输出归零并保持当前 d0, 锁定
+    ESTOP      - 急停: 输出归零并保持当前 d0, 锁存直到 ARM 解除
     """
 
     MANUAL = "manual"
+    IDLE = "idle"
     AUTONOMOUS = "autonomous"
     ASSISTED = "assisted"
     ESTOP = "estop"
@@ -100,3 +109,10 @@ class ArbiterConfig:
     v_limit: tuple[float, float] = V_CMD_RANGE
     w_limit: tuple[float, float] = W_CMD_RANGE
     d0_limit: tuple[float, float] = D0_CMD_RANGE
+    # --- 输入整形(从源魔数上提, 两源共享, 见 rl/teleop/shaping.py) ---
+    stick_deadzone: float = 0.08           # 摇杆死区(归一化单位)
+    stick_gamma: float = 2.0               # 摇杆响应曲线指数(2=平方, 1=线性)
+    trigger_deadzone: float = 0.10         # 扳机死区(防误触 d0 漂移)
+    d0_rate_mm_s: float = 40.0             # D0 调节速率(统一 gamepad/keyboard 的 40.0)
+    # --- 安全加固 ---
+    max_smoothing_dt: float = 0.10         # ramp 的 dt 上限, 防首帧/长间隔突跳

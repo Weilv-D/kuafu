@@ -25,6 +25,17 @@ from pi5_runtime.command_socket import COMMAND_SOCKET_PATH, CommandSocketServer
 
 from rl.teleop.command import Command, Mode
 
+# wire mode(firmware RobotMode) -> teleop Mode 的完整映射。
+# 0=INIT, 1=STAND, 2=ACTIVE, 3=CLIMB, 4=FAULT。INIT/FAULT 降级为 ESTOP;
+# STAND 透传为 IDLE(保平衡不跟走); ACTIVE/CLIMB 透传为 MANUAL(出力)。
+_WIRE_TO_MODE = {
+    0: Mode.ESTOP,
+    1: Mode.IDLE,
+    2: Mode.MANUAL,
+    3: Mode.MANUAL,
+    4: Mode.ESTOP,
+}
+
 
 class IPCCommandSource:
     """Unix socket 命令源。name 属性 + poll() 满足 CommandSource Protocol。"""
@@ -44,8 +55,9 @@ class IPCCommandSource:
         frame = self._server.recv_command()
         if frame is None:
             return None
-        # mode==4(FAULT) 是 teleop 进程发的急停, 透传为 ESTOP 让仲裁器最高优先级接管。
-        mode = Mode.ESTOP if frame["mode"] == 4 else Mode.MANUAL
+        # wire mode 完整透传: 0/4=ESTOP, 1=IDLE(STAND), 2/3=MANUAL(ACTIVE/CLIMB)。
+        # 未知值降级为 ESTOP(安全侧失败)。
+        mode = _WIRE_TO_MODE.get(int(frame["mode"]), Mode.ESTOP)
         # stamp 来自发送方 time.monotonic(); 与接收方同一时钟域(Pi5 单机),
         # 仲裁器用 stamp 判新鲜度。若跨机部署需改用对齐时间戳, 但本设计是同机双进程。
         return Command(

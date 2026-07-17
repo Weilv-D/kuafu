@@ -79,6 +79,7 @@ class CommandArbiter:
                 cached.append(cmd)
 
         manual_cmd = next((c for c in cached if c.mode == Mode.MANUAL), None)
+        idle_cmd = next((c for c in cached if c.mode == Mode.IDLE), None)
         auto_cmd = next((c for c in cached if c.mode == Mode.AUTONOMOUS), None)
         estop = any(c.mode == Mode.ESTOP for c in cached)
 
@@ -90,7 +91,7 @@ class CommandArbiter:
 
         # 若当前锁定在急停, 需要一个有效源来解锁
         if self._estop_locked:
-            if manual_cmd is None and auto_cmd is None:
+            if manual_cmd is None and auto_cmd is None and idle_cmd is None:
                 target = Command(0.0, 0.0, self._last_output.d0, Mode.ESTOP, now)
                 return self._emit(target, now)  # 仍无有效源, 保持急停
             self._estop_locked = False    # 解锁
@@ -102,6 +103,13 @@ class CommandArbiter:
             self._manual_idle_since = None
             self._switch_mode(Mode.MANUAL, now)
             target = manual_cmd
+        elif idle_cmd is not None:
+            # 操作者显式 DISARMED(按 disarm 键) -> 请求 STAND 保平衡但不跟走。
+            # 优先级低于 manual_active(摇杆一动即重新 ARMED), 高于 autonomous。
+            # GamepadSource 在 DISARMED 时发 IDLE 且 v=w=0, 故不会与 manual_active 冲突。
+            self._manual_idle_since = None
+            self._switch_mode(Mode.IDLE, now)
+            target = Command(0.0, 0.0, idle_cmd.d0, Mode.IDLE, now)
         elif auto_cmd is not None:
             # 手柄未活跃(松手/死区内): handoff_time 内保持 MANUAL 给人反应时间,
             # 超时后交还自主
@@ -153,7 +161,10 @@ class CommandArbiter:
         对模式切换 / 手柄 idle↔active / 急停 统一平滑, 避免速度/蹲起量瞬间跳变摔机。
         """
         cfg = self.cfg
-        dt = now - self._last_cmd_time
+        # 限幅 dt: 首帧(_last_cmd_time=0) 或长间隔(调度抖动/GC暂停)会让 dt 很大,
+        # alpha 饱和到 1.0 使输出一步跳到 target, 击穿 ramp 保护。限制到
+        # max_smoothing_dt(默认 0.1s) 保证任意单步过渡不快于 ramp_time 的最小粒度。
+        dt = min(now - self._last_cmd_time, cfg.max_smoothing_dt)
         alpha = min(1.0, dt / cfg.ramp_time) if cfg.ramp_time > 0 else 1.0
         v = self._last_output.v + (target.v - self._last_output.v) * alpha
         w = self._last_output.omega + (target.omega - self._last_output.omega) * alpha

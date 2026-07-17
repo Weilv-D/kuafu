@@ -32,8 +32,11 @@ def _mode_to_firmware_mode(arbiter_mode) -> int:
 
     MANUAL / ASSISTED / AUTONOMOUS all mean "operator or planner wants motion",
     which on the firmware side is ``ACTIVE`` (2): only ACTIVE drives wheel torque
-    and the learned residual. ESTOP maps to ``FAULT`` (4) — the firmware's
-    strongest stop path — so the STM32 latches FAULT and disables actuators.
+    and the learned residual. IDLE maps to ``STAND`` (1) — the LQR still holds
+    balance but the wheels do not track velocity commands and the RL residual is
+    gated off; this is the DISARMED "safe hold" posture. ESTOP maps to
+    ``FAULT`` (4) — the firmware's strongest stop path — so the STM32 latches
+    FAULT and disables actuators.
     """
     # Imported lazily so that ``serial_node`` stays importable when the teleop
     # package (and its pygame dependency) is not installed on the policy host.
@@ -41,7 +44,9 @@ def _mode_to_firmware_mode(arbiter_mode) -> int:
 
     if arbiter_mode == Mode.ESTOP:
         return 4  # STATE_FAULT
-    return 2      # STATE_ACTIVE
+    if arbiter_mode == Mode.IDLE:
+        return 1  # STATE_STAND (LQR 保平衡, 不跟走, RL 残差关)
+    return 2      # STATE_ACTIVE (MANUAL / AUTONOMOUS / ASSISTED)
 
 
 def _build_arbiter(cmd_socket: str):

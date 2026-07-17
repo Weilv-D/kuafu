@@ -45,7 +45,43 @@ cd /opt/kuafu && PYTHONPATH=/opt/kuafu python -m pi5_runtime.serial_node \
 cd /opt/kuafu && PYTHONPATH=/opt/kuafu python -m pi5_runtime.teleop_node --device gamepad
 ```
 
-`--device keyboard` falls back to WASD/QE/space when no gamepad is present; `teleop_node` also auto-falls back if no joystick is detected. On a headless Pi5, export `SDL_VIDEODRIVER=dummy` so pygame can run its event pump without a display. Gamepad layout: left stick Y → forward speed, right stick X → yaw rate, LT/RT → crouch/stand (D0), A or B → emergency stop (latches firmware FAULT until reset). The future Nav2 planner will reuse this path by feeding the `AutonomousSource` instead of the IPC source; the arbiter and policy are unchanged.
+`--device keyboard` falls back to WASD/QE/Enter/Backspace/space when no gamepad is present; `teleop_node` also falls back if pygame itself is unavailable. On a headless Pi5, export `SDL_VIDEODRIVER=dummy` so pygame can run its event pump without a display.
+
+### Gamepad layout
+
+The source starts **DISARMED** (safe): the wheels hold balance via LQR but do not track commands, and the RL residual is gated off. The operator must explicitly arm before motion is possible.
+
+| Input | Action |
+|---|---|
+| `START` (arm) | ARMED → firmware ACTIVE: wheels track commands, RL residual on. Also clears an ESTOP latch. |
+| `Back` (disarm) | DISARMED → firmware STAND: LQR still holds balance, but commands are ignored and the residual is off. |
+| `A` (estop) | ESTOP latch → firmware FAULT: actuators disabled until reset. |
+| Left stick Y | forward speed `v` (±0.5 m/s) |
+| Right stick X | yaw rate `ω` (±1.0 rad/s) |
+| LT / RT | crouch / stand D0 (rate-based, 40 mm/s, with a trigger deadzone) |
+
+Stick response is shaped by a deadzone (`0.08`) then a square curve (`sign(x)·|x|²`), so small deflections produce small commands for precise low-speed control while full deflection still reaches the limit. Override the shaping via `ArbiterConfig` (`stick_deadzone`, `stick_gamma`, `trigger_deadzone`, `d0_rate_mm_s`).
+
+Gamepad environment variables (defaults are Xbox-layout; Flydigi/PS/Switch usually differ):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KUAFU_AXIS_V` | 1 | left stick Y axis index |
+| `KUAFU_AXIS_W` | 2 | right stick X axis index |
+| `KUAFU_AXIS_LT` | 4 | LT trigger axis index |
+| `KUAFU_AXIS_RT` | 5 | RT trigger axis index |
+| `KUAFU_AXIS_V_INVERT` | 1 | invert the v axis (pygame Y is positive-down) |
+| `KUAFU_AXIS_W_INVERT` | 0 | invert the ω axis |
+| `KUAFU_BTN_ARM` | 7 | arm button (START) |
+| `KUAFU_BTN_DISARM` | 6 | disarm button (Back) |
+| `KUAFU_BTN_ESTOP` | 0 | estop button (A) |
+| `KUAFU_RUMBLE` | 1 | haptic feedback on arm/disarm/estop/reconnect; set 0 to disable |
+
+Hot-plug is supported: if the controller disconnects, `poll()` returns ESTOP and the arbiter parks the robot; on reconnect a short rumble confirms, and the operator must arm again. Discover a new controller's axis numbering with `SDL_VIDEODRIVER=dummy python -m rl.teleop.gamepad_source --show-axes`.
+
+Keyboard layout: `W/S` → v (±0.25 m/s), `A/D` → ω (±0.8 rad/s), `Q/E` → D0, `Enter` → arm, `Backspace` → disarm, `Space` → ESTOP, `R` → clear ESTOP latch. Keyboard commands are discrete gears and do not apply the stick curve.
+
+The future Nav2 planner will reuse this path by feeding the `AutonomousSource` instead of the IPC source; the arbiter and policy are unchanged.
 
 ## Firmware
 

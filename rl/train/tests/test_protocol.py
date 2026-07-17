@@ -93,18 +93,25 @@ def test_joint_telemetry_scales_wheel_speed_once():
 
 
 def test_health_telemetry_is_big_endian_and_complete():
-    payload = struct.pack(">IBB14H", 0x12345678, 3, 0x21,
-                          1, 2, 3, 4, 5, 6, 7,
-                          8, 9, 10, 11, 12, 13, 14)
+    # Layout: fault_mask:u32 | mode:u8 | reset:u8 | imu_age | wheel_age[2] |
+    # servo_age[4] | imu_errors | wheel_errors[2] | servo_errors[4] |
+    # wheel_l_{timeout,checksum,protocol} | wheel_r_{timeout,checksum,protocol}
+    # = IBB + 20 H = 46 bytes.
+    payload = struct.pack(">IBB20H", 0x12345678, 3, 0x21,
+                          1, 2, 3, 4, 5, 6, 7,            # ages (imu, wheel×2, servo×4)
+                          8, 9, 10, 11, 12, 13, 14,        # errors (imu, wheel×2, servo×4)
+                          15, 16, 17, 18, 19, 20)          # wheel breakdown (L×3, R×3)
     health = decode_health_payload(payload)
     assert health.fault_mask == 0x12345678
     assert health.mode == 3 and health.reset_cause == 0x21
+    assert health.imu_age_ms == 1
     assert health.wheel_age_ms == (2, 3)
     assert health.servo_age_ms == (4, 5, 6, 7)
     assert health.imu_errors == 8
     assert health.wheel_errors == (9, 10)
     assert health.servo_errors == (11, 12, 13, 14)
-    with pytest.raises(ValueError, match="34 bytes"):
+    assert health.wheel_error_breakdown == ((15, 16, 17), (18, 19, 20))
+    with pytest.raises(ValueError, match="46 bytes"):
         decode_health_payload(payload[:-1])
 
 
