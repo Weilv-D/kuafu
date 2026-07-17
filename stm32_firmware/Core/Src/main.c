@@ -70,6 +70,9 @@ static void Actuator_Feedback_Snapshot(DDSM_State_t *left,
 static uint8_t Read_Reset_Cause(void);
 static uint16_t Device_Age_Ms(const DeviceHealth_t *health, uint32_t now_ms);
 static uint16_t Device_Error_Count(const DeviceHealth_t *health);
+static uint16_t Device_Timeout_Count(const DeviceHealth_t *health);
+static uint16_t Device_Checksum_Count(const DeviceHealth_t *health);
+static uint16_t Device_Protocol_Count(const DeviceHealth_t *health);
 void Error_Handler(void);
 
 int main(void) {

@@ -154,11 +154,13 @@ void run_pi_link_tests(void) {
     TEST_EQ_U8(0x0AU, health_payload[21]);
     TEST_EQ_U8(0x0BU, health_payload[32]);
     TEST_EQ_U8(0x0CU, health_payload[33]);
-    /* DDSM error breakdown appended after the legacy 34-byte block. */
+    /* DDSM error breakdown appended after the legacy 34-byte block.
+     * Layout (offset from 34): L_timeout[34..35] L_checksum[36..37]
+     * L_protocol[38..39] R_timeout[40..41] R_checksum[42..43] R_protocol[44..45]. */
     TEST_EQ_U8(0x0DU, health_payload[34]);
     TEST_EQ_U8(0x0EU, health_payload[35]);
-    TEST_EQ_U8(0x0FU, health_payload[40]);
-    TEST_EQ_U8(0x10U, health_payload[41]);
+    TEST_EQ_U8(0x0FU, health_payload[42]);
+    TEST_EQ_U8(0x10U, health_payload[43]);
 }
 
 void run_pi_transport_tests(void) {
