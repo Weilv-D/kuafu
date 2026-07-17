@@ -122,10 +122,14 @@ class SerialPolicyNode:
         if no_policy:
             self.runtime = None
             self._seq = 0
+            # Send HELLO to enable link_compatible on the firmware side.
+            # Without HELLO the firmware rejects all HEARTBEAT frames and
+            # never transitions out of STAND, so the robot won't respond to
+            # commands. The hash must match kuafu_generated.h.
             self.serial.write(hello_frame(self._seq, int(time.monotonic() * 1000),
                                           P.model_hash()).encode())
             self._seq = (self._seq + 2) & 0xFFFF
-            print("[serial] no-policy mode (baseline LQR only)")
+            print("[serial] no-policy mode (baseline LQR only, HELLO sent)")
         else:
             self.runtime = PolicyRuntime(model)
             self.serial.write(self.runtime.hello())
