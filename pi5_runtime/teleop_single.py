@@ -150,6 +150,8 @@ def main() -> None:
     seq = 0
     ser.write(hello_frame(seq, int(time.monotonic() * 1000),
                           P.model_hash()).encode())
+    ser.flush()                     # wait until HELLO is fully transmitted
+    time.sleep(0.3)                 # let STM32 process HELLO before heartbeats
     seq = (seq + 2) & 0xFFFF
     print(f"[teleop] serial: {args.port} @ {args.baudrate} "
           f"(hash={P.model_hash()})")
@@ -221,7 +223,7 @@ def main() -> None:
                     print("[teleop] ✅ gamepad awake")
                     was_idle = False
 
-                # button edges
+                # button edges (rising-edge only, estop prints once)
                 for btn, action in (
                     (btn_arm, "arm"),
                     (btn_disarm, "disarm"),
@@ -236,7 +238,7 @@ def main() -> None:
                         elif action == "disarm":
                             armed = False
                             print("[teleop] DISARMED", flush=True)
-                        elif action == "estop":
+                        elif action == "estop" and not estop_latched:
                             armed = False
                             estop_latched = True
                             print("[teleop] ESTOP", flush=True)
