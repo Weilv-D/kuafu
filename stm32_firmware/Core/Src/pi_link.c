@@ -150,7 +150,7 @@ int pi_link_parse_packet(const uint8_t *buf, uint16_t len) {
 
     int parsed = 0;
     uint16_t offset = 0;
-    while (rx_stream_len - offset >= 12u) {
+    while ((uint32_t)(rx_stream_len - offset) >= 12u) {
         if (rx_stream[offset] != PI_FRAME_HEADER) {
             ++offset;
             continue;

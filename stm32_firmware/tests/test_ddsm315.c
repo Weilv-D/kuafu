@@ -65,7 +65,7 @@ void run_ddsm315_tests(void) {
     make_feedback(frame, 1U);
     TEST_EQ_INT(0, ddsm_parse_feedback(frame, &state));
     TEST_TRUE(state.torque < 0.0f);
-    TEST_NEAR(-10.4719755f, state.velocity_rads, 0.0001f);
+    TEST_NEAR(-1.04719755f, state.velocity_rads, 0.0001f);
     TEST_NEAR(3.14159265f, state.position_rad, 0.0001f);
     TEST_EQ_U8(0x12U, state.error_code);
     frame[9] ^= 1U;

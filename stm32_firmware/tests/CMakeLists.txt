@@ -38,6 +38,7 @@ if(MSVC)
     target_compile_options(firmware_host_tests PRIVATE /W4 /WX)
 else()
     target_compile_options(firmware_host_tests PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(firmware_host_tests PRIVATE m)
 endif()
 
 add_test(NAME firmware_host_tests COMMAND firmware_host_tests)
