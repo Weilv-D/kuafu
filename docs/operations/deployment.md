@@ -112,8 +112,16 @@ Gamepad environment variables (defaults are Xbox-layout; Flydigi/PS/Switch usual
 | `KUAFU_BTN_DISARM` | 6 | disarm button (`Select`/`Back`) |
 | `KUAFU_BTN_ESTOP` | 0 | estop button (A) |
 | `KUAFU_RUMBLE` | 1 | haptic feedback on arm/disarm/estop/reconnect; set 0 to disable |
+| `KUAFU_JS_DEVICE` | /dev/input/js0 | kernel joystick device path |
+| `KUAFU_BT_MAC` | (empty) | Bluetooth MAC for auto-reconnect when gamepad goes idle; enables the idle watchdog |
+| `KUAFU_IDLE_RECONNECT` | 15 | seconds of BLE silence before auto-reconnect (requires `KUAFU_BT_MAC`) |
+| `KUAFU_IDLE_WARN_INTERVAL` | 5 | seconds between "push a stick" reminders while idle |
 
-Hot-plug is supported: if the controller disconnects, `poll()` returns ESTOP and the arbiter parks the robot; on reconnect a short rumble confirms, and the operator must arm again. Calibrate a new controller's axis and button mapping with `python -m rl.teleop.calibrate_native`; the interactive tool reads `/dev/input/js0` directly (bypassing pygame/SDL, which can drop events on Bluetooth LE devices), guides you through each stick and trigger, auto-detects the v-axis and trigger invert directions, and prints ready-to-export `KUAFU_AXIS_*` / `KUAFU_BTN_*` lines. If the gamepad goes silent after being connected, disconnect and reconnect it to wake it from its Bluetooth idle state.
+Hot-plug is supported: if the controller disconnects, `poll()` returns ESTOP and the arbiter parks the robot; on reconnect the operator must arm again. Calibrate a new controller's axis and button mapping with `python -m rl.teleop.gamepad_source --calibrate`; the interactive tool reads `/dev/input/js0` directly (bypassing pygame/SDL, which can drop events on Bluetooth LE devices), guides you through each stick and trigger, auto-detects the v-axis and trigger invert directions, and prints ready-to-export `KUAFU_AXIS_*` / `KUAFU_BTN_*` lines.
+
+**BLE idle sleep.** Flydigi VADER2P and similar BLE gamepads enter a low-power idle after Bluetooth connection and stop sending HID input reports until physically operated (stick move or button press). `GamepadSource` detects this automatically: if no events arrive after connect it prints a wake-up reminder, and if `KUAFU_BT_MAC` is set it attempts a `bluetoothctl` reconnect after `KUAFU_IDLE_RECONNECT` seconds (default 15) of silence. The operator must push a stick or button to wake the controller. A standalone watchdog daemon is available: `KUAFU_BT_MAC=F8:3B:26:8F:FE:F3 python -m rl.teleop.bt_wakeup` (or `--check` for a one-shot alive test).
+
+**Reading path.** `GamepadSource` reads axis/button state from `/dev/input/js0` via a native non-blocking reader (`_NativeJoystick`). pygame/SDL is not used for input reading — its `get_axis()`/`get_button()` can return stale cached values on BLE devices. pygame is only used by `teleop_node` for display initialization; it no longer creates a `Joystick` object that would compete for the kernel event queue.
 
 Keyboard layout: `W/S` → v (±0.25 m/s), `A/D` → ω (±0.8 rad/s), `Q/E` → D0, `Enter` → arm, `Backspace` → disarm, `Space` → ESTOP, `R` → clear ESTOP latch. Keyboard commands are discrete gears and do not apply the stick curve.
 
