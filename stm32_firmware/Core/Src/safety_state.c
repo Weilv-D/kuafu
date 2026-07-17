@@ -12,6 +12,12 @@ static float calibration_sum[3] = {0.0f, 0.0f, 0.0f};
 static uint32_t overtemp_started_ms = 0U;
 static uint8_t overtemp_active = 0U;
 
+/* Consecutive stale ticks before a freshness fault latches. */
+static uint8_t imu_stale_ticks = 0U;
+static uint8_t servo_stale_ticks = 0U;
+static uint8_t wheel_l_stale_ticks = 0U;
+static uint8_t wheel_r_stale_ticks = 0U;
+
 void safety_state_init(void) {
     memset(&g_safety_state, 0, sizeof(g_safety_state));
     g_safety_state.current_mode = STATE_INIT;
@@ -21,6 +27,10 @@ void safety_state_init(void) {
     calibration_sum[2] = 0.0f;
     overtemp_started_ms = 0U;
     overtemp_active = 0U;
+    imu_stale_ticks = 0U;
+    servo_stale_ticks = 0U;
+    wheel_l_stale_ticks = 0U;
+    wheel_r_stale_ticks = 0U;
 }
 
 void safety_state_trigger_fault(FaultMask_t fault) {
@@ -47,6 +57,11 @@ void safety_state_gyro_calib_update(float gx, float gy, float gz, uint32_t now_m
     }
 }
 
+static uint8_t freshness_under_grace(uint32_t now_ms) {
+    return (g_safety_state.mode_grace_until_ms != 0U &&
+            (uint32_t)(now_ms - g_safety_state.mode_grace_until_ms) > (uint32_t)(1UL << 31));
+}
+
 static FaultMask_t runtime_faults(const SafetyInputs_t *inputs) {
     FaultMask_t faults = FAULT_NONE;
     if (fabsf(inputs->pitch_rad) > SAFETY_MAX_PITCH_RAD) {
@@ -66,16 +81,43 @@ static FaultMask_t runtime_faults(const SafetyInputs_t *inputs) {
     } else {
         overtemp_active = 0U;
     }
-    if (!inputs->imu_fresh) {
+
+    if (inputs->imu_fresh) {
+        imu_stale_ticks = 0U;
+    } else if (imu_stale_ticks < UINT8_MAX) {
+        ++imu_stale_ticks;
+    }
+    if (inputs->wheel_l_fresh) {
+        wheel_l_stale_ticks = 0U;
+    } else if (wheel_l_stale_ticks < UINT8_MAX) {
+        ++wheel_l_stale_ticks;
+    }
+    if (inputs->wheel_r_fresh) {
+        wheel_r_stale_ticks = 0U;
+    } else if (wheel_r_stale_ticks < UINT8_MAX) {
+        ++wheel_r_stale_ticks;
+    }
+    if (inputs->servos_fresh) {
+        servo_stale_ticks = 0U;
+    } else if (servo_stale_ticks < UINT8_MAX) {
+        ++servo_stale_ticks;
+    }
+
+    /* Freshness faults require debounce unless we are in a mode-transition grace window. */
+    if (!freshness_under_grace(inputs->now_ms) &&
+        imu_stale_ticks >= SAFETY_FRESHNESS_DEBOUNCE_TICKS) {
         faults |= FAULT_IMU;
     }
-    if (!inputs->wheel_l_fresh) {
+    if (!freshness_under_grace(inputs->now_ms) &&
+        wheel_l_stale_ticks >= SAFETY_FRESHNESS_DEBOUNCE_TICKS) {
         faults |= FAULT_WHEEL_LEFT;
     }
-    if (!inputs->wheel_r_fresh) {
+    if (!freshness_under_grace(inputs->now_ms) &&
+        wheel_r_stale_ticks >= SAFETY_FRESHNESS_DEBOUNCE_TICKS) {
         faults |= FAULT_WHEEL_RIGHT;
     }
-    if (!inputs->servos_fresh) {
+    if (!freshness_under_grace(inputs->now_ms) &&
+        servo_stale_ticks >= SAFETY_FRESHNESS_DEBOUNCE_TICKS) {
         faults |= FAULT_SERVO;
     }
     return faults;
@@ -112,6 +154,12 @@ SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs) {
             inputs->wheel_l_fresh && inputs->wheel_r_fresh && inputs->servos_fresh) {
             g_safety_state.current_mode = STATE_STAND;
             g_safety_state.mode_timer_ms = inputs->now_ms;
+            g_safety_state.mode_grace_until_ms =
+                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
+            imu_stale_ticks = 0U;
+            wheel_l_stale_ticks = 0U;
+            wheel_r_stale_ticks = 0U;
+            servo_stale_ticks = 0U;
         }
         return decision;
     }
@@ -126,18 +174,42 @@ SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs) {
             inputs->link_compatible && inputs->heartbeat_fresh) {
             g_safety_state.current_mode = STATE_ACTIVE;
             g_safety_state.mode_timer_ms = inputs->now_ms;
+            g_safety_state.mode_grace_until_ms =
+                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
+            imu_stale_ticks = 0U;
+            wheel_l_stale_ticks = 0U;
+            wheel_r_stale_ticks = 0U;
+            servo_stale_ticks = 0U;
         }
     } else if (g_safety_state.current_mode == STATE_ACTIVE) {
         if (!inputs->link_compatible || !inputs->heartbeat_fresh) {
             decision.enter_hold = 1U;
             g_safety_state.current_mode = STATE_STAND;
             g_safety_state.mode_timer_ms = inputs->now_ms;
+            g_safety_state.mode_grace_until_ms =
+                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
+            imu_stale_ticks = 0U;
+            wheel_l_stale_ticks = 0U;
+            wheel_r_stale_ticks = 0U;
+            servo_stale_ticks = 0U;
         } else if (inputs->requested_mode == (uint8_t)STATE_STAND) {
             g_safety_state.current_mode = STATE_STAND;
             g_safety_state.mode_timer_ms = inputs->now_ms;
+            g_safety_state.mode_grace_until_ms =
+                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
+            imu_stale_ticks = 0U;
+            wheel_l_stale_ticks = 0U;
+            wheel_r_stale_ticks = 0U;
+            servo_stale_ticks = 0U;
         } else if (inputs->requested_mode == (uint8_t)STATE_CLIMB) {
             g_safety_state.current_mode = STATE_CLIMB;
             g_safety_state.mode_timer_ms = inputs->now_ms;
+            g_safety_state.mode_grace_until_ms =
+                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
+            imu_stale_ticks = 0U;
+            wheel_l_stale_ticks = 0U;
+            wheel_r_stale_ticks = 0U;
+            servo_stale_ticks = 0U;
         }
         if (!inputs->action_fresh) {
             decision.clear_action = 1U;
@@ -147,12 +219,30 @@ SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs) {
             decision.enter_hold = 1U;
             g_safety_state.current_mode = STATE_STAND;
             g_safety_state.mode_timer_ms = inputs->now_ms;
+            g_safety_state.mode_grace_until_ms =
+                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
+            imu_stale_ticks = 0U;
+            wheel_l_stale_ticks = 0U;
+            wheel_r_stale_ticks = 0U;
+            servo_stale_ticks = 0U;
         } else if (inputs->requested_mode == (uint8_t)STATE_ACTIVE) {
             g_safety_state.current_mode = STATE_ACTIVE;
             g_safety_state.mode_timer_ms = inputs->now_ms;
+            g_safety_state.mode_grace_until_ms =
+                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
+            imu_stale_ticks = 0U;
+            wheel_l_stale_ticks = 0U;
+            wheel_r_stale_ticks = 0U;
+            servo_stale_ticks = 0U;
         } else if (inputs->requested_mode == (uint8_t)STATE_STAND) {
             g_safety_state.current_mode = STATE_STAND;
             g_safety_state.mode_timer_ms = inputs->now_ms;
+            g_safety_state.mode_grace_until_ms =
+                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
+            imu_stale_ticks = 0U;
+            wheel_l_stale_ticks = 0U;
+            wheel_r_stale_ticks = 0U;
+            servo_stale_ticks = 0U;
         }
     } else {
         safety_state_trigger_fault(FAULT_INTERNAL);

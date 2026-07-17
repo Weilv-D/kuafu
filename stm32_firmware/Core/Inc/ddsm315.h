@@ -64,6 +64,6 @@ int ddsm_bus_queue_query(DDSM_Bus_t *bus, DDSM_State_t *target,
 void ddsm_bus_step(DDSM_Bus_t *bus, uint32_t now_ms);
 void ddsm_bus_on_tx_complete(DDSM_Bus_t *bus);
 void ddsm_bus_on_rx_byte(DDSM_Bus_t *bus, uint32_t now_ms);
-void ddsm_bus_on_uart_error(DDSM_Bus_t *bus);
+void ddsm_bus_on_uart_error(DDSM_Bus_t *bus, UART_HandleTypeDef *huart);
 
 #endif

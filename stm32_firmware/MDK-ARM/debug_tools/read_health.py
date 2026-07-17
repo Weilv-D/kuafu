@@ -20,9 +20,11 @@ def symbol_address(name: str) -> int:
 
 
 def decode_health(data: bytes, offset: int) -> dict[str, int]:
-    last, timeout, checksum, protocol, consecutive, online = struct.unpack_from("<IHHHBB", data, offset)
+    last, timeout, checksum, protocol, overrun, noise, framing, consecutive, online = \
+        struct.unpack_from("<IHHHHHHBB", data, offset)
     return {"last": last, "timeout": timeout, "checksum": checksum,
-            "protocol": protocol, "consecutive": consecutive, "online": online}
+            "protocol": protocol, "consecutive": consecutive, "online": online,
+            "overrun": overrun, "noise": noise, "framing": framing}
 
 
 def main() -> None:
@@ -58,14 +60,14 @@ def main() -> None:
             session.target.halt()
             tick = session.target.read32(addresses["g_system_ticks"])
             mode = session.target.read8(addresses["g_safety_state"])
-            fault = session.target.read32(addresses["g_safety_state"] + 8)
+            fault = session.target.read32(addresses["g_safety_state"] + 12)
             startup = bytes(session.target.read_memory_block8(addresses["g_startup_manager"], 12))
             actuator_step = session.target.read8(addresses["g_actuator_discovery_step"])
             actuator_configured = session.target.read8(addresses["g_actuator_configured"])
             imu = bytes(session.target.read_memory_block8(addresses["g_imu"], 0x34))
-            left = bytes(session.target.read_memory_block8(addresses["g_ddsm_left"], 0x20))
-            right = bytes(session.target.read_memory_block8(addresses["g_ddsm_right"], 0x20))
-            servos = bytes(session.target.read_memory_block8(addresses["g_servos"], 4 * 0x28))
+            left = bytes(session.target.read_memory_block8(addresses["g_ddsm_left"], 0x28))
+            right = bytes(session.target.read_memory_block8(addresses["g_ddsm_right"], 0x28))
+            servos = bytes(session.target.read_memory_block8(addresses["g_servos"], 4 * 0x30))
             servo_bus = bytes(session.target.read_memory_block8(addresses["g_st3215_bus"], 0x138))
             uart3 = bytes(session.target.read_memory_block8(addresses["huart3"], 0x44))
             wheel_bus = bytes(session.target.read_memory_block8(addresses["g_ddsm_bus"], 0x24))
@@ -75,7 +77,7 @@ def main() -> None:
             records = [("imu", decode_health(imu, 0x20)),
                        ("wheel_l", decode_health(left, 0x14)),
                        ("wheel_r", decode_health(right, 0x14))]
-            records += [(f"servo_{i + 1}", decode_health(servos, i * 0x28 + 0x1C)) for i in range(4)]
+            records += [(f"servo_{i + 1}", decode_health(servos, i * 0x30 + 0x1C)) for i in range(4)]
             session.target.resume()
             print(f"drdy_tick={tick} hal_ms={hal_tick} mode={mode} fault=0x{fault:08x}")
             startup_phase, startup_since, startup_next = struct.unpack_from("<III", startup)
@@ -100,12 +102,16 @@ def main() -> None:
             for name, health in records:
                 age = "never" if health["last"] == 0 else str((hal_tick - health["last"]) & 0xFFFFFFFF)
                 errors = health["timeout"] + health["checksum"] + health["protocol"]
+                uart_sub = ""
+                if name.startswith("wheel"):
+                    uart_sub = (f" overrun={health['overrun']} noise={health['noise']} "
+                                f"framing={health['framing']}")
                 temp = ""
                 if name.startswith("servo_"):
                     index = int(name[-1]) - 1
-                    temp = f" temp_c={struct.unpack_from('<f', servos, index * 0x28 + 0x10)[0]:.1f}"
+                    temp = f" temp_c={struct.unpack_from('<f', servos, index * 0x30 + 0x10)[0]:.1f}"
                 print(f"  {name:8s} online={health['online']} age_ms={age:>5} "
-                      f"errors={errors} consecutive={health['consecutive']}{temp}")
+                      f"errors={errors} consecutive={health['consecutive']}{uart_sub}{temp}")
             time.sleep(args.interval)
     finally:
         session.close()

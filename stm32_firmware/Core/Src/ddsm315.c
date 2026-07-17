@@ -223,10 +223,18 @@ void ddsm_bus_on_rx_byte(DDSM_Bus_t *bus, uint32_t now_ms) {
     arm_rx(bus);
 }
 
-void ddsm_bus_on_uart_error(DDSM_Bus_t *bus) {
-    if (bus == NULL) return;
+void ddsm_bus_on_uart_error(DDSM_Bus_t *bus, UART_HandleTypeDef *huart) {
+    if (bus == NULL || bus->huart == NULL || huart != bus->huart) {
+        if (bus != NULL) {
+            bus->rx_len = 0U;
+            arm_rx(bus);
+        }
+        return;
+    }
     if (bus->phase != DDSM_BUS_IDLE) {
-        finish_failure(bus, DEVICE_FAILURE_PROTOCOL);
+        if (bus->target != NULL) {
+            device_health_mark_uart_error(&bus->target->health, (uint32_t)huart->ErrorCode);
+        }
     }
     bus->rx_len = 0U;
     arm_rx(bus);

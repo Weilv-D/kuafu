@@ -27,24 +27,42 @@ static void enter_stand(SafetyInputs_t *inputs) {
     TEST_EQ_INT(STATE_STAND, g_safety_state.current_mode);
 }
 
-static void expect_fault(SafetyInputs_t inputs, FaultMask_t fault) {
-    SafetyDecision_t decision;
+static void expect_immediate_fault(SafetyInputs_t inputs, FaultMask_t fault) {
     SafetyInputs_t healthy = healthy_inputs();
+    SafetyDecision_t decision;
     enter_stand(&healthy);
     decision = safety_state_update(&inputs);
     (void)decision;
     TEST_EQ_INT(STATE_FAULT, g_safety_state.current_mode);
     TEST_TRUE((g_safety_state.fault_mask & fault) != 0U);
+}
 
-    inputs.pitch_rad = 0.0f;
-    inputs.pitch_rate_rads = 0.0f;
-    inputs.max_temp_c = 20.0f;
-    inputs.imu_fresh = 1U;
-    inputs.wheel_l_fresh = 1U;
-    inputs.wheel_r_fresh = 1U;
-    inputs.servos_fresh = 1U;
+static void expect_freshness_fault_after_debounce(SafetyInputs_t inputs,
+                                                  FaultMask_t fault) {
+    SafetyInputs_t healthy = healthy_inputs();
+    enter_stand(&healthy);
+
+    /* Move past the mode-transition grace window so the debounce logic is
+     * actually exercised. */
+    inputs.now_ms = g_safety_state.mode_grace_until_ms + 1U;
+
+    /* One stale tick does NOT latch. */
+    (void)safety_state_update(&inputs);
+    TEST_EQ_INT(STATE_STAND, g_safety_state.current_mode);
+    TEST_TRUE((g_safety_state.fault_mask & fault) == 0U);
+
+    /* Repeat until just before the debounce threshold. */
+    for (uint8_t i = 1U; i < SAFETY_FRESHNESS_DEBOUNCE_TICKS - 1U; ++i) {
+        inputs.now_ms += 4U;
+        (void)safety_state_update(&inputs);
+        TEST_EQ_INT(STATE_STAND, g_safety_state.current_mode);
+    }
+
+    /* One more stale tick at the threshold latches. */
+    inputs.now_ms += 4U;
     (void)safety_state_update(&inputs);
     TEST_EQ_INT(STATE_FAULT, g_safety_state.current_mode);
+    TEST_TRUE((g_safety_state.fault_mask & fault) != 0U);
 }
 
 void run_safety_state_tests(void) {
@@ -68,9 +86,9 @@ void run_safety_state_tests(void) {
     TEST_EQ_INT(STATE_STAND, g_safety_state.current_mode);
 
     inputs = healthy_inputs(); inputs.pitch_rad = SAFETY_MAX_PITCH_RAD + 0.01f;
-    expect_fault(inputs, FAULT_TILT);
+    expect_immediate_fault(inputs, FAULT_TILT);
     inputs = healthy_inputs(); inputs.pitch_rate_rads = SAFETY_MAX_PITCH_RATE_RAD_S + 0.01f;
-    expect_fault(inputs, FAULT_PITCH_RATE);
+    expect_immediate_fault(inputs, FAULT_PITCH_RATE);
     TEST_TRUE((safety_state_legacy_fault_mask() & 0x80U) != 0U);
     inputs = healthy_inputs();
     enter_stand(&inputs);
@@ -86,13 +104,13 @@ void run_safety_state_tests(void) {
     TEST_EQ_INT(STATE_FAULT, g_safety_state.current_mode);
     TEST_TRUE((g_safety_state.fault_mask & FAULT_OVERTEMP) != 0U);
     inputs = healthy_inputs(); inputs.imu_fresh = 0U;
-    expect_fault(inputs, FAULT_IMU);
+    expect_freshness_fault_after_debounce(inputs, FAULT_IMU);
     inputs = healthy_inputs(); inputs.wheel_l_fresh = 0U;
-    expect_fault(inputs, FAULT_WHEEL_LEFT);
+    expect_freshness_fault_after_debounce(inputs, FAULT_WHEEL_LEFT);
     inputs = healthy_inputs(); inputs.wheel_r_fresh = 0U;
-    expect_fault(inputs, FAULT_WHEEL_RIGHT);
+    expect_freshness_fault_after_debounce(inputs, FAULT_WHEEL_RIGHT);
     inputs = healthy_inputs(); inputs.servos_fresh = 0U;
-    expect_fault(inputs, FAULT_SERVO);
+    expect_freshness_fault_after_debounce(inputs, FAULT_SERVO);
 
     safety_state_init();
     inputs = healthy_inputs();
@@ -115,4 +133,36 @@ void run_safety_state_tests(void) {
     TEST_NEAR(-0.2f, g_safety_state.gyro_calib_offset[1], 1.0e-5f);
     TEST_NEAR(0.3f, g_safety_state.gyro_calib_offset[2], 1.0e-5f);
     TEST_EQ_INT(STATE_INIT, g_safety_state.current_mode);
+
+    /* --- Grace window on mode transition --- */
+    safety_state_init();
+    inputs = healthy_inputs();
+    (void)safety_state_update(&inputs);           /* INIT -> STAND */
+    TEST_EQ_INT(STATE_STAND, g_safety_state.current_mode);
+    TEST_TRUE(g_safety_state.mode_grace_until_ms > 0U);
+
+    /* Within grace window, a single stale IMU tick does not latch. */
+    inputs.now_ms = 101U;
+    inputs.imu_fresh = 0U;
+    (void)safety_state_update(&inputs);
+    TEST_EQ_INT(STATE_STAND, g_safety_state.current_mode);
+    TEST_TRUE((g_safety_state.fault_mask & FAULT_IMU) == 0U);
+
+    /* After grace expires, debounce still applies. */
+    inputs.now_ms = g_safety_state.mode_grace_until_ms + 1U;
+    for (uint8_t i = 0; i < SAFETY_FRESHNESS_DEBOUNCE_TICKS; ++i) {
+        (void)safety_state_update(&inputs);
+    }
+    TEST_EQ_INT(STATE_FAULT, g_safety_state.current_mode);
+    TEST_TRUE((g_safety_state.fault_mask & FAULT_IMU) != 0U);
+
+    /* Hard faults still latch even during the grace window. */
+    safety_state_init();
+    inputs = healthy_inputs();
+    (void)safety_state_update(&inputs);           /* INIT -> STAND, grace active */
+    inputs.now_ms = 101U;
+    inputs.pitch_rad = SAFETY_MAX_PITCH_RAD + 0.1f;
+    (void)safety_state_update(&inputs);
+    TEST_EQ_INT(STATE_FAULT, g_safety_state.current_mode);
+    TEST_TRUE((g_safety_state.fault_mask & FAULT_TILT) != 0U);
 }

@@ -989,7 +989,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
     if (huart == &huart2) {
-        ddsm_bus_on_uart_error(&g_ddsm_bus);
+        ddsm_bus_on_uart_error(&g_ddsm_bus, huart);
     } else if (huart == &huart3) {
         st3215_bus_on_uart_error(&g_st3215_bus);
     } else if (huart == &huart6) {

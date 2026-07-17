@@ -9,6 +9,7 @@ typedef struct {
 
 typedef struct {
     uint32_t unused;
+    uint32_t ErrorCode;
 } UART_HandleTypeDef;
 
 typedef enum {
@@ -19,6 +20,12 @@ typedef enum {
 } HAL_StatusTypeDef;
 
 #define I2C_MEMADD_SIZE_8BIT 1U
+#define HAL_UART_ERROR_NONE   0x00000000U
+#define HAL_UART_ERROR_PE     0x00000001U
+#define HAL_UART_ERROR_NE     0x00000002U
+#define HAL_UART_ERROR_FE     0x00000004U
+#define HAL_UART_ERROR_ORE    0x00000008U
+#define HAL_UART_ERROR_DMA    0x00000010U
 #define __HAL_UART_CLEAR_OREFLAG(huart) ((void)(huart))
 #define __HAL_UART_FLUSH_DRREGISTER(huart) ((void)(huart))
 #define __disable_irq() ((void)0)

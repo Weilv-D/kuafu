@@ -15,7 +15,7 @@ typedef uint32_t FaultMask_t;
 
 #define FAULT_NONE          ((FaultMask_t)0U)
 #define FAULT_TILT          ((FaultMask_t)1U << 0)
-#define FAULT_HEARTBEAT     ((FaultMask_t)1U << 1) /* legacy bit; stale heartbeat is recoverable */
+#define FAULT_HEARTBEAT     ((FaultMask_t)1U << 1) /* unused; stale heartbeat uses enter_hold path */
 #define FAULT_OVERTEMP      ((FaultMask_t)1U << 2)
 #define FAULT_EMERGENCY     ((FaultMask_t)1U << 3)
 #define FAULT_SERVO         ((FaultMask_t)1U << 4)
@@ -29,6 +29,7 @@ typedef uint32_t FaultMask_t;
 typedef struct {
     RobotMode_t current_mode;
     uint32_t mode_timer_ms;
+    uint32_t mode_grace_until_ms;
     FaultMask_t fault_mask;
     float gyro_calib_offset[3];
     uint8_t is_gyro_calibrated;
