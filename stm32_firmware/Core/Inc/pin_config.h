@@ -116,7 +116,7 @@
  * Applied to both torque commands and velocity feedback so the LQR and the Pi
  * telemetry share one consistent body frame. Verify on bench (defaults: none). */
 #define WHEEL_DIR_L             (+1.0f)
-#define WHEEL_DIR_R             (+1.0f)
+#define WHEEL_DIR_R             (-1.0f)
 
 /* 5-Bar Linkage Kinematics parameters (meters) */
 #define KIN_LEG_A               (A_LEN_MM * 0.001f)
@@ -165,6 +165,11 @@
 /* ========================================================================== */
 #define SAFETY_MAX_PITCH_RAD    0.785398f       /* 45 degrees */
 #define SAFETY_MAX_PITCH_RATE_RAD_S 8.0f
+/* LQR torque fade-out window: full torque below PITCH_FADE_START, linearly
+ * decaying to zero at PITCH_FADE_END. Prevents the wheels from spinning at
+ * full power when the robot has tipped past recoverable. */
+#define PITCH_FADE_START_RAD    0.349066f       /* 20 degrees */
+#define PITCH_FADE_END_RAD      0.872665f       /* 50 degrees */
 #define SAFETY_MAX_TEMP_C       65.0f
 #define SAFETY_OVERTEMP_DEBOUNCE_MS 100U
 #define SAFETY_HEARTBEAT_MS     200U            /* Pi heartbeat timeout */
@@ -172,7 +177,7 @@
 #define SAFETY_IMU_MAX_AGE_MS   20U
 #define SAFETY_WHEEL_MAX_AGE_MS 50U
 #define SAFETY_SERVO_MAX_AGE_MS 250U
-#define SAFETY_FRESHNESS_DEBOUNCE_TICKS 3U  /* 250 Hz control loop; 3 ticks = 12 ms */
+#define SAFETY_FRESHNESS_DEBOUNCE_TICKS 5U  /* 250 Hz control loop; 5 ticks = 20 ms */
 #define SAFETY_MODE_TRANSITION_GRACE_MS 100U
 
 #endif /* PIN_CONFIG_H */

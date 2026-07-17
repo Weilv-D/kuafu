@@ -35,8 +35,12 @@ FirmwareRuntimeOutputs_t firmware_runtime_step(FirmwareRuntime_t *runtime,
     }
 
     operational = (uint8_t)(inputs->mode != STATE_INIT && inputs->mode != STATE_FAULT);
-    outputs.wheel_intent_allowed = (uint8_t)(operational && inputs->wheel_authorized &&
-                                             inputs->wheel_bus_idle);
+    /* wheel_intent_allowed gates the LQR balance computation itself, which must
+     * run every control deadline regardless of whether the DDSM bus happens to
+     * be mid-transaction at that instant. The dispatch layer already skips
+     * sending when the bus is busy; gating the computation on bus idle starves
+     * the controller and the robot cannot balance. */
+    outputs.wheel_intent_allowed = (uint8_t)(operational && inputs->wheel_authorized);
     outputs.servo_intent_allowed = (uint8_t)(operational && inputs->servo_bus_idle);
     outputs.residual_allowed = (uint8_t)(inputs->mode == STATE_ACTIVE &&
                                          inputs->link_compatible &&

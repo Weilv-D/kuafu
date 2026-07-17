@@ -54,7 +54,9 @@ void run_firmware_runtime_tests(void) {
     outputs = firmware_runtime_step(&runtime, &inputs);
     TEST_TRUE(outputs.control_due);
     TEST_TRUE(outputs.servo_due);
-    TEST_TRUE(!outputs.wheel_intent_allowed);
+    /* wheel_intent_allowed no longer gates on bus idle (the LQR must compute
+     * every deadline; the dispatch layer skips sending when busy). */
+    TEST_TRUE(outputs.wheel_intent_allowed);
     TEST_TRUE(!outputs.servo_intent_allowed);
     TEST_EQ_INT(1, runtime.wheel_busy_cycles);
     TEST_EQ_INT(1, runtime.servo_busy_cycles);

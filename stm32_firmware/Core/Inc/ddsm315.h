@@ -10,7 +10,7 @@
 #define DDSM_MODE_POSITION       3U
 #define DDSM_MODE_DISABLE        9U
 #define DDSM_FRAME_SIZE         10U
-#define DDSM_TRANSACTION_TIMEOUT_MS 4U
+#define DDSM_TRANSACTION_TIMEOUT_MS 8U
 
 typedef struct {
     uint8_t id;

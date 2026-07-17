@@ -68,7 +68,14 @@ void lqr_update(LQRController_t *controller,
     controller->yaw_ref = wrap_angle(controller->yaw_ref + w_ref * BASE_DT);
 
     float x_error = controller->x_est - controller->x_ref;
-    controller->x_int = clamp_float(controller->x_int + x_error * BASE_DT, -0.25f, 0.25f);
+    /* Anti-windup: if the body is tipped past the recoverable window, the
+     * position integral is meaningless (the robot is falling, not drifting)
+     * and only makes the wheels accelerate uncontrollably. */
+    if (fabsf(pitch_rad) > PITCH_FADE_END_RAD) {
+        controller->x_int = 0.0f;
+    } else {
+        controller->x_int = clamp_float(controller->x_int + x_error * BASE_DT, -0.25f, 0.25f);
+    }
     float force = -(controller->K[0] * x_error
                     + controller->K[1] * pitch_rad
                     + controller->K[2] * (vx - v_ref)
@@ -80,8 +87,24 @@ void lqr_update(LQRController_t *controller,
     float tau_yaw = YAW_KP * yaw_error + YAW_KD * (w_ref - yaw_rate_rads);
     float tau_common_residual = clamp_float(delta_tau_common, -1.0f, 1.0f) * TAU_WHEEL_RATED;
     float tau_yaw_residual = clamp_float(delta_tau_yaw, -1.0f, 1.0f) * TAU_WHEEL_RATED;
-    float tau_l = tau_pitch - tau_yaw + tau_common_residual - tau_yaw_residual;
-    float tau_r = tau_pitch + tau_yaw + tau_common_residual + tau_yaw_residual;
-    *out_tau_l = limit_wheel_torque(tau_l, wheel_vel_l_rads);
-    *out_tau_r = limit_wheel_torque(tau_r, wheel_vel_r_rads);
+    /* DDSM315 +torque produces backward body-frame motion on this robot, so
+     * the LQR output is negated.  The right motor is mounted mirrored
+     * (WHEEL_DIR_R = -1 at dispatch).
+     *
+     *   τ_l_body = -(τ_pitch − τ_yaw) − τ_common + τ_yaw_residual
+     *   τ_r_body = -(τ_pitch + τ_yaw) − τ_common − τ_yaw_residual
+     *
+     * After WHEEL_DIR_L(+1), WHEEL_DIR_R(−1):
+     *   motor_l = −τ_pitch + τ_yaw − τ_common + τ_yaw_residual
+     *   motor_r = +τ_pitch + τ_yaw + τ_common + τ_yaw_residual
+     *
+     * On the reversed right motor +motor → robot backward.  For a right turn
+     * (τ_yaw > 0) left motor becomes less backward (more forward), right motor
+     * becomes more forward (more backward on robot) — correct. */
+    *out_tau_l = limit_wheel_torque(
+        -tau_pitch + tau_yaw - tau_common_residual + tau_yaw_residual,
+        wheel_vel_l_rads);
+    *out_tau_r = limit_wheel_torque(
+        -tau_pitch - tau_yaw - tau_common_residual - tau_yaw_residual,
+        wheel_vel_r_rads);
 }

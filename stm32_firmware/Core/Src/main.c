@@ -189,11 +189,13 @@ int main(void) {
         Actuator_Feedback_Snapshot(&left_feedback, &right_feedback, servo_feedback);
         Pi_Command_Snapshot(&runtime_heartbeat, &runtime_action);
         (void)runtime_action;
+        /* Wheel torque authorization for the LQR self-balance loop.
+         * Self-balancing is a baseline capability that must work standalone
+         * (no Pi), so it is gated only on startup completion + no fault + a
+         * sane operating mode. Pi link freshness only gates the ACTIVE-mode
+         * motion commands, not the balance loop itself. */
         wheel_authorized = (uint8_t)(g_startup_manager.phase == STARTUP_READY &&
-                                     g_safety_state.current_mode != STATE_FAULT &&
-                                     pi_link_is_compatible() && pi_link_heartbeat_fresh() &&
-                                     runtime_heartbeat.mode_request >= (uint8_t)STATE_STAND &&
-                                     runtime_heartbeat.mode_request <= (uint8_t)STATE_CLIMB);
+                                     g_safety_state.current_mode != STATE_FAULT);
 
         runtime_inputs.now_ms = startup_now;
         runtime_inputs.mode = g_safety_state.current_mode;
@@ -327,6 +329,12 @@ int main(void) {
             if (runtime_outputs.wheel_intent_allowed) {
                 wheel_result = ddsm_bus_queue_torque(&g_ddsm_bus, wheel,
                                                      torque, startup_now);
+            } else if (g_safety_state.current_mode == STATE_FAULT) {
+                /* In FAULT keep streaming zero-torque so the motors actually
+                 * stop: a query frame leaves the last torque latched and the
+                 * wheels keep spinning. */
+                wheel_result = ddsm_bus_queue_torque(&g_ddsm_bus, wheel,
+                                                     0.0f, startup_now);
             } else {
                 wheel_result = ddsm_bus_queue_query(&g_ddsm_bus, wheel, startup_now);
             }
@@ -480,8 +488,32 @@ int main(void) {
                                 &g_ctrl_tau_l,
                                 &g_ctrl_tau_r);
 
-                } else {
-                    /* Safe stop wheels if in FAULT or INIT */
+                    /* Pitch-gated torque fade: full authority inside the
+                     * recoverable band, linearly decaying to zero as the
+                     * body tips past PITCH_FADE_END so a fallen robot does
+                     * not spin its wheels at full torque. */
+                    {
+                        float ap = fabsf(body_pitch);
+                        float scale;
+                        if (ap <= PITCH_FADE_START_RAD) {
+                            scale = 1.0f;
+                        } else if (ap >= PITCH_FADE_END_RAD) {
+                            scale = 0.0f;
+                        } else {
+                            scale = (PITCH_FADE_END_RAD - ap) /
+                                    (PITCH_FADE_END_RAD - PITCH_FADE_START_RAD);
+                        }
+                        g_ctrl_tau_l *= scale;
+                        g_ctrl_tau_r *= scale;
+                    }
+
+                } else if (g_safety_state.current_mode == STATE_FAULT ||
+                           g_safety_state.current_mode == STATE_INIT) {
+                    /* Only zero the wheel commands on a real FAULT/INIT exit.
+                     * A transient busy bus must not wipe the LQR output: the
+                     * DDSM dispatch (which runs every loop iteration outside
+                     * this 250 Hz block) keeps sending the cached torque, so
+                     * zeroing it here would create control gaps. */
                     g_ctrl_tau_l = 0.0f;
                     g_ctrl_tau_r = 0.0f;
                 }
