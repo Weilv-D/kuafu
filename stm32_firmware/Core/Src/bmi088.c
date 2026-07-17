@@ -1,4 +1,5 @@
 #include "bmi088.h"
+#include "pin_config.h"
 
 #define GRAVITY_M_S2         9.80665f
 #define PI                   3.14159265f
@@ -6,6 +7,9 @@
 /* Conversion factors */
 #define ACCEL_24G_SCALE      ((24.0f / 32768.0f) * GRAVITY_M_S2)
 #define GYRO_2000_SCALE      ((2000.0f / 32768.0f) * (PI / 180.0f))
+
+/* Delay between SCL edges during the 9-clock bus recovery sequence. */
+#define BMI_BUS_RECOVERY_DELAY_US  10U
 
 /* Helper write register function */
 static HAL_StatusTypeDef bmi088_write_reg(I2C_HandleTypeDef *hi2c, uint8_t dev_addr, uint8_t reg_addr, uint8_t data) {
@@ -36,11 +40,94 @@ enum {
     BMI_INIT_FAILED
 };
 
+/* STM32F4 I2C bus recovery: releases a slave that holds SDA low.
+ * On host-test builds (no GPIO model) this degrades to a DeInit/Init cycle. */
+static void bmi_bus_recovery_delay_us(uint32_t us) {
+    /* A tight spin using HAL_GetTick would be 1ms-granular and too coarse for
+     * a 10us SCL edge. Use the Cortex-M cycle counter-free busy loop instead. */
+    (void)us;
+#ifdef STM32F4
+    {
+        /* ~168 cycles/us at 168 MHz; each loop iteration is ~3 cycles. */
+        uint32_t cycles = us * 56U;
+        volatile uint32_t i;
+        for (i = 0U; i < cycles; ++i) {
+            __NOP();
+        }
+    }
+#endif
+}
+
+void bmi088_recover_bus(BMI088_t *imu) {
+    I2C_HandleTypeDef *hi2c;
+    if (imu == NULL || imu->hi2c == NULL) {
+        return;
+    }
+    hi2c = imu->hi2c;
+
+    (void)HAL_I2C_DeInit(hi2c);
+
+#ifdef STM32F4
+    /* Take SCL/SDA back as plain open-drain GPIO outputs to bit-bang clocks. */
+    {
+        GPIO_InitTypeDef gpio = {0};
+        gpio.Pin = IMU_SCL_PIN | IMU_SDA_PIN;
+        gpio.Mode = GPIO_MODE_OUTPUT_OD;
+        gpio.Pull = GPIO_PULLUP;
+        gpio.Speed = GPIO_SPEED_FREQ_LOW;
+        HAL_GPIO_Init(IMU_SCL_PORT, &gpio);
+
+        /* Make sure SDA is high so we can detect/release it, then clock SCL. */
+        HAL_GPIO_WritePin(IMU_SCL_PORT, IMU_SDA_PIN, GPIO_PIN_SET);
+        for (uint8_t i = 0U; i < 9U; ++i) {
+            HAL_GPIO_WritePin(IMU_SCL_PORT, IMU_SCL_PIN, GPIO_PIN_SET);
+            bmi_bus_recovery_delay_us(BMI_BUS_RECOVERY_DELAY_US);
+            /* If SDA is still low after clocking, the slave has not released;
+             * the remaining clocks give it more chances. */
+            HAL_GPIO_WritePin(IMU_SCL_PORT, IMU_SCL_PIN, GPIO_PIN_RESET);
+            bmi_bus_recovery_delay_us(BMI_BUS_RECOVERY_DELAY_US);
+        }
+        /* Generate a STOP: SCL high, then SDA low->high. */
+        HAL_GPIO_WritePin(IMU_SCL_PORT, IMU_SCL_PIN, GPIO_PIN_SET);
+        bmi_bus_recovery_delay_us(BMI_BUS_RECOVERY_DELAY_US);
+        HAL_GPIO_WritePin(IMU_SCL_PORT, IMU_SDA_PIN, GPIO_PIN_RESET);
+        bmi_bus_recovery_delay_us(BMI_BUS_RECOVERY_DELAY_US);
+        HAL_GPIO_WritePin(IMU_SCL_PORT, IMU_SDA_PIN, GPIO_PIN_SET);
+        bmi_bus_recovery_delay_us(BMI_BUS_RECOVERY_DELAY_US);
+
+        /* Hand the pins back to the I2C alternate function. */
+        gpio.Mode = GPIO_MODE_AF_OD;
+        gpio.Pull = GPIO_PULLUP;
+        gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+        gpio.Alternate = IMU_I2C_AF;
+        HAL_GPIO_Init(IMU_SCL_PORT, &gpio);
+    }
+#endif
+
+    (void)HAL_I2C_Init(hi2c);
+}
+
+/* Called from the init state machine whenever an I2C transaction fails.
+ * Returns 0 to let the caller restart the init sequence (retry), or -1 once
+ * BMI088_MAX_INIT_ATTEMPTS is exhausted (give up -> FAILED). */
+static int bmi_init_retry_or_fail(BMI088_t *imu, uint32_t now_ms) {
+    if (imu->init_attempts < UINT8_MAX) {
+        ++imu->init_attempts;
+    }
+    if (imu->init_attempts >= BMI088_MAX_INIT_ATTEMPTS) {
+        imu->init_state = BMI_INIT_FAILED;
+        return -1;
+    }
+    bmi088_recover_bus(imu);
+    imu->init_state = BMI_INIT_ACC_RESET;
+    imu->init_deadline_ms = now_ms + 50U;  /* let the bus/settling recover */
+    return 0;
+}
+
 static int bmi_init_write(BMI088_t *imu, uint8_t addr, uint8_t reg, uint8_t value,
                           uint8_t next_state, uint32_t now_ms, uint32_t delay_ms) {
     if (bmi088_write_reg(imu->hi2c, addr, reg, value) != HAL_OK) {
-        imu->init_state = BMI_INIT_FAILED;
-        return -1;
+        return bmi_init_retry_or_fail(imu, now_ms);
     }
     imu->init_state = next_state;
     imu->init_deadline_ms = now_ms + delay_ms;
@@ -53,6 +140,7 @@ void bmi088_begin_init(BMI088_t *imu, I2C_HandleTypeDef *hi2c, uint32_t now_ms) 
     imu->initialized = 0U;
     imu->init_state = BMI_INIT_ACC_RESET;
     imu->init_deadline_ms = now_ms;
+    imu->init_attempts = 0U;
 }
 
 int bmi088_init_step(BMI088_t *imu, uint32_t now_ms) {
@@ -80,8 +168,7 @@ int bmi088_init_step(BMI088_t *imu, uint32_t now_ms) {
         case BMI_INIT_ACC_ID:
             if (bmi088_read_reg(imu->hi2c, BMI088_ACCEL_ADDR, BMI088_ACC_CHIP_ID, &chip_id) != HAL_OK ||
                 chip_id != 0x1E) {
-                imu->init_state = BMI_INIT_FAILED;
-                return -1;
+                return bmi_init_retry_or_fail(imu, now_ms);
             }
             imu->init_state = BMI_INIT_ACC_RANGE;
             return 0;
@@ -97,8 +184,7 @@ int bmi088_init_step(BMI088_t *imu, uint32_t now_ms) {
         case BMI_INIT_GYRO_ID:
             if (bmi088_read_reg(imu->hi2c, BMI088_GYRO_ADDR, BMI088_GYRO_CHIP_ID, &chip_id) != HAL_OK ||
                 chip_id != 0x0F) {
-                imu->init_state = BMI_INIT_FAILED;
-                return -1;
+                return bmi_init_retry_or_fail(imu, now_ms);
             }
             imu->init_state = BMI_INIT_GYRO_RANGE;
             return 0;

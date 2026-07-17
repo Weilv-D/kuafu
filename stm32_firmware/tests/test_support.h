@@ -11,6 +11,7 @@ void test_set_time_ms(uint32_t now_ms);
 uint32_t test_get_time_ms(void);
 void test_i2c_reset(void);
 void test_i2c_set_chip_ids(uint8_t accel_id, uint8_t gyro_id);
+void test_i2c_fail_next(uint32_t count);
 uint32_t test_i2c_operation_count(void);
 void test_uart_reset(void);
 uint32_t test_uart_tx_count(void);

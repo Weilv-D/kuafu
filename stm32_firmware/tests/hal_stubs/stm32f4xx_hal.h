@@ -32,6 +32,8 @@ typedef enum {
 #define __enable_irq() ((void)0)
 
 uint32_t HAL_GetTick(void);
+HAL_StatusTypeDef HAL_I2C_Init(I2C_HandleTypeDef *hi2c);
+HAL_StatusTypeDef HAL_I2C_DeInit(I2C_HandleTypeDef *hi2c);
 HAL_StatusTypeDef HAL_I2C_Mem_Write(I2C_HandleTypeDef *hi2c,
                                     uint16_t dev_address,
                                     uint16_t mem_address,

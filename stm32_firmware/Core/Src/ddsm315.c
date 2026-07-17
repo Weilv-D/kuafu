@@ -96,7 +96,7 @@ int ddsm_parse_feedback(const uint8_t packet[DDSM_FRAME_SIZE], DDSM_State_t *sta
     state->torque = (float)raw_current * DDSM_RAW_TO_TORQUE;
     /* DDSM315 speed field is in 0.1 RPM (matches ddsm_build_speed's rpm*10
      * encoding). Forgetting the 0.1 factor made every feedback velocity 10x
-     * too large, which destabilized the LQR hold — a wheel at rest reported
+     * too large, which destabilized the LQR hold -- a wheel at rest reported
      * ~33 rad/s once disturbed, locking the loop into a false steady-state
      * spin at OMEGA_NOLOAD. */
     state->velocity_rads = (float)raw_speed * 0.1f * RPM_TO_RADS;

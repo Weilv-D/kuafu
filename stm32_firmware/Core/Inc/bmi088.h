@@ -40,16 +40,24 @@ typedef struct {
     uint32_t init_deadline_ms;
     uint8_t init_state;
     uint8_t initialized;
+    uint8_t init_attempts;   /* I2C failures seen during the current init sequence */
 } BMI088_t;
+
+#define BMI088_MAX_INIT_ATTEMPTS 5U   /* I2C failures tolerated before giving up */
 
 /**
  * @brief Initializes the BMI088 IMU over I2C.
- * 
+ *
  * @param imu Pointer to the device structure.
  * @param hi2c Pointer to initialized STM32 HAL I2C handle.
  * @return int 0 on success, -1 on failure.
  */
 void bmi088_begin_init(BMI088_t *imu, I2C_HandleTypeDef *hi2c, uint32_t now_ms);
+
+/* Recovers a locked I2C bus: deinitializes the peripheral, toggles 9 SCL
+ * clocks as a GPIO to release a slave holding SDA low, then re-initializes.
+ * Called automatically on init failure; also safe to call on demand. */
+void bmi088_recover_bus(BMI088_t *imu);
 
 /* Advances at most one register transaction when its deadline is reached.
  * Returns 1 when initialized, 0 while in progress, and -1 on a failed attempt. */
