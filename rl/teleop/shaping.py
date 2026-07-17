@@ -36,13 +36,20 @@ def shape_axis(raw: float, deadzone: float = 0.08, gamma: float = 2.0) -> float:
     return apply_curve(apply_deadzone(raw, deadzone), gamma)
 
 
-def normalize_trigger(raw: float, deadzone: float = 0.10) -> float:
-    """Map a pygame trigger in ``[-1, 1]`` to ``[0, 1]`` with a soft deadzone.
+def normalize_trigger(raw: float, deadzone: float = 0.10,
+                      invert: bool = False) -> float:
+    """Map a trigger in ``[-1, 1]`` to ``[0, 1]`` with a soft deadzone.
 
-    Resting the finger on a trigger previously caused ``d0`` to drift because
-    the raw value sat slightly above ``-1``. The deadzone zeroes small pulls and
-    re-maps the rest so a full pull still reaches ``1.0``.
+    Standard gamepad triggers rest at ``-1`` and reach ``+1`` when fully pressed.
+    Some triggers (e.g. Flydigi VADER2P RT over Bluetooth) report the opposite
+    direction: resting at ``+1``, pressing toward ``-1``. Set ``invert=True`` to
+    flip the axis before normalizing so both directions behave identically.
+
+    The deadzone zeroes small pulls (prevents ``d0`` drift from resting fingers)
+    and re-maps the rest so a full pull still reaches ``1.0``.
     """
+    if invert:
+        raw = -raw
     val = (raw + 1.0) * 0.5            # [-1, 1] -> [0, 1]
     if val < deadzone:
         return 0.0

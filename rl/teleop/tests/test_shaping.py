@@ -103,3 +103,27 @@ class TestNormalizeTrigger:
             cur = normalize_trigger(raw, 0.10)
             assert cur >= prev - 1e-9
             prev = cur
+
+
+class TestNormalizeTriggerInverted:
+    """Inverted triggers (e.g. VADER2P RT) rest at +1 and press toward -1."""
+
+    def test_inverted_rest_is_zero(self):
+        assert normalize_trigger(1.0, 0.10, invert=True) == 0.0
+
+    def test_inverted_full_press_reaches_one(self):
+        assert normalize_trigger(-1.0, 0.10, invert=True) == pytest.approx(1.0)
+
+    def test_inverted_matches_flipped_standard(self):
+        # invert=True should produce the same output as the standard direction
+        # with the sign of raw flipped.
+        for raw in (-1.0, -0.5, 0.0, 0.5, 1.0):
+            assert normalize_trigger(raw, 0.10, invert=True) == pytest.approx(
+                normalize_trigger(-raw, 0.10), abs=1e-9
+            )
+
+    def test_inverted_partial_pull(self):
+        # raw -0.6 inverted -> flip to 0.6 -> val 0.8 -> (0.8-0.1)/0.9
+        assert normalize_trigger(-0.6, 0.10, invert=True) == pytest.approx(
+            (0.8 - 0.1) / 0.9, abs=1e-6
+        )

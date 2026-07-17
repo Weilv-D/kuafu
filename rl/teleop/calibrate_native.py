@@ -202,24 +202,35 @@ def main():
     ]
 
     invert_v = False
+    invert_lt = False
+    invert_rt = False
     for env_key, prompt in axis_steps:
         idx, peak_val = _wait_axis(f, n_axes, prompt)
         if idx is None:
             continue
         result[env_key] = str(idx)
 
-        # For V axis: check the sign of the push at detection time.
-        # kernel js convention: pushing UP on left stick Y gives -32767 on
-        # most gamepads (including VADER2P). We want push-up = forward = +v,
-        # so if push-up gives a negative raw value, we need INVERT=1.
-        # IMPORTANT: use the detection-time value, NOT a re-read after release,
-        # because the spring-back overshoot has the opposite sign.
         if env_key == "KUAFU_AXIS_V":
+            # kernel js: pushing UP on left stick Y gives -32767 on most
+            # gamepads. We want push-up = forward = +v, so negative -> INVERT=1.
             invert_v = peak_val < 0
             print(f"   推上检测值={peak_val:+d} -> KUAFU_AXIS_V_INVERT={'1' if invert_v else '0'}")
 
+        if env_key == "KUAFU_AXIS_LT":
+            # Standard trigger: rest=-32767, press=+32767 (positive on press).
+            # Inverted trigger (e.g. VADER2P RT): rest=+32767, press=-32767.
+            # If the press value is negative, the trigger is inverted.
+            invert_lt = peak_val < 0
+            print(f"   捏紧检测值={peak_val:+d} -> KUAFU_AXIS_LT_INVERT={'1' if invert_lt else '0'}")
+
+        if env_key == "KUAFU_AXIS_RT":
+            invert_rt = peak_val < 0
+            print(f"   捏紧检测值={peak_val:+d} -> KUAFU_AXIS_RT_INVERT={'1' if invert_rt else '0'}")
+
     result["KUAFU_AXIS_V_INVERT"] = "1" if invert_v else "0"
     result["KUAFU_AXIS_W_INVERT"] = "0"  # right = positive by convention
+    result["KUAFU_AXIS_LT_INVERT"] = "1" if invert_lt else "0"
+    result["KUAFU_AXIS_RT_INVERT"] = "1" if invert_rt else "0"
 
     # ---- 按钮标定 ----
     btn_steps = [
@@ -244,6 +255,7 @@ def main():
         "KUAFU_AXIS_V", "KUAFU_AXIS_W",
         "KUAFU_AXIS_LT", "KUAFU_AXIS_RT",
         "KUAFU_AXIS_V_INVERT", "KUAFU_AXIS_W_INVERT",
+        "KUAFU_AXIS_LT_INVERT", "KUAFU_AXIS_RT_INVERT",
         "KUAFU_BTN_ARM", "KUAFU_BTN_DISARM", "KUAFU_BTN_ESTOP",
     ]
     lines = [f"export {k}={result[k]}" for k in order if k in result]

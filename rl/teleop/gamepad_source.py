@@ -14,6 +14,8 @@ GamepadSource - pygame 手柄命令源
   KUAFU_AXIS_RT   RT 扳机 (站)              默认 5
   KUAFU_AXIS_V_INVERT  反转 v 轴(默认 1)    pygame Y 向下为正
   KUAFU_AXIS_W_INVERT  反转 ω 轴(默认 0)
+  KUAFU_AXIS_LT_INVERT 反转 LT 扳机(默认 0)  某些手柄(如 VADER2P RT)静止为 +1
+  KUAFU_AXIS_RT_INVERT 反转 RT 扳机(默认 0)
   KUAFU_BTN_ARM   使能键(默认 7=START)
   KUAFU_BTN_DISARM 卸能键(默认 6=Back)
   KUAFU_BTN_ESTOP  急停键(默认 0=A)
@@ -88,6 +90,8 @@ class GamepadSource:
         self._btn_estop = _env_int("KUAFU_BTN_ESTOP", 0)   # A
         self._invert_v = _env_bool("KUAFU_AXIS_V_INVERT", True)
         self._invert_w = _env_bool("KUAFU_AXIS_W_INVERT", False)
+        self._invert_lt = _env_bool("KUAFU_AXIS_LT_INVERT", False)
+        self._invert_rt = _env_bool("KUAFU_AXIS_RT_INVERT", False)
         self._rumble_enabled = _env_bool("KUAFU_RUMBLE", True)
         # 状态
         self._armed = False           # 启动默认 DISARMED(安全)
@@ -189,8 +193,10 @@ class GamepadSource:
         omega = wx * W_CMD_RANGE[1]
 
         # --- D0 rate (扳机带死区, 防误触漂移) ---
-        lt = normalize_trigger(self._joy.get_axis(self._axis_lt), self._cfg.trigger_deadzone)
-        rt = normalize_trigger(self._joy.get_axis(self._axis_rt), self._cfg.trigger_deadzone)
+        lt = normalize_trigger(self._joy.get_axis(self._axis_lt), self._cfg.trigger_deadzone,
+                               invert=self._invert_lt)
+        rt = normalize_trigger(self._joy.get_axis(self._axis_rt), self._cfg.trigger_deadzone,
+                               invert=self._invert_rt)
         self._d0 += (rt - lt) * self._cfg.d0_rate_mm_s * dt
         self._d0 = max(D0_CMD_RANGE[0], min(D0_CMD_RANGE[1], self._d0))
 
