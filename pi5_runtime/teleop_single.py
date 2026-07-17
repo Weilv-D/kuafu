@@ -1,21 +1,40 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Single-process teleop: gamepad + serial + command in one process.
+"""Single-process baseline-LQR teleop (no ONNX model required).
 
-When ``serial_node`` and ``teleop_node`` run as separate processes they can
-compete for the same UART (``/dev/ttyAMA10``), causing heartbeat frames to be
-dropped or the serial read to fail with "multiple access on port".  This module
-combines the gamepad reader, the serial link, and the command arbiter into a
-single process so there is exactly one serial fd and one js0 fd.
+Combines gamepad input, the STM32 serial link, and command generation into
+one process.  This avoids the UART contention that occurs when
+``serial_node`` and ``teleop_node`` run as separate processes (heartbeat
+frames get dropped and the STM32 never transitions out of STAND).
 
-This is the recommended entry point for baseline-LQR teleop (no ONNX model).
+Reading path
+------------
+Gamepad axes/buttons are read from ``/dev/input/js0`` via
+:class:`~rl.teleop.native_joystick.NativeJoystick` (direct kernel interface,
+no pygame/SDL).  The STM32 link uses the versioned 0xA5 protocol: a HELLO
+frame establishes ``link_compatible``, then 50 Hz heartbeat+action frames
+carry ``(mode, v, ω, D0)`` and a zero residual (baseline LQR only).
 
-Usage::
+Two-state arm/disarm model
+--------------------------
+==============  ==============  ==================  ====================
+State           Button         Wire mode           Firmware behaviour
+==============  ==============  ==================  ====================
+DISARMED (def)  Back / btn8    IDLE → STAND(1)     LQR holds balance,
+                                                  wheels do not track
+ARMED           START / btn9   MANUAL → ACTIVE(2)  LQR tracks v/ω commands
+ESTOP           A / btn0       ESTOP → FAULT(4)    Latched stop
+==============  ==============  ==================  ====================
+
+Usage
+-----
+
+::
 
     cd ~/aspace/kuafu_repo
     PYTHONPATH=. python -m pi5_runtime.teleop_single
 
-Environment variables (same as ``gamepad_source``)::
+Environment variables (set from ``--calibrate`` output)::
 
     KUAFU_AXIS_V=1 KUAFU_AXIS_W=2 KUAFU_AXIS_LT=5 KUAFU_AXIS_RT=4
     KUAFU_AXIS_V_INVERT=1 KUAFU_AXIS_W_INVERT=0
@@ -24,14 +43,13 @@ Environment variables (same as ``gamepad_source``)::
     KUAFU_JS_DEVICE=/dev/input/js0
     KUAFU_SERIAL_PORT=/dev/ttyAMA10
     KUAFU_SERIAL_BAUD=921600
+    KUAFU_BT_MAC=F8:3B:26:8F:FE:F3   # enables BLE idle auto-reconnect
 """
 from __future__ import annotations
 
 import argparse
-import fcntl
 import os
 import signal
-import struct
 import sys
 import time
 
@@ -42,17 +60,14 @@ from pi5_runtime.protocol import (
     hello_frame, command_frames,
 )
 from rl.env.contract import ACTION_DIM
+from rl.teleop.native_joystick import NativeJoystick
 from rl.teleop.shaping import normalize_trigger, shape_axis
 import kuafu_physics as P
 
-JS_EVENT_FMT = "IhBB"
-JS_EVENT_SIZE = 8
-JS_EVENT_INIT = 0x80
-JS_EVENT_BUTTON = 0x01
-JS_EVENT_AXIS = 0x02
-JS_AXIS_MAX = 32767.0
 
-
+# -----------------------------------------------------------------------
+# config helpers
+# -----------------------------------------------------------------------
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
@@ -70,17 +85,32 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip() not in ("0", "false", "False", "")
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+# -----------------------------------------------------------------------
+# main
+# -----------------------------------------------------------------------
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="KUAFU single-process teleop (baseline LQR, no ONNX)"
     )
-    parser.add_argument("--port", default=os.environ.get("KUAFU_SERIAL_PORT", "/dev/ttyAMA10"))
-    parser.add_argument("--baudrate", type=int, default=int(os.environ.get("KUAFU_SERIAL_BAUD", "921600")))
-    parser.add_argument("--duration", type=float, default=0,
+    parser.add_argument("--port",
+                        default=os.environ.get("KUAFU_SERIAL_PORT", "/dev/ttyAMA10"))
+    parser.add_argument("--baudrate", type=int,
+                        default=int(os.environ.get("KUAFU_SERIAL_BAUD", "921600")))
+    parser.add_argument("--duration", type=float, default=0.0,
                         help="run for N seconds (0 = until Ctrl-C)")
     args = parser.parse_args()
 
-    # --- Axis / button mapping ---
+    # --- config from environment ---
     axis_v = _env_int("KUAFU_AXIS_V", 1)
     axis_w = _env_int("KUAFU_AXIS_W", 2)
     axis_lt = _env_int("KUAFU_AXIS_LT", 4)
@@ -93,42 +123,38 @@ def main() -> None:
     invert_lt = _env_bool("KUAFU_AXIS_LT_INVERT", False)
     invert_rt = _env_bool("KUAFU_AXIS_RT_INVERT", False)
     js_device = os.environ.get("KUAFU_JS_DEVICE", "/dev/input/js0")
+    bt_mac = os.environ.get("KUAFU_BT_MAC", "")
 
-    stick_deadzone = 0.08
-    stick_gamma = 2.0
-    trigger_deadzone = 0.10
-    d0_rate_mm_s = 40.0
+    stick_deadzone = _env_float("KUAFU_STICK_DEADZONE", 0.08)
+    stick_gamma = _env_float("KUAFU_STICK_GAMMA", 2.0)
+    trigger_deadzone = _env_float("KUAFU_TRIGGER_DEADZONE", 0.10)
+    d0_rate = _env_float("KUAFU_D0_RATE_MM_S", 40.0)
+    idle_reconnect = _env_float("KUAFU_IDLE_RECONNECT", 15.0)
 
-    # --- Open gamepad ---
-    try:
-        jf = open(js_device, "rb")
-    except (FileNotFoundError, PermissionError) as exc:
-        print(f"[teleop_single] cannot open {js_device}: {exc}")
+    # --- open gamepad ---
+    joy = NativeJoystick(js_device)
+    if not joy.connected:
+        print(f"[teleop] ERROR: cannot open {js_device}")
         sys.exit(1)
-    fcntl.fcntl(jf.fileno(), fcntl.F_SETFL,
-                os.O_NONBLOCK | fcntl.fcntl(jf.fileno(), fcntl.F_GETFL))
-    # Drain INIT events
-    while jf.read(JS_EVENT_SIZE):
-        pass
-    print(f"[teleop_single] gamepad: {js_device}")
+    print(f"[teleop] gamepad: {js_device}")
 
-    axes: list[float] = [0.0] * 12
-    buttons: list[bool] = [False] * 24
     prev_buttons: dict[int, bool] = {}
-
     armed = False
     estop_latched = False
     d0 = P.D0_MIN
 
-    # --- Open serial ---
+    # --- open serial ---
     import serial as pyserial
-    s = pyserial.Serial(args.port, baudrate=args.baudrate, timeout=0)
-    dec = StreamDecoder()
+    ser = pyserial.Serial(args.port, baudrate=args.baudrate, timeout=0)
+    decoder = StreamDecoder()
     seq = 0
-    s.write(hello_frame(seq, int(time.monotonic() * 1000), P.model_hash()).encode())
+    ser.write(hello_frame(seq, int(time.monotonic() * 1000),
+                          P.model_hash()).encode())
     seq = (seq + 2) & 0xFFFF
-    print(f"[teleop_single] serial: {args.port} @ {args.baudrate}, HELLO sent (hash={P.model_hash()})")
+    print(f"[teleop] serial: {args.port} @ {args.baudrate} "
+          f"(hash={P.model_hash()})")
 
+    # --- signal handling ---
     stopping = {"flag": False}
 
     def _shutdown(_signum, _frame):
@@ -137,15 +163,20 @@ def main() -> None:
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    print(f"[teleop_single] READY — wake gamepad (push stick), "
-          f"btn{btn_arm}=ARM btn{btn_disarm}=DISARM btn{btn_estop}=ESTOP")
+    print(f"[teleop] READY — wake gamepad (push stick), "
+          f"btn{btn_arm}=ARM  btn{btn_disarm}=DISARM  btn{btn_estop}=ESTOP")
 
+    # --- main loop ---
     start = time.monotonic()
     last_poll = start
     tick = 0
-    last_health_mode = None
+    last_mode = None
     last_report = 0.0
+    last_reconnect = 0.0
+    was_idle = False
     zero_action = np.zeros(ACTION_DIM, dtype=np.float32)
+    v_cmd = w_cmd = 0.0
+    mode = 1
 
     try:
         while not stopping["flag"]:
@@ -157,102 +188,130 @@ def main() -> None:
             if args.duration > 0 and now - start > args.duration:
                 break
 
-            # --- Read gamepad events ---
-            while True:
-                data = jf.read(JS_EVENT_SIZE)
-                if data is None or len(data) < JS_EVENT_SIZE:
-                    break
-                _t, val, etype, num = struct.unpack(JS_EVENT_FMT, data)
-                if etype & JS_EVENT_INIT:
-                    continue
-                if etype & JS_EVENT_AXIS:
-                    if num < len(axes):
-                        axes[num] = val / JS_AXIS_MAX
-                elif etype & JS_EVENT_BUTTON:
-                    if num < len(buttons):
-                        pressed = bool(val)
-                        if pressed and not prev_buttons.get(num, False):
-                            if num == btn_arm:
-                                armed = True
-                                estop_latched = False
-                                print("[teleop_single] ARMED", flush=True)
-                            elif num == btn_disarm:
-                                armed = False
-                                print("[teleop_single] DISARMED", flush=True)
-                            elif num == btn_estop:
-                                armed = False
-                                estop_latched = True
-                                print("[teleop_single] ESTOP", flush=True)
-                        prev_buttons[num] = pressed
-                        buttons[num] = pressed
-
-            if estop_latched:
-                v_cmd = 0.0
-                w_cmd = 0.0
-                mode = 4
-            elif armed:
-                vy = shape_axis(-axes[axis_v] if invert_v else axes[axis_v],
-                                stick_deadzone, stick_gamma)
-                wx = shape_axis(-axes[axis_w] if invert_w else axes[axis_w],
-                                stick_deadzone, stick_gamma)
-                v_cmd = vy * 0.5
-                w_cmd = wx * 1.0
-                lt = normalize_trigger(axes[axis_lt], trigger_deadzone, invert=invert_lt)
-                rt = normalize_trigger(axes[axis_rt], trigger_deadzone, invert=invert_rt)
-                d0 += (rt - lt) * d0_rate_mm_s * dt
-                d0 = max(P.D0_MIN, min(P.D0_MAX, d0))
-                mode = 2
+            # --- gamepad ---
+            if not joy.connected:
+                if now - last_reconnect > 2.0:
+                    if joy.reconnect():
+                        print(f"[teleop] gamepad reconnected")
+                        last_reconnect = now
+                    else:
+                        last_reconnect = now
+                if not joy.connected:
+                    mode = 4  # ESTOP if no gamepad
             else:
-                v_cmd = 0.0
-                w_cmd = 0.0
-                lt = normalize_trigger(axes[axis_lt], trigger_deadzone, invert=invert_lt)
-                rt = normalize_trigger(axes[axis_rt], trigger_deadzone, invert=invert_rt)
-                d0 += (rt - lt) * d0_rate_mm_s * dt
-                d0 = max(P.D0_MIN, min(P.D0_MAX, d0))
-                mode = 1
+                joy.poll()
 
-            # --- Send command (50 Hz) ---
+                # BLE idle detection
+                if joy.is_idle:
+                    if not was_idle:
+                        print("[teleop] ⚠️  gamepad idle — push a stick to wake")
+                        was_idle = True
+                    elif int(now) % 5 == 0 and now - last_report > 4.5:
+                        print(f"[teleop] still idle ({joy.idle_seconds:.0f}s)")
+                        last_report = now
+                    if (bt_mac and joy.idle_seconds > idle_reconnect
+                            and now - last_reconnect > 15.0):
+                        print(f"[teleop] idle {joy.idle_seconds:.0f}s, "
+                              f"reconnecting {bt_mac} ...")
+                        from rl.teleop.bt_wakeup import bt_reconnect
+                        bt_reconnect(bt_mac)
+                        joy.reconnect()
+                        last_reconnect = now
+                elif was_idle:
+                    print("[teleop] ✅ gamepad awake")
+                    was_idle = False
+
+                # button edges
+                for btn, action in (
+                    (btn_arm, "arm"),
+                    (btn_disarm, "disarm"),
+                    (btn_estop, "estop"),
+                ):
+                    pressed = joy.get_button(btn)
+                    if pressed and not prev_buttons.get(btn, False):
+                        if action == "arm":
+                            armed = True
+                            estop_latched = False
+                            print("[teleop] ARMED", flush=True)
+                        elif action == "disarm":
+                            armed = False
+                            print("[teleop] DISARMED", flush=True)
+                        elif action == "estop":
+                            armed = False
+                            estop_latched = True
+                            print("[teleop] ESTOP", flush=True)
+                    prev_buttons[btn] = pressed
+
+                # sticks
+                if estop_latched:
+                    v_cmd = w_cmd = 0.0
+                    mode = 4
+                elif armed:
+                    vy = shape_axis(
+                        -joy.get_axis(axis_v) if invert_v else joy.get_axis(axis_v),
+                        stick_deadzone, stick_gamma)
+                    wx = shape_axis(
+                        -joy.get_axis(axis_w) if invert_w else joy.get_axis(axis_w),
+                        stick_deadzone, stick_gamma)
+                    v_cmd = vy * 0.5
+                    w_cmd = wx * 1.0
+                    mode = 2
+                else:
+                    v_cmd = w_cmd = 0.0
+                    mode = 1
+
+                # D0 rate (works in all states)
+                lt = normalize_trigger(joy.get_axis(axis_lt),
+                                       trigger_deadzone, invert=invert_lt)
+                rt = normalize_trigger(joy.get_axis(axis_rt),
+                                       trigger_deadzone, invert=invert_rt)
+                d0 += (rt - lt) * d0_rate * dt
+                d0 = max(P.D0_MIN, min(P.D0_MAX, d0))
+
+            # --- send command (50 Hz) ---
             if tick % 2 == 0:
                 ts = int(now * 1000)
                 try:
-                    hb, res = command_frames(seq, ts, mode, v_cmd, w_cmd, d0, zero_action)
+                    hb, res = command_frames(seq, ts, mode, v_cmd, w_cmd,
+                                             d0, zero_action)
                     seq = (seq + 2) & 0xFFFF
-                    s.write(hb.encode() + res.encode())
+                    ser.write(hb.encode() + res.encode())
                 except (ValueError, OSError):
                     pass
 
-            # --- Read telemetry ---
-            for f in dec.feed(s.read(256)):
-                if f.type == TEL_HEALTH:
-                    h = decode_health_payload(f.payload)
-                    modes = {0: "STARTUP", 1: "STAND", 2: "ACTIVE",
-                             3: "CLIMB", 4: "FAULT"}
-                    if h.mode != last_health_mode or now - last_report > 5.0:
+            # --- read telemetry ---
+            for frame in decoder.feed(ser.read(256)):
+                if frame.type == TEL_HEALTH:
+                    h = decode_health_payload(frame.payload)
+                    labels = {0: "STARTUP", 1: "STAND", 2: "ACTIVE",
+                              3: "CLIMB", 4: "FAULT"}
+                    if h.mode != last_mode or now - last_report > 5.0:
                         bits = []
                         for name, bit in [("SERVO", 0x10), ("IMU", 0x20),
                                           ("WL", 0x40), ("WR", 0x80)]:
                             if h.fault_mask & bit:
                                 bits.append(name)
-                        fault_str = ",".join(bits) if bits else "none"
-                        print(f"[teleop_single] STM32={modes.get(h.mode, h.mode)} "
-                              f"faults={fault_str} "
-                              f"cmd(v={v_cmd:+.3f} w={w_cmd:+.3f} d0={d0:.1f} m={mode})",
+                        print(f"[teleop] STM32={labels.get(h.mode, h.mode)} "
+                              f"faults={','.join(bits) or 'none'} "
+                              f"cmd(v={v_cmd:+.3f} w={w_cmd:+.3f} "
+                              f"d0={d0:.1f} m={mode})",
                               flush=True)
-                        last_health_mode = h.mode
+                        last_mode = h.mode
                         last_report = now
 
             time.sleep(0.01)
     finally:
-        # Send one ESTOP on exit
+        # Send ESTOP on exit
         try:
             ts = int(time.monotonic() * 1000)
-            hb, res = command_frames(seq, ts, 4, 0.0, 0.0, P.D0_MIN, zero_action)
-            s.write(hb.encode() + res.encode())
+            hb, res = command_frames(seq, ts, 4, 0.0, 0.0,
+                                     P.D0_MIN, zero_action)
+            ser.write(hb.encode() + res.encode())
         except (ValueError, OSError):
             pass
-        s.close()
-        jf.close()
-        print("[teleop_single] stopped")
+        ser.close()
+        joy.close()
+        print("[teleop] stopped")
 
 
 if __name__ == "__main__":

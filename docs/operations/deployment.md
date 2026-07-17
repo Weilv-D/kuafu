@@ -54,49 +54,30 @@ and yaw commands, and levels roll via the fixed-gain D0 offset.
 
 ## Teleop (Gamepad)
 
-Bluetooth/USB gamepad teleop runs as two processes connected by a Unix domain socket (`/tmp/kuafu-cmd.sock`, JSON payload `{v,omega,d0,mode}`). The command arbiter (`rl/teleop/arbiter.py`) runs inside `serial_node`, so it owns the safety layer — ramp, limit, estop, and timeout. The separate `teleop_node` process only reads the gamepad and forwards raw commands; if it crashes or the Bluetooth link drops, the arbiter's IPC source goes stale (0.5 s) and the robot parks at the safe default `[0, 0, D0_MIN]` instead of holding the last command.
-
-Start the serial loop with teleop enabled, then the teleop publisher.
-With the ONNX policy deployed:
+Baseline-LQR gamepad teleop runs as a **single process** (`pi5_runtime.teleop_single`) that reads the gamepad and drives the STM32 serial link directly. This avoids the UART contention that occurs when two separate processes (`serial_node` + `teleop_node`) compete for `/dev/ttyAMA10`.
 
 ```bash
-cd /opt/kuafu && PYTHONPATH=/opt/kuafu python -m pi5_runtime.serial_node \
-  --model /opt/kuafu/kuafu-policy.onnx \
-  --port /dev/ttyAMA10 \
-  --enable-teleop
+cd /opt/kuafu && PYTHONPATH=/opt/kuafu python -m pi5_runtime.teleop_single
 ```
 
-Without the ONNX policy (baseline LQR only):
-
-```bash
-cd /opt/kuafu && PYTHONPATH=/opt/kuafu python -m pi5_runtime.serial_node \
-  --port /dev/ttyAMA10 \
-  --no-policy \
-  --enable-teleop
-```
-
-```bash
-cd /opt/kuafu && PYTHONPATH=/opt/kuafu python -m pi5_runtime.teleop_node --device gamepad
-```
-
-`--device keyboard` falls back to WASD/QE/Enter/Backspace/space when no gamepad is present; `teleop_node` also falls back if pygame itself is unavailable. On a headless Pi5, export `SDL_VIDEODRIVER=dummy` so pygame can run its event pump without a display.
+For ONNX-policy teleop (when a trained model is available), use `serial_node` with `--model` instead.
 
 ### Gamepad layout
 
-The source starts **DISARMED** (safe): the wheels hold balance via LQR but do not track commands, and the RL residual is gated off. The operator must explicitly arm before motion is possible.
+The process starts **DISARMED** (safe): the wheels hold balance via LQR but do not track commands. The operator must explicitly arm before motion is possible.
 
 | Input | Action |
 |---|---|
-| `START` (arm) | ARMED → firmware ACTIVE: wheels track commands, RL residual on. Also clears an ESTOP latch. |
-| `Select` / `Back` (disarm) | DISARMED → firmware STAND: LQR still holds balance, but commands are ignored and the residual is off. |
-| `A` (estop) | ESTOP latch → firmware FAULT: actuators disabled until reset. |
+| `START` (arm) | ARMED → firmware ACTIVE: wheels track commands. Also clears an ESTOP latch. |
+| `Select` / `Back` (disarm) | DISARMED → firmware STAND: LQR holds balance, commands ignored. |
+| `A` (estop) | ESTOP latch → firmware FAULT: actuators disabled until STM32 reset. |
 | Left stick Y | forward speed `v` (±0.5 m/s) |
 | Right stick X | yaw rate `ω` (±1.0 rad/s) |
 | LT / RT | crouch / stand D0 (rate-based, 40 mm/s, with a trigger deadzone) |
 
-Stick response is shaped by a deadzone (`0.08`) then a square curve (`sign(x)·|x|²`), so small deflections produce small commands for precise low-speed control while full deflection still reaches the limit. Override the shaping via `ArbiterConfig` (`stick_deadzone`, `stick_gamma`, `trigger_deadzone`, `d0_rate_mm_s`).
+Stick response is shaped by a deadzone (`0.08`) then a square curve (`sign(x)·|x|²`).
 
-Gamepad environment variables (defaults are Xbox-layout; Flydigi/PS/Switch usually differ):
+Gamepad environment variables (defaults are Xbox-layout; calibrate for your controller):
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -104,28 +85,23 @@ Gamepad environment variables (defaults are Xbox-layout; Flydigi/PS/Switch usual
 | `KUAFU_AXIS_W` | 2 | right stick X axis index |
 | `KUAFU_AXIS_LT` | 4 | LT trigger axis index |
 | `KUAFU_AXIS_RT` | 5 | RT trigger axis index |
-| `KUAFU_AXIS_V_INVERT` | 1 | invert the v axis (pygame Y is positive-down) |
+| `KUAFU_AXIS_V_INVERT` | 1 | invert the v axis (Y is positive-down on most gamepads) |
 | `KUAFU_AXIS_W_INVERT` | 0 | invert the ω axis |
-| `KUAFU_AXIS_LT_INVERT` | 0 | invert LT trigger (some gamepads rest at +1) |
-| `KUAFU_AXIS_RT_INVERT` | 0 | invert RT trigger (VADER2P RT rests at +1 over Bluetooth) |
+| `KUAFU_AXIS_LT_INVERT` | 0 | invert LT trigger |
+| `KUAFU_AXIS_RT_INVERT` | 0 | invert RT trigger |
 | `KUAFU_BTN_ARM` | 7 | arm button (START) |
 | `KUAFU_BTN_DISARM` | 6 | disarm button (`Select`/`Back`) |
 | `KUAFU_BTN_ESTOP` | 0 | estop button (A) |
-| `KUAFU_RUMBLE` | 1 | haptic feedback on arm/disarm/estop/reconnect; set 0 to disable |
 | `KUAFU_JS_DEVICE` | /dev/input/js0 | kernel joystick device path |
-| `KUAFU_BT_MAC` | (empty) | Bluetooth MAC for auto-reconnect when gamepad goes idle; enables the idle watchdog |
-| `KUAFU_IDLE_RECONNECT` | 15 | seconds of BLE silence before auto-reconnect (requires `KUAFU_BT_MAC`) |
-| `KUAFU_IDLE_WARN_INTERVAL` | 5 | seconds between "push a stick" reminders while idle |
+| `KUAFU_SERIAL_PORT` | /dev/ttyAMA10 | STM32 UART device |
+| `KUAFU_BT_MAC` | (empty) | Bluetooth MAC for auto-reconnect on BLE idle |
+| `KUAFU_IDLE_RECONNECT` | 15 | seconds of BLE silence before auto-reconnect |
 
-Hot-plug is supported: if the controller disconnects, `poll()` returns ESTOP and the arbiter parks the robot; on reconnect the operator must arm again. Calibrate a new controller's axis and button mapping with `python -m rl.teleop.gamepad_source --calibrate`; the interactive tool reads `/dev/input/js0` directly (bypassing pygame/SDL, which can drop events on Bluetooth LE devices), guides you through each stick and trigger, auto-detects the v-axis and trigger invert directions, and prints ready-to-export `KUAFU_AXIS_*` / `KUAFU_BTN_*` lines.
+Calibrate a new controller with `python -m rl.teleop.calibrate_native`; the interactive tool reads `/dev/input/js0` directly, guides you through each stick and trigger, auto-detects invert directions, and prints ready-to-export `KUAFU_AXIS_*` / `KUAFU_BTN_*` lines.
 
-**BLE idle sleep.** Flydigi VADER2P and similar BLE gamepads enter a low-power idle after Bluetooth connection and stop sending HID input reports until physically operated (stick move or button press). `GamepadSource` detects this automatically: if no events arrive after connect it prints a wake-up reminder, and if `KUAFU_BT_MAC` is set it attempts a `bluetoothctl` reconnect after `KUAFU_IDLE_RECONNECT` seconds (default 15) of silence. The operator must push a stick or button to wake the controller. A standalone watchdog daemon is available: `KUAFU_BT_MAC=F8:3B:26:8F:FE:F3 python -m rl.teleop.bt_wakeup` (or `--check` for a one-shot alive test).
+**BLE idle sleep.** Flydigi VADER2P and similar BLE gamepads enter a low-power idle after Bluetooth connection and stop sending HID input reports until physically operated. `teleop_single` detects this automatically: if no events arrive after connect it prints a wake-up reminder, and if `KUAFU_BT_MAC` is set it attempts a `bluetoothctl` reconnect after `KUAFU_IDLE_RECONNECT` seconds of silence. The operator must push a stick or button to wake the controller. A standalone watchdog is available: `KUAFU_BT_MAC=F8:3B:26:8F:FE:F3 python -m rl.teleop.bt_wakeup`.
 
-**Reading path.** `GamepadSource` reads axis/button state from `/dev/input/js0` via a native non-blocking reader (`_NativeJoystick`). pygame/SDL is not used for input reading — its `get_axis()`/`get_button()` can return stale cached values on BLE devices. pygame is only used by `teleop_node` for display initialization; it no longer creates a `Joystick` object that would compete for the kernel event queue.
-
-Keyboard layout: `W/S` → v (±0.25 m/s), `A/D` → ω (±0.8 rad/s), `Q/E` → D0, `Enter` → arm, `Backspace` → disarm, `Space` → ESTOP, `R` → clear ESTOP latch. Keyboard commands are discrete gears and do not apply the stick curve.
-
-The future Nav2 planner will reuse this path by feeding the `AutonomousSource` instead of the IPC source; the arbiter and policy are unchanged.
+**Reading path.** Gamepad axes/buttons are read from `/dev/input/js0` via `rl.teleop.native_joystick.NativeJoystick` — a direct kernel interface reader with no pygame/SDL dependency. pygame's `get_axis()`/`get_button()` return stale cached values on BLE devices and its event pump competes with the native reader for kernel events, so pygame is not used at all.
 
 ## Firmware
 

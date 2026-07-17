@@ -1,197 +1,117 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Native joystick calibration - reads /dev/input/js0 directly, no pygame/SDL.
+"""Interactive gamepad calibration — guided axis/button discovery.
 
-pygame's get_axis()/get_button() can return stale cached values on Bluetooth LE
-gamepads (Flydigi VADER2P etc.) because SDL's event pump doesn't always flush
-joystick state. This tool reads the kernel joystick interface directly, which
-is the same data pygame eventually gets but without the SDL caching layer.
+Reads ``/dev/input/js0`` via :class:`~rl.teleop.native_joystick.NativeJoystick`
+and walks the operator through each stick, trigger, and button.  Auto-detects
+v-axis and trigger invert directions, then prints ready-to-export
+``KUAFU_AXIS_*`` / ``KUAFU_BTN_*`` lines.
 
-Usage:
+Usage::
+
     python -m rl.teleop.calibrate_native
-    (or: python rl/teleop/calibrate_native.py)
-
-Then follow the prompts. Output is ready-to-export KUAFU_AXIS_* / KUAFU_BTN_*
-lines.
 """
 from __future__ import annotations
 
-import fcntl
 import os
-import struct
 import sys
 import time
 
-JS_DEVICE = "/dev/input/js0"
-JS_EVENT_FMT = "IhBB"       # time_ms, value, type, number
-JS_EVENT_SIZE = struct.calcsize(JS_EVENT_FMT)
-JS_EVENT_BUTTON = 0x01
-JS_EVENT_AXIS = 0x02
-JS_EVENT_INIT = 0x80
+from rl.teleop.native_joystick import JS_EVENT_AXIS, JS_EVENT_BUTTON, NativeJoystick
 
-# Axis value thresholds
-AXIS_DETECT_THRESHOLD = 20000   # out of 32767, ~60% push
-AXIS_DEAD_THRESHOLD = 1000      # below this = released/centered
+JS_DEVICE = os.environ.get("KUAFU_JS_DEVICE", "/dev/input/js0")
+
+# Detection thresholds (raw int16 units, ±32767)
+_AXIS_DETECT = 20000     # ~60 % deflection
+_AXIS_RELEASED = 2000    # near-centre = released
 
 
-def _open_js():
-    """Open js0 non-blocking, drain INIT events, return (file, n_axes, n_btns)."""
-    try:
-        f = open(JS_DEVICE, "rb")
-    except PermissionError:
-        print(f"权限不足: 无法读取 {JS_DEVICE}")
-        print("运行: sudo usermod -aG input $USER  然后重新登录")
-        sys.exit(1)
-    except FileNotFoundError:
-        print(f"未找到 {JS_DEVICE} - 手柄未连接")
-        sys.exit(1)
-
-    fd = f.fileno()
-    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-    # Drain INIT events to discover axis/button count
-    n_axes = 0
-    n_btns = 0
-    while True:
-        data = f.read(JS_EVENT_SIZE)
-        if data is None or len(data) < JS_EVENT_SIZE:
-            break
-        _t, _val, etype, num = struct.unpack(JS_EVENT_FMT, data)
-        if etype & JS_EVENT_INIT:
-            if etype & JS_EVENT_AXIS:
-                n_axes = max(n_axes, num + 1)
-            if etype & JS_EVENT_BUTTON:
-                n_btns = max(n_btns, num + 1)
-
-    if n_axes == 0:
-        # Fallback: read from sysfs
-        try:
-            n_axes = int(open(
-                f"/sys/class/input/js0/device/../capabilities/abs"
-            ).read().strip(), 16).bit_count()
-        except Exception:
-            n_axes = 8
-
-    return f, n_axes, n_btns
-
-
-def _read_events(f, timeout=0.1):
-    """Read all pending events, return list of (type, number, value)."""
+def _drain_and_wait(joy: NativeJoystick, timeout: float = 0.1) -> list:
+    """Poll the joystick for *timeout* seconds, return raw (etype, num, val) events."""
     events = []
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        data = f.read(JS_EVENT_SIZE)
-        if data is None or len(data) < JS_EVENT_SIZE:
+        # We need raw events, but NativeJoystick.poll() consumes them.
+        # Read the underlying file directly for calibration.
+        import struct
+        data = joy._file.read(8)
+        if data is None or len(data) < 8:
             time.sleep(0.005)
             continue
-        _t, val, etype, num = struct.unpack(JS_EVENT_FMT, data)
-        if etype & JS_EVENT_INIT:
-            continue    # skip init
+        _t, val, etype, num = struct.unpack("IhBB", data)
+        if etype & 0x80:  # INIT
+            continue
         events.append((etype, num, val))
+        # Also update the snapshot so get_axis stays consistent
+        if etype & JS_EVENT_AXIS and num < joy.n_axes:
+            joy.axes[num] = val / 32767.0
+        elif etype & JS_EVENT_BUTTON and num < joy.n_buttons:
+            joy.buttons[num] = bool(val)
     return events
 
 
-def _wait_axis(f, n_axes, prompt, timeout=20.0):
+def wait_axis(joy: NativeJoystick, prompt: str, timeout: float = 20.0):
     """Wait for user to push an axis past threshold.
 
-    Returns (axis_index, peak_value) or (None, 0).
-    The peak_value is captured at the moment of detection, NOT after release,
-    so the sign reflects the user's intended push direction (not spring-back).
+    Returns ``(axis_index, peak_value)`` or ``(None, 0)``.
     """
     print(f"\n>> {prompt}")
     print(f"   (超时 {timeout:.0f}s 跳过)")
-    axis_state = [0] * n_axes
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        events = _read_events(f, 0.05)
-        for etype, num, val in events:
-            if etype & JS_EVENT_AXIS and num < n_axes:
-                axis_state[num] = val
-                if abs(val) > AXIS_DETECT_THRESHOLD:
-                    print(f"   ✓ 轴{num} 响应 (value={val:+d})")
-                    _wait_axis_release(f, num)
-                    return num, val
+        for etype, num, val in _drain_and_wait(joy, 0.05):
+            if etype & JS_EVENT_AXIS and abs(val) > _AXIS_DETECT:
+                print(f"   ✓ 轴{num} 响应 (value={val:+d})")
+                _wait_axis_release(joy, num)
+                return num, val
     print("   (超时)")
     return None, 0
 
 
-def _wait_axis_release(f, axis_idx, timeout=3.0):
-    """Wait for axis to return near center."""
+def _wait_axis_release(joy: NativeJoystick, axis_idx: int, timeout: float = 3.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        events = _read_events(f, 0.02)
-        for etype, num, val in events:
-            if etype & JS_EVENT_AXIS and num == axis_idx:
-                if abs(val) < AXIS_DEAD_THRESHOLD:
-                    return
-    return
+        for _etype, num, val in _drain_and_wait(joy, 0.02):
+            if num == axis_idx and abs(val) < _AXIS_RELEASED:
+                return
 
 
-def _wait_button(f, n_btns, prompt, timeout=20.0):
-    """Wait for user to press a button. Return button index or None."""
+def wait_button(joy: NativeJoystick, prompt: str, timeout: float = 20.0):
+    """Wait for user to press a button.  Returns button index or ``None``."""
     print(f"\n>> {prompt}")
     print(f"   (超时 {timeout:.0f}s 跳过)")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        events = _read_events(f, 0.05)
-        for etype, num, val in events:
-            if etype & JS_EVENT_BUTTON and num < n_btns and val == 1:
+        for etype, num, val in _drain_and_wait(joy, 0.05):
+            if etype & JS_EVENT_BUTTON and val == 1:
                 print(f"   ✓ 按钮{num} 按下")
-                _wait_button_release(f, num)
+                _wait_button_release(joy, num)
                 return num
     print("   (超时)")
     return None
 
 
-def _wait_button_release(f, btn_idx, timeout=3.0):
-    """Wait for button release."""
+def _wait_button_release(joy: NativeJoystick, btn_idx: int, timeout: float = 3.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        events = _read_events(f, 0.02)
-        for etype, num, val in events:
-            if etype & JS_EVENT_BUTTON and num == btn_idx and val == 0:
+        for etype, num, val in _drain_and_wait(joy, 0.02):
+            if num == btn_idx and val == 0:
                 return
-    return
 
 
-def _get_axis_direction(f, axis_idx, timeout=5.0):
-    """Read the peak value to determine push direction.
-
-    Kept for backward compatibility but no longer used for V-axis invert
-    detection -- _wait_axis now returns the value at detection time, which
-    avoids capturing the spring-back overshoot after release.
-    """
-    deadline = time.monotonic() + timeout
-    peak = 0
-    while time.monotonic() < deadline:
-        events = _read_events(f, 0.02)
-        for etype, num, val in events:
-            if etype & JS_EVENT_AXIS and num == axis_idx:
-                if abs(val) > abs(peak):
-                    peak = val
-        if abs(peak) > AXIS_DETECT_THRESHOLD:
-            time.sleep(0.3)
-            events = _read_events(f, 0.02)
-            for etype, num, val in events:
-                if etype & JS_EVENT_AXIS and num == axis_idx:
-                    if abs(val) > abs(peak):
-                        peak = val
-            break
-    return peak
-
-
-def main():
+def main() -> None:
     print("=" * 55)
-    print("  KUAFU 手柄标定 (原生 /dev/input/js0, 不依赖 pygame)")
+    print("  KUAFU 手柄标定 (原生 js0, 不依赖 pygame/SDL)")
     print("=" * 55)
 
-    f, n_axes, n_btns = _open_js()
-    print(f"  设备: {JS_DEVICE}")
-    print(f"  轴数: {n_axes}  按钮数: {n_btns}")
+    joy = NativeJoystick(JS_DEVICE)
+    if not joy.connected:
+        print(f"未找到 {JS_DEVICE} — 手柄未连接")
+        sys.exit(1)
+    print(f"  设备: {JS_DEVICE}  轴: {joy.n_axes}  按钮: {joy.n_buttons}")
     print("=" * 55)
 
-    result = {}
+    result: dict[str, str] = {}
 
     # ---- 轴标定 ----
     axis_steps = [
@@ -201,55 +121,43 @@ def main():
         ("KUAFU_AXIS_RT", "捏紧 RT 扳机 (升 D0)"),
     ]
 
-    invert_v = False
-    invert_lt = False
-    invert_rt = False
+    invert_v = invert_lt = invert_rt = False
     for env_key, prompt in axis_steps:
-        idx, peak_val = _wait_axis(f, n_axes, prompt)
+        idx, peak = wait_axis(joy, prompt)
         if idx is None:
             continue
         result[env_key] = str(idx)
-
         if env_key == "KUAFU_AXIS_V":
-            # kernel js: pushing UP on left stick Y gives -32767 on most
-            # gamepads. We want push-up = forward = +v, so negative -> INVERT=1.
-            invert_v = peak_val < 0
-            print(f"   推上检测值={peak_val:+d} -> KUAFU_AXIS_V_INVERT={'1' if invert_v else '0'}")
-
+            invert_v = peak < 0
+            print(f"   推上检测值={peak:+d} → V_INVERT={'1' if invert_v else '0'}")
         if env_key == "KUAFU_AXIS_LT":
-            # Standard trigger: rest=-32767, press=+32767 (positive on press).
-            # Inverted trigger (e.g. VADER2P RT): rest=+32767, press=-32767.
-            # If the press value is negative, the trigger is inverted.
-            invert_lt = peak_val < 0
-            print(f"   捏紧检测值={peak_val:+d} -> KUAFU_AXIS_LT_INVERT={'1' if invert_lt else '0'}")
-
+            invert_lt = peak < 0
+            print(f"   捏紧检测值={peak:+d} → LT_INVERT={'1' if invert_lt else '0'}")
         if env_key == "KUAFU_AXIS_RT":
-            invert_rt = peak_val < 0
-            print(f"   捏紧检测值={peak_val:+d} -> KUAFU_AXIS_RT_INVERT={'1' if invert_rt else '0'}")
+            invert_rt = peak < 0
+            print(f"   捏紧检测值={peak:+d} → RT_INVERT={'1' if invert_rt else '0'}")
 
     result["KUAFU_AXIS_V_INVERT"] = "1" if invert_v else "0"
-    result["KUAFU_AXIS_W_INVERT"] = "0"  # right = positive by convention
+    result["KUAFU_AXIS_W_INVERT"] = "0"
     result["KUAFU_AXIS_LT_INVERT"] = "1" if invert_lt else "0"
     result["KUAFU_AXIS_RT_INVERT"] = "1" if invert_rt else "0"
 
     # ---- 按钮标定 ----
-    btn_steps = [
+    for env_key, prompt in [
         ("KUAFU_BTN_ARM",    "按 ARM 使能键 (建议 START)"),
         ("KUAFU_BTN_DISARM", "按 DISARM 卸能键 (建议 Select/Back)"),
         ("KUAFU_BTN_ESTOP",  "按 ESTOP 急停键 (建议 A)"),
-    ]
-    for env_key, prompt in btn_steps:
-        idx = _wait_button(f, n_btns, prompt)
-        if idx is None:
-            continue
-        result[env_key] = str(idx)
+    ]:
+        idx = wait_button(joy, prompt)
+        if idx is not None:
+            result[env_key] = str(idx)
 
-    f.close()
+    joy.close()
 
     # ---- 输出 ----
     print()
     print("=" * 55)
-    print("  标定完成! 复制以下行到 ~/.bashrc 或启动脚本:")
+    print("  标定完成! 复制以下行到 ~/.bashrc:")
     print("=" * 55)
     order = [
         "KUAFU_AXIS_V", "KUAFU_AXIS_W",

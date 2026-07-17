@@ -1,23 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-teleop 包 - 手柄遥控 / 自主规划 命令接口
+teleop 包 — 手柄遥控输入整形与原生读取
 
-提供统一的 Command 抽象,让手柄、键盘、自主规划器等不同命令源可插拔地接入
-同一套策略(策略本身零改动,它本就是 command-following)。
+组件:
+  - shaping          : 死区 / 平方曲线 / 扳机归一化 (纯函数)
+  - native_joystick  : /dev/input/jsX 原生读取器 (不依赖 pygame/SDL)
+  - calibrate_native : 交互式手柄标定工具
+  - bt_wakeup        : BLE 手柄休眠唤醒守护
 
-核心组件:
-  - Command / Mode / CommandSource : 统一接口定义 (command.py)
-  - CommandArbiter                  : 多源仲裁 + 安全层 (arbiter.py)
-  - GamepadSource / KeyboardSource  : 遥控源 (pygame)
-  - AutonomousSource                : 自主源 stub (接口占位, 实现见选型文档)
+运行入口: pi5_runtime.teleop_single (单进程遥控, 基线 LQR)
 """
-from rl.teleop.command import Command, Mode, CommandSource, ArbiterConfig
-from rl.teleop.arbiter import CommandArbiter
-
-__all__ = [
-    "Command",
-    "Mode",
-    "CommandSource",
-    "ArbiterConfig",
-    "CommandArbiter",
-]

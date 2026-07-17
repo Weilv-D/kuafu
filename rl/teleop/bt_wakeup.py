@@ -9,103 +9,81 @@ idle state after Bluetooth connection and stop sending HID input reports until
 physically operated (stick move or button press).  The kernel ``/dev/input/js0``
 device exists and INIT events are received, but no real-time events flow.
 
-This manifests as: ``bluetoothctl`` shows ``Connected: yes``, pygame/SDL sees
-the joystick, but ``get_axis()`` / ``get_button()`` return stale values and
-``--show-axes`` shows nothing.
-
 Solution
 --------
-This module provides:
-
-1. ``is_gamepad_alive()`` — read ``/dev/input/js0`` for 1 second and report
-   whether any real-time events arrived.
+1. ``is_gamepad_alive()`` — check whether events are flowing.
 2. ``bt_reconnect(mac)`` — disconnect + reconnect via ``bluetoothctl``.
-3. ``watch_loop(mac)`` — background loop that monitors event flow; when the
-   gamepad goes silent for ``idle_threshold`` seconds, it attempts a reconnect
-   and prints a wake-up reminder.
+3. ``watch_loop(mac)`` — background monitor; reconnect when silent too long.
 
 Usage
 -----
-Standalone (blocks):
+Standalone::
 
     python -m rl.teleop.bt_wakeup F8:3B:26:8F:FE:F3
 
-As a library (non-blocking checker):
+Library (used by ``teleop_single``)::
 
-    from rl.teleop.bt_wakeup import is_gamepad_alive, bt_reconnect
-    if not is_gamepad_alive():
-        bt_reconnect("F8:3B:26:8F:FE:F3")
+    from rl.teleop.bt_wakeup import bt_reconnect
+    bt_reconnect("F8:3B:26:8F:FE:F3")
 
-Environment
------------
-``KUAFU_BT_MAC`` — default MAC if not passed as argument.
-``KUAFU_JS_DEVICE`` — js device path (default ``/dev/input/js0``).
-``KUAFU_BT_IDLE_THRESHOLD`` — seconds of silence before reconnect (default 10).
+Environment::
+
+    KUAFU_BT_MAC            default MAC
+    KUAFU_JS_DEVICE         js device path (default /dev/input/js0)
+    KUAFU_BT_IDLE_THRESHOLD seconds of silence before reconnect (default 10)
 """
 from __future__ import annotations
 
 import os
-import struct
 import subprocess
 import sys
 import time
 
-JS_EVENT_FMT = "IhBB"
-JS_EVENT_SIZE = struct.calcsize(JS_EVENT_FMT)
-JS_EVENT_INIT = 0x80
+from rl.teleop.native_joystick import NativeJoystick
 
 
 def is_gamepad_alive(device: str = "/dev/input/js0", timeout: float = 1.0) -> bool:
-    """Return True if the gamepad sent at least one real-time event in *timeout* seconds."""
-    import fcntl
-
-    try:
-        f = open(device, "rb")
-    except (FileNotFoundError, PermissionError):
+    """Return ``True`` if the gamepad sent at least one real-time event in *timeout* s."""
+    joy = NativeJoystick(device)
+    if not joy.connected:
         return False
-
-    fd = f.fileno()
-    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-    # Drain INIT events
-    while True:
-        data = f.read(JS_EVENT_SIZE)
-        if data is None or len(data) < JS_EVENT_SIZE:
-            break
-
     deadline = time.monotonic() + timeout
-    alive = False
     while time.monotonic() < deadline:
-        data = f.read(JS_EVENT_SIZE)
-        if data is not None and len(data) == JS_EVENT_SIZE:
-            _t, _v, etype, _n = struct.unpack(JS_EVENT_FMT, data)
-            if not (etype & JS_EVENT_INIT):
-                alive = True
-                break
+        joy.poll()
+        if joy._event_count > 0:
+            joy.close()
+            return True
         time.sleep(0.01)
+    joy.close()
+    return False
 
-    f.close()
-    return alive
+
+def count_events(device: str = "/dev/input/js0", timeout: float = 1.0) -> int:
+    """Count real-time events in *timeout* seconds."""
+    joy = NativeJoystick(device)
+    if not joy.connected:
+        return -1
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        joy.poll()
+        time.sleep(0.01)
+    count = joy._event_count
+    joy.close()
+    return count
 
 
 def bt_reconnect(mac: str, settle: float = 2.0) -> bool:
     """Disconnect and reconnect a Bluetooth device via bluetoothctl.
 
-    Returns True if the device reports Connected: yes after reconnect.
+    Returns ``True`` if the device reports ``Connected: yes`` after reconnect.
     """
     print(f"[bt_wakeup] disconnecting {mac} ...")
-    subprocess.run(
-        ["bluetoothctl", "disconnect", mac],
-        capture_output=True, timeout=10,
-    )
+    subprocess.run(["bluetoothctl", "disconnect", mac],
+                   capture_output=True, timeout=10)
     time.sleep(1.0)
-
     print(f"[bt_wakeup] reconnecting {mac} ...")
-    result = subprocess.run(
-        ["bluetoothctl", "connect", mac],
-        capture_output=True, timeout=15, text=True,
-    )
+    result = subprocess.run(["bluetoothctl", "connect", mac],
+                            capture_output=True, timeout=15, text=True)
     ok = "Connection successful" in result.stdout
     if ok:
         print(f"[bt_wakeup] connected, waiting {settle:.0f}s for services ...")
@@ -115,108 +93,64 @@ def bt_reconnect(mac: str, settle: float = 2.0) -> bool:
     return ok
 
 
-def count_events(device: str = "/dev/input/js0", timeout: float = 1.0) -> int:
-    """Count real-time events in *timeout* seconds (non-blocking)."""
-    import fcntl
-
-    try:
-        f = open(device, "rb")
-    except (FileNotFoundError, PermissionError):
-        return -1
-
-    fd = f.fileno()
-    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-    while f.read(JS_EVENT_SIZE):
-        pass  # drain
-
-    deadline = time.monotonic() + timeout
-    count = 0
-    while time.monotonic() < deadline:
-        data = f.read(JS_EVENT_SIZE)
-        if data is not None and len(data) == JS_EVENT_SIZE:
-            _t, _v, etype, _n = struct.unpack(JS_EVENT_FMT, data)
-            if not (etype & JS_EVENT_INIT):
-                count += 1
-        time.sleep(0.01)
-
-    f.close()
-    return count
-
-
 def watch_loop(mac: str | None = None, device: str | None = None,
                idle_threshold: float | None = None) -> None:
-    """Monitor gamepad event flow; reconnect when silent for too long.
-
-    This is a blocking loop intended to run in a separate process or thread.
-    When the gamepad goes silent (0 events for *idle_threshold* seconds), it
-    attempts a Bluetooth reconnect and reminds the operator to physically
-    operate the controller.
-    """
+    """Monitor gamepad event flow; reconnect when silent for too long."""
     mac = mac or os.environ.get("KUAFU_BT_MAC", "")
     device = device or os.environ.get("KUAFU_JS_DEVICE", "/dev/input/js0")
     idle_threshold = idle_threshold or float(
-        os.environ.get("KUAFU_BT_IDLE_THRESHOLD", "10")
-    )
-
-    if not mac:
-        print("[bt_wakeup] KUAFU_BT_MAC not set; cannot reconnect. "
-              "Monitoring only.")
-        reconnect_enabled = False
-    else:
-        reconnect_enabled = True
+        os.environ.get("KUAFU_BT_IDLE_THRESHOLD", "10"))
+    reconnect_enabled = bool(mac)
 
     print(f"[bt_wakeup] monitoring {device} "
-          f"(idle_threshold={idle_threshold:.0f}s, "
-          f"reconnect={'on' if reconnect_enabled else 'off'})")
+          f"(idle={idle_threshold:.0f}s, reconnect={'on' if reconnect_enabled else 'off'})")
 
+    joy = NativeJoystick(device)
     last_event_time = time.monotonic()
-    last_reconnect_time = 0.0
-    was_alive = True
-    check_interval = 2.0
+    last_reconnect = 0.0
+    was_alive = bool(joy.connected and joy._event_count > 0)
 
     while True:
-        events = count_events(device, timeout=check_interval)
+        if not joy.connected:
+            joy.reconnect()
+            time.sleep(2.0)
+            continue
 
-        if events > 0:
-            last_event_time = time.monotonic()
+        joy.poll()
+        if joy._event_count > 0 or not joy.is_idle:
+            last_event_time = joy._last_event_time
             if not was_alive:
                 print("[bt_wakeup] ✅ gamepad awake — events flowing")
                 was_alive = True
         else:
-            silent_for = time.monotonic() - last_event_time
+            silent = joy.idle_seconds
             if was_alive:
-                print(f"[bt_wakeup] ⚠️  gamepad went silent "
-                      f"({silent_for:.0f}s without events)")
+                print(f"[bt_wakeup] ⚠️  gamepad silent ({silent:.0f}s)")
                 was_alive = False
-
-            if silent_for > idle_threshold and reconnect_enabled:
+            if silent > idle_threshold and reconnect_enabled:
                 now = time.monotonic()
-                # Don't reconnect more than once per 15s
-                if now - last_reconnect_time > 15.0:
-                    print(f"[bt_wakeup] silent for {silent_for:.0f}s > "
-                          f"{idle_threshold:.0f}s threshold; reconnecting ...")
+                if now - last_reconnect > 15.0:
+                    print(f"[bt_wakeup] silent {silent:.0f}s > {idle_threshold:.0f}s; "
+                          f"reconnecting ...")
                     bt_reconnect(mac)
-                    last_reconnect_time = now
+                    joy.reconnect()
+                    last_reconnect = now
                     last_event_time = time.monotonic()
                 else:
-                    remaining = 15.0 - (now - last_reconnect_time)
-                    if remaining > 0:
-                        print(f"[bt_wakeup] push a stick/button to wake the "
-                              f"gamepad (next reconnect in {remaining:.0f}s)")
+                    print(f"[bt_wakeup] push a stick to wake "
+                          f"(next reconnect in {15.0 - (now - last_reconnect):.0f}s)")
+
+        time.sleep(2.0)
 
 
 def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Bluetooth gamepad wakeup daemon"
-    )
+    parser = argparse.ArgumentParser(description="BLE gamepad wakeup daemon")
     parser.add_argument("mac", nargs="?", default=None,
-                        help="Bluetooth MAC (default: KUAFU_BT_MAC env)")
+                        help="Bluetooth MAC (default: KUAFU_BT_MAC)")
     parser.add_argument("--device", default=None,
-                        help="js device path (default: KUAFU_JS_DEVICE or /dev/input/js0)")
+                        help="js device (default: KUAFU_JS_DEVICE)")
     parser.add_argument("--idle", type=float, default=None,
                         help="idle threshold seconds (default: 10)")
     parser.add_argument("--check", action="store_true",
@@ -233,7 +167,7 @@ def main() -> None:
         sys.exit(0 if alive else 1)
 
     if not mac:
-        print("error: MAC address required (positional arg or KUAFU_BT_MAC)")
+        print("error: MAC required (arg or KUAFU_BT_MAC)")
         sys.exit(1)
 
     watch_loop(mac=mac, device=device, idle_threshold=args.idle)
