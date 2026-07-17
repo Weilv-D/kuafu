@@ -2,7 +2,7 @@
 
 This process intentionally keeps navigation/ROS outside the balance loop. A command
 source updates ``set_command``; the 50 Hz loop consumes only fresh STM32 telemetry,
-runs ONNX, and transmits the paired heartbeat/action frames.
+runs ONNX (unless ``--no-policy``), and transmits the paired heartbeat/action frames.
 
 With ``--enable-teleop`` the project :class:`~rl.teleop.arbiter.CommandArbiter` runs
 inside this process, fed by :class:`~rl.teleop.ipc_source.IPCCommandSource` (raw
@@ -10,6 +10,13 @@ gamepad commands over a Unix socket) and the AutonomousSource stub. The arbiter 
 not the teleop process — owns the safety layer (ramp / limit / estop / timeout),
 so a teleop-process crash or a dropped Bluetooth link degrades to the arbiter's
 safe default instead of holding the last command.
+
+``--no-policy`` skips loading the ONNX model (``PolicyRuntime``) entirely and sends
+zero-action residual frames. The STM32 firmware treats absent or zero residual as
+"baseline LQR only" — the robot tracks velocity and yaw commands from the heartbeat
+frame using the built-in LQR/LQI controller without RL disturbance compensation.
+This mode requires no ``policy.onnx`` or manifest files and is useful for hardware
+bring-up, teleop-only operation, and baseline performance characterization.
 """
 
 from __future__ import annotations
@@ -23,7 +30,9 @@ import numpy as np
 import kuafu_physics as P
 from pi5_runtime.protocol import (
     StreamDecoder, TEL_HEALTH, TEL_IMU, TEL_JOINTS, decode_health_payload,
+    command_frames, hello_frame,
 )
+from rl.env.contract import ACTION_DIM
 from pi5_runtime.runtime import PolicyRuntime, Telemetry
 
 
@@ -97,21 +106,30 @@ def decode_joint_payload(payload: bytes) -> np.ndarray:
 
 
 class SerialPolicyNode:
-    def __init__(self, model: str, port: str, baudrate: int = 921600) -> None:
+    def __init__(self, model: str | None, port: str, baudrate: int = 921600,
+                 no_policy: bool = False) -> None:
         import serial
 
         self.serial = serial.Serial(port, baudrate=baudrate, timeout=0)
-        self.runtime = PolicyRuntime(model)
-        self.serial.write(self.runtime.hello())
+        self.no_policy = no_policy
         self.decoder = StreamDecoder()
         self.command = (0.0, 0.0, P.D0_MIN, 2)
         self.imu = None
         self.joints = None
         self.health = None
         self.last_imu = self.last_joints = 0.0
+        if no_policy:
+            self.runtime = None
+            self._seq = 0
+            self.serial.write(hello_frame(self._seq, int(time.monotonic() * 1000),
+                                          P.model_hash()).encode())
+            self._seq = (self._seq + 2) & 0xFFFF
+        else:
+            self.runtime = PolicyRuntime(model)
+            self.serial.write(self.runtime.hello())
 
     def set_command(self, vx: float, wz: float, d0_mm: float, mode: int = 2) -> None:
-        if mode != self.command[3]:
+        if mode != self.command[3] and not self.no_policy:
             self.runtime.reset()
         d0_upper = P.D0_GATE_MAX_HIGH if abs(vx) > P.D0_GATE_V_THRESH or abs(wz) > P.D0_GATE_W_THRESH else P.D0_MAX
         self.command = (float(np.clip(vx, -0.5, 0.5)), float(np.clip(wz, -1.0, 1.0)),
@@ -167,8 +185,16 @@ class SerialPolicyNode:
         if telemetry is None:
             return False
         vx, wz, d0, mode = self.command
-        _action, heartbeat, residual = self.runtime.tick(telemetry, vx, wz, d0, mode)
-        self.serial.write(heartbeat + residual)
+        if self.no_policy:
+            timestamp = int(time.monotonic() * 1000)
+            zero_action = np.zeros(ACTION_DIM, dtype=np.float32)
+            heartbeat, residual = command_frames(self._seq, timestamp, mode,
+                                                  vx, wz, d0, zero_action)
+            self._seq = (self._seq + 2) & 0xFFFF
+            self.serial.write(heartbeat.encode() + residual.encode())
+        else:
+            _action, heartbeat, residual = self.runtime.tick(telemetry, vx, wz, d0, mode)
+            self.serial.write(heartbeat + residual)
         return True
 
 
@@ -176,7 +202,10 @@ def main() -> None:
     from pi5_runtime.command_socket import COMMAND_SOCKET_PATH
 
     parser = argparse.ArgumentParser(description="KUAFU 50 Hz Pi5 serial policy node")
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--model", default=None,
+                        help="path to ONNX model (required unless --no-policy)")
+    parser.add_argument("--no-policy", action="store_true",
+                        help="run without ONNX policy, baseline LQR only")
     parser.add_argument("--port", default="/dev/ttyAMA10",
                         help="serial device; on the Pi5 this is the SoC PL011 "
                              "behind the 3-pin JST debug connector")
@@ -187,7 +216,10 @@ def main() -> None:
     parser.add_argument("--cmd-socket", default=COMMAND_SOCKET_PATH,
                         help="path to the teleop command Unix socket")
     args = parser.parse_args()
-    node = SerialPolicyNode(args.model, args.port, args.baudrate)
+    if not args.no_policy and args.model is None:
+        parser.error("--model is required unless --no-policy is set")
+    node = SerialPolicyNode(args.model, args.port, args.baudrate,
+                            no_policy=args.no_policy)
 
     arbiter = None
     ipc_source = None

@@ -28,16 +28,50 @@ cd /opt/kuafu && PYTHONPATH=/opt/kuafu python -m pi5_runtime.serial_node \
 
 `pi5_runtime.serial_node` is the provided low-level UART adapter. It decodes STM32 IMU/joint frames, computes the hardware-equivalent Actor frame, enforces 100 ms telemetry freshness, sends the model-hash HELLO, and sends paired versioned frames every 20 ms. Its `set_command` method is an integration boundary, not a navigation arbiter; production navigation must place the project command arbiter above it and must not write actuator frames directly.
 
+### No-policy mode (baseline LQR only)
+
+Running without ``policy.onnx`` is fully supported for teleop, hardware bring-up, and
+baseline characterization. The ``--no-policy`` flag skips ``PolicyRuntime`` (no ONNX
+loading, no manifest validation, no calibration-table digest check) and sends
+zero-action residual frames. The STM32 firmware gates the RL residual off when the
+action frame carries zeros — identical to a missing or stale action frame — so the
+robot runs on the built-in 250 Hz LQR/LQI baseline alone.
+
+Start the serial loop without an ONNX model:
+
+```bash
+cd /opt/kuafu && PYTHONPATH=/opt/kuafu python -m pi5_runtime.serial_node \
+  --port /dev/ttyAMA10 \
+  --no-policy \
+  --enable-teleop
+```
+
+The ``--model`` argument is optional when ``--no-policy`` is set. All teleop behaviour
+(arm/disarm/estop, stick shaping, hot-plug, haptics) is identical to the full-policy
+path. The only difference is that the RL residual is not computed, so the robot has
+no learned disturbance compensation — the LQR baseline holds balance, tracks velocity
+and yaw commands, and levels roll via the fixed-gain D0 offset.
+
 ## Teleop (Gamepad)
 
 Bluetooth/USB gamepad teleop runs as two processes connected by a Unix domain socket (`/tmp/kuafu-cmd.sock`, JSON payload `{v,omega,d0,mode}`). The command arbiter (`rl/teleop/arbiter.py`) runs inside `serial_node`, so it owns the safety layer — ramp, limit, estop, and timeout. The separate `teleop_node` process only reads the gamepad and forwards raw commands; if it crashes or the Bluetooth link drops, the arbiter's IPC source goes stale (0.5 s) and the robot parks at the safe default `[0, 0, D0_MIN]` instead of holding the last command.
 
-Start the serial loop with teleop enabled, then the teleop publisher:
+Start the serial loop with teleop enabled, then the teleop publisher.
+With the ONNX policy deployed:
 
 ```bash
 cd /opt/kuafu && PYTHONPATH=/opt/kuafu python -m pi5_runtime.serial_node \
   --model /opt/kuafu/kuafu-policy.onnx \
   --port /dev/ttyAMA10 \
+  --enable-teleop
+```
+
+Without the ONNX policy (baseline LQR only):
+
+```bash
+cd /opt/kuafu && PYTHONPATH=/opt/kuafu python -m pi5_runtime.serial_node \
+  --port /dev/ttyAMA10 \
+  --no-policy \
   --enable-teleop
 ```
 

@@ -20,6 +20,8 @@
 - Two-state arm/disarm safety model: sources start DISARMED (firmware STAND, balance held, no motion commands) and require an explicit arm action before the wheels track commands.
 - Stick input shaping (deadzone then square curve) and trigger deadzones; full STAND/ACTIVE/FAULT intent carried end to end over the wire.
 - Gamepad hot-plug and haptic feedback on state transitions.
+- ``--no-policy`` mode for baseline-only operation: skips ONNX loading, sends zero
+  residual, requires no ``policy.onnx`` or manifest. Usable with or without teleop.
 
 ### Runtime and tests
 
