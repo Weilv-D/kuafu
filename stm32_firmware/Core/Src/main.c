@@ -246,22 +246,30 @@ int main(void) {
                 discovery_result = ddsm_bus_queue_mode(&g_ddsm_bus, &g_ddsm_left,
                                                        DDSM_MODE_CURRENT, startup_now);
             } else if (g_actuator_discovery_step == 1U) {
+                /* Explicit zero-torque clears any stale torque retained across
+                 * power cycles so the motor does not spin before the Pi arms. */
+                discovery_result = ddsm_bus_queue_torque(&g_ddsm_bus, &g_ddsm_left,
+                                                         0.0f, startup_now);
+            } else if (g_actuator_discovery_step == 2U) {
                 discovery_result = ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_left,
                                                          0U, startup_now);
-            } else if (g_actuator_discovery_step == 2U) {
+            } else if (g_actuator_discovery_step == 3U) {
                 discovery_result = ddsm_bus_queue_mode(&g_ddsm_bus, &g_ddsm_right,
                                                        DDSM_MODE_CURRENT, startup_now);
-            } else if (g_actuator_discovery_step == 3U) {
+            } else if (g_actuator_discovery_step == 4U) {
+                discovery_result = ddsm_bus_queue_torque(&g_ddsm_bus, &g_ddsm_right,
+                                                         0.0f, startup_now);
+            } else if (g_actuator_discovery_step == 5U) {
                 discovery_result = ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_right,
                                                          0U, startup_now);
-            } else if (g_actuator_discovery_step == 4U) {
+            } else if (g_actuator_discovery_step == 6U) {
                 discovery_result = st3215_bus_queue_torque(
                     &g_st3215_bus, ST3215_BROADCAST_ID, 0U);
             }
-            if (g_actuator_discovery_step < 5U && discovery_result == 0) {
+            if (g_actuator_discovery_step < 7U && discovery_result == 0) {
                 ++g_actuator_discovery_step;
             }
-            g_actuator_configured = (uint8_t)(g_actuator_discovery_step >= 5U);
+            g_actuator_configured = (uint8_t)(g_actuator_discovery_step >= 7U);
         }
 
         if (startup_outputs.enable_actuators && !servos_enabled &&
@@ -309,7 +317,7 @@ int main(void) {
          * sides after every successful submission.  This keeps both feedback
          * ages bounded even when one motor times out or adapter echo shifts a
          * frame, and avoids two independent deadlines becoming phase-locked. */
-        if (g_actuator_discovery_step >= 4U && ddsm_bus_is_idle(&g_ddsm_bus) &&
+        if (g_actuator_configured && ddsm_bus_is_idle(&g_ddsm_bus) &&
             (int32_t)(startup_now - next_wheel_tx_ms) >= 0) {
             int wheel_result;
             DDSM_State_t *wheel = next_wheel_is_right ? &g_ddsm_right : &g_ddsm_left;
