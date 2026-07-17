@@ -111,6 +111,7 @@ class SerialPolicyNode:
         import serial
 
         self.serial = serial.Serial(port, baudrate=baudrate, timeout=0)
+        print(f"[serial] opened {port} @ {baudrate} baud")
         self.no_policy = no_policy
         self.decoder = StreamDecoder()
         self.command = (0.0, 0.0, P.D0_MIN, 2)
@@ -124,9 +125,11 @@ class SerialPolicyNode:
             self.serial.write(hello_frame(self._seq, int(time.monotonic() * 1000),
                                           P.model_hash()).encode())
             self._seq = (self._seq + 2) & 0xFFFF
+            print("[serial] no-policy mode (baseline LQR only)")
         else:
             self.runtime = PolicyRuntime(model)
             self.serial.write(self.runtime.hello())
+            print("[serial] ONNX policy loaded")
 
     def set_command(self, vx: float, wz: float, d0_mm: float, mode: int = 2) -> None:
         if mode != self.command[3] and not self.no_policy:
@@ -225,16 +228,27 @@ def main() -> None:
     ipc_source = None
     if args.enable_teleop:
         arbiter, ipc_source = _build_arbiter(args.cmd_socket)
+        print(f"[serial] teleop arbiter enabled, listening on {args.cmd_socket}")
 
     period = 0.02
     deadline = time.monotonic()
+    tick_count = 0
+    telemetry_ok = False
     try:
         while True:
             if arbiter is not None:
                 cmd = arbiter.poll()
                 node.set_command(cmd.v, cmd.omega, cmd.d0,
                                  _mode_to_firmware_mode(cmd.mode))
-            node.tick()
+            ok = node.tick()
+            if ok and not telemetry_ok:
+                print("[serial] first telemetry received → STM32 link active")
+                telemetry_ok = True
+            tick_count += 1
+            if tick_count % 250 == 0:  # ~5s heartbeat log
+                print(f"[serial] alive  ticks={tick_count}  "
+                      f"telemetry={'OK' if telemetry_ok else 'waiting'}  "
+                      f"cmd={node.command}")
             deadline += period
             time.sleep(max(0.0, deadline - time.monotonic()))
     finally:
