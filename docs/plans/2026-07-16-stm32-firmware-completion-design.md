@@ -63,11 +63,10 @@ reuse bounded-age feedback; exceeding the configured age produces a documented
 degradation or fault.
 
 This robot has no battery-divider hardware and battery monitoring is explicitly
-out of scope. The fixed 18.5 V diagnostic value is removed; the legacy
-`battery_mv` field transmits zero, defined as unavailable/not fitted. New
-diagnostic fields are added only through an explicit protocol/schema update
-synchronized with the executable contract and Pi runtime; existing v1.1.0
-command semantics and hip wire order remain unchanged.
+out of scope. The `battery_mv` diagnostic field transmits zero, defined as
+unavailable/not fitted. New diagnostic fields are added only through an explicit
+protocol/schema update synchronized with the executable contract and Pi runtime;
+the v1.1.0 command semantics and hip wire order remain unchanged.
 
 ## Servo Coordinate Contract
 

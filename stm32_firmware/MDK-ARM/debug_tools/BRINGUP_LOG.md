@@ -48,9 +48,9 @@ samples, configures both wheels disabled, broadcasts ST3215 torque-disable, and
 then begins regular feedback polling. Configuration commands are retried while
 their bus is busy and the step advances only after a command is accepted.
 
-The earlier uncontrolled wheel motion occurred when startup enabled the wheels
-and entered balance control without explicit Pi authorization. The accepted
-firmware separates wheel authorization from startup readiness. No Pi
+Wheel authorization is independent of startup readiness. The wheels stay
+disabled through startup, `INIT`, and `FAULT`, and remain disabled unless a
+compatible Pi supplies a fresh heartbeat and an explicit mode request. No Pi
 authorization means no wheel enable and no wheel torque command.
 
 Battery voltage sensing is not connected. Diagnostic value zero is the defined
