@@ -151,6 +151,10 @@ def main() -> None:
                         help="覆盖 HELLO 帧的 model_hash (16位hex); "
                              "默认用 kuafu_physics.model_hash()。"
                              "用于与已烧录但未更新哈希的固件握手")
+    parser.add_argument("--listen-only", action="store_true",
+                        help="只监听 STM32 主动上报的遥测, 不发送任何命令/心跳/ESTOP。"
+                             "不会影响机器人当前模式。注意: 如果已有程序控制串口, "
+                             "此探针会抢占端口, 导致原控制器失效。")
     args = parser.parse_args()
 
     if args.loopback:
@@ -162,13 +166,19 @@ def main() -> None:
     model_hash = args.hash if args.hash else P.model_hash()
 
     print("=" * 64)
-    print("KUAFU Pi5 <-> STM32 通信探针")
+    print("KUAFU Pi5 <-> STM32 通信探针" + (" [只监听, 不发命令]" if args.listen_only else ""))
     print("=" * 64)
     print(f"串口: {args.port} @ {args.baudrate}")
-    print(f"请求模式: {MODE_NAMES.get(args.mode, args.mode)}")
-    print(f"model_hash (HELLO): {model_hash}", "(覆盖)" if args.hash else "")
+    if args.listen_only:
+        print("模式: 只监听遥测 (不发送 HELLO/心跳/ESTOP)")
+    else:
+        print(f"请求模式: {MODE_NAMES.get(args.mode, args.mode)}")
+        print(f"model_hash (HELLO): {model_hash}", "(覆盖)" if args.hash else "")
     print(f"D0_MIN: {P.D0_MIN} mm")
-    print("按 Ctrl-C 停止 (会发 ESTOP)")
+    if args.listen_only:
+        print("按 Ctrl-C 退出 (不会发送 ESTOP)")
+    else:
+        print("按 Ctrl-C 停止 (会发 ESTOP)")
     print("-" * 64)
 
     ser = serial.Serial(args.port, baudrate=args.baudrate, timeout=0)
@@ -182,14 +192,15 @@ def main() -> None:
     last_print = 0.0
     last_mode_seen = None
 
-    # 1. 发送 HELLO
-    ts = int(time.monotonic() * 1000)
-    hello = hello_frame(sequence, ts, model_hash).encode()
-    ser.write(hello)
-    sequence += 1
-    print(f"[{0:6.2f}s] TX HELLO ({len(hello)}B) model_hash={model_hash}")
+    if not args.listen_only:
+        # 1. 发送 HELLO
+        ts = int(time.monotonic() * 1000)
+        hello = hello_frame(sequence, ts, model_hash).encode()
+        ser.write(hello)
+        sequence += 1
+        print(f"[{0:6.2f}s] TX HELLO ({len(hello)}B) model_hash={model_hash}")
 
-    # 2. 50Hz 循环: 发 heartbeat+action, 收 telemetry
+    # 2. 50Hz 循环: 发 heartbeat+action (非监听模式), 收 telemetry
     period = 0.02
     deadline = time.monotonic()
     try:
@@ -197,11 +208,12 @@ def main() -> None:
             if args.duration > 0 and (time.monotonic() - start) > args.duration:
                 break
 
-            # 发送成对帧
-            ts = int(time.monotonic() * 1000) & 0xFFFFFFFF
-            hb, act = make_heartbeat_action_frames(sequence, ts, args.mode)
-            ser.write(hb.encode() + act.encode())
-            sequence += 2
+            if not args.listen_only:
+                # 发送成对帧
+                ts = int(time.monotonic() * 1000) & 0xFFFFFFFF
+                hb, act = make_heartbeat_action_frames(sequence, ts, args.mode)
+                ser.write(hb.encode() + act.encode())
+                sequence += 2
 
             # 读取回传
             chunk = ser.read(512)
@@ -237,14 +249,15 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n[Ctrl-C] 停止中...")
     finally:
-        # 发送 ESTOP
-        ts = int(time.monotonic() * 1000) & 0xFFFFFFFF
-        hb, act = make_heartbeat_action_frames(sequence, ts, MODE_FAULT)
-        try:
-            ser.write(hb.encode() + act.encode())
-            print(f"[ESTOP] 已发送 mode=FAULT(4) 帧")
-        except Exception:
-            pass
+        if not args.listen_only:
+            # 发送 ESTOP
+            ts = int(time.monotonic() * 1000) & 0xFFFFFFFF
+            hb, act = make_heartbeat_action_frames(sequence, ts, MODE_FAULT)
+            try:
+                ser.write(hb.encode() + act.encode())
+                print(f"[ESTOP] 已发送 mode=FAULT(4) 帧")
+            except Exception:
+                pass
         ser.close()
         print("\n" + "=" * 64)
         _print_summary(counts, last_health, time.monotonic() - start)
