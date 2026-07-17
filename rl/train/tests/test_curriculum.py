@@ -14,13 +14,14 @@ def _failing_episodes(n=300):
 
 def test_curriculum_advancement():
     cur = Curriculum()
-    assert cur.axes["command"].level == 0
-    r1 = cur.update_axis("command", _passing_episodes())
+    # command is pinned (fixed full-range), so use dr (survival-only) to test advance.
+    assert cur.axes["dr"].level == 0
+    r1 = cur.update_axis("dr", _passing_episodes())
     assert r1 is None
-    assert cur.axes["command"].level == 0
-    r2 = cur.update_axis("command", _passing_episodes())
+    assert cur.axes["dr"].level == 0
+    r2 = cur.update_axis("dr", _passing_episodes())
     assert r2 == "up"
-    assert cur.axes["command"].level == 1
+    assert cur.axes["dr"].level == 1
 
 
 def test_curriculum_fallback():
@@ -44,18 +45,21 @@ def test_curriculum_no_premature_advancement():
 
 def test_curriculum_difficulty_vector():
     cur = Curriculum()
-    cur.axes["command"].level = 2
+    # command is pinned at level 4; use slope/push for the test.
+    assert cur.axes["command"].level == 4
+    cur.axes["slope"].level = 2
     cur.axes["push"].level = 4
     vec = cur.difficulty_vector()
     assert vec.shape == (NUM_AXES,)
     assert np.all(vec >= 0.0) and np.all(vec <= 1.0)
-    assert vec[list(AXES).index("command")] == pytest.approx(2 / 4)
+    assert vec[list(AXES).index("command")] == pytest.approx(1.0)
+    assert vec[list(AXES).index("slope")] == pytest.approx(2 / 4)
     assert vec[list(AXES).index("push")] == pytest.approx(1.0)
 
 
 def test_curriculum_persistence():
     cur = Curriculum()
-    cur.axes["command"].level = 3
+    # command is pinned; saving/loading must not change its pinned level.
     cur.axes["slope"].level = 1
     cur.axes["step"].streak = 2
     cur.axes["step"].fail_streak = 1
@@ -63,7 +67,7 @@ def test_curriculum_persistence():
 
     restored = Curriculum()
     restored.load_state_dict(state)
-    assert restored.axes["command"].level == 3
+    assert restored.axes["command"].level == 4  # pinned, unchanged by load
     assert restored.axes["slope"].level == 1
     assert restored.axes["step"].streak == 2
     assert restored.axes["step"].fail_streak == 1
@@ -72,12 +76,14 @@ def test_curriculum_persistence():
 def test_axis_config_covers_all_axes():
     assert set(AXIS_CONFIG.keys()) == set(AXES) == set(DIFF_INDICES.keys())
     assert len(AXES) == NUM_AXES == 8
+    # command is pinned (fixed full-range), no tracking gate
+    assert AXIS_CONFIG["command"].pinned is True
+    assert AXIS_CONFIG["command"].track_thresh is None
     # terrain/perturbation axes must be survival-only (no tracking gate)
     for ax in ("dr", "latency", "slope", "step", "rough", "push"):
         assert AXIS_CONFIG[ax].track_thresh is None
         assert AXIS_CONFIG[ax].track_metric is None
-    # command/d0 keep a tracking anti-cheat gate
-    assert AXIS_CONFIG["command"].track_metric == "linvel_yaw"
+    # d0 keeps a tracking anti-cheat gate
     assert AXIS_CONFIG["d0"].track_metric == "d0"
 
 
@@ -105,8 +111,22 @@ def test_d0_axis_requires_track_pass():
 
 def test_min_episodes_gate():
     cur = Curriculum()
-    # fewer than min_episodes should never produce a decision
+    # fewer than min_episodes should never produce a decision (use dr, non-pinned)
     short = [{"survived": True, "track_pass": True}] * 100
-    assert cur.update_axis("command", short) is None
+    assert cur.update_axis("dr", short) is None
+    assert cur.axes["dr"].streak == 0
+
+
+def test_command_axis_pinned():
+    cur = Curriculum()
+    # command starts at max_level and can never change
+    assert cur.axes["command"].level == 4
+    assert cur.axes["command"].max_level == 4
+    # update_axis is a no-op for pinned axes (returns None, level unchanged)
+    assert cur.update_axis("command", _passing_episodes()) is None
+    assert cur.axes["command"].level == 4
     assert cur.axes["command"].streak == 0
+    # difficulty_vector reflects pinned full-range
+    vec = cur.difficulty_vector()
+    assert vec[list(AXES).index("command")] == pytest.approx(1.0)
 

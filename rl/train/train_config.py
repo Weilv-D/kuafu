@@ -118,9 +118,12 @@ def print_config():
     print(f"PPO: lr={ALGORITHM['learning_rate']}, clip={ALGORITHM['clip_param']}, "
           f"schedule={ALGORITHM['schedule']}, desired_kl={ALGORITHM['desired_kl']}")
     print(f"网络: actor {POLICY['actor_hidden_dims']}, 参数 <700k, Pi5 ONNX ~1.5ms (< 20ms 周期)")
-    print(f"课程: {len(CURRICULUM)} 阶段")
-    for c in CURRICULUM:
-        print(f"  - {c['name']:18s} {c['terrain']:14s} 解锁阈值 {c['threshold']}")
+    from rl.train.curriculum import AXIS_CONFIG
+    print(f"课程: {len(AXIS_CONFIG)} 轴 (8-axis 独立课程)")
+    for name, cfg in AXIS_CONFIG.items():
+        gate = "pinned" if cfg.pinned else (
+            "跟踪门" if cfg.track_thresh is not None else "存活门")
+        print(f"  - {name:10s} {gate:8s} survival_th={cfg.survival_thresh}")
     print(f"收敛判据: {CONVERGENCE['recovery_time_target']} / {CONVERGENCE['perturbation_target']}")
     print(f"\nGPU: {__import__('jax').devices()}")
 

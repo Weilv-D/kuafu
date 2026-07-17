@@ -475,12 +475,16 @@ class KuafuMjxEnv(MjxEnv):
 
     # ---- 命令采样 ----
     def _sample_command(self, rng: jax.Array, difficulty: jax.Array):
-        """独立采样命令与 D0 工作空间难度。"""
+        """独立采样命令与 D0 工作空间难度。
+
+        速度命令 (v/w) 采样自固定全范围 V_CMD_RANGE / W_CMD_RANGE, 不做课程缩放
+        (legged_gym / MuJoCo Playground / RMA 共识): 速度跟踪是基础能力, 应从第一步
+        面对真实命令分布, 由 LQR 基层兜底 + reward 塑形引导学习。D0 工作空间仍按
+        difficulty[d0] 课程缩放。
+        """
         rng, k1, k2, k3 = jax.random.split(rng, 4)
-        v_limit = 0.05 + 0.45 * difficulty[D["command"]]
-        w_limit = 0.1 + 0.9 * difficulty[D["command"]]
-        v_cmd = jax.random.uniform(k1, minval=-v_limit, maxval=v_limit)
-        w_cmd = jax.random.uniform(k2, minval=-w_limit, maxval=w_limit)
+        v_cmd = jax.random.uniform(k1, minval=V_CMD_RANGE[0], maxval=V_CMD_RANGE[1])
+        w_cmd = jax.random.uniform(k2, minval=W_CMD_RANGE[0], maxval=W_CMD_RANGE[1])
         d0_upper = P.D0_MIN + (P.D0_MAX - P.D0_MIN) * difficulty[D["d0"]]
         d0_cmd = jax.random.uniform(k3, minval=D0_CMD_RANGE[0], maxval=d0_upper)
         # 10% 概率零命令 (静支平衡, D0 也回到驻留)
