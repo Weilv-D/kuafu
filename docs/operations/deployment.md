@@ -88,7 +88,7 @@ The source starts **DISARMED** (safe): the wheels hold balance via LQR but do no
 | Input | Action |
 |---|---|
 | `START` (arm) | ARMED → firmware ACTIVE: wheels track commands, RL residual on. Also clears an ESTOP latch. |
-| `Back` (disarm) | DISARMED → firmware STAND: LQR still holds balance, but commands are ignored and the residual is off. |
+| `Select` / `Back` (disarm) | DISARMED → firmware STAND: LQR still holds balance, but commands are ignored and the residual is off. |
 | `A` (estop) | ESTOP latch → firmware FAULT: actuators disabled until reset. |
 | Left stick Y | forward speed `v` (±0.5 m/s) |
 | Right stick X | yaw rate `ω` (±1.0 rad/s) |
@@ -107,7 +107,7 @@ Gamepad environment variables (defaults are Xbox-layout; Flydigi/PS/Switch usual
 | `KUAFU_AXIS_V_INVERT` | 1 | invert the v axis (pygame Y is positive-down) |
 | `KUAFU_AXIS_W_INVERT` | 0 | invert the ω axis |
 | `KUAFU_BTN_ARM` | 7 | arm button (START) |
-| `KUAFU_BTN_DISARM` | 6 | disarm button (Back) |
+| `KUAFU_BTN_DISARM` | 6 | disarm button (`Select`/`Back`) |
 | `KUAFU_BTN_ESTOP` | 0 | estop button (A) |
 | `KUAFU_RUMBLE` | 1 | haptic feedback on arm/disarm/estop/reconnect; set 0 to disable |
 

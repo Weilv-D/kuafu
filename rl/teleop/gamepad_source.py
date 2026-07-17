@@ -83,7 +83,7 @@ class GamepadSource:
         self._axis_lt = _env_int("KUAFU_AXIS_LT", 4)
         self._axis_rt = _env_int("KUAFU_AXIS_RT", 5)
         self._btn_arm = _env_int("KUAFU_BTN_ARM", 7)      # START
-        self._btn_disarm = _env_int("KUAFU_BTN_DISARM", 6) # Back
+        self._btn_disarm = _env_int("KUAFU_BTN_DISARM", 6) # Select/Back
         self._btn_estop = _env_int("KUAFU_BTN_ESTOP", 0)   # A
         self._invert_v = _env_bool("KUAFU_AXIS_V_INVERT", True)
         self._invert_w = _env_bool("KUAFU_AXIS_W_INVERT", False)
