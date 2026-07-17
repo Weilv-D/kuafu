@@ -111,7 +111,7 @@ Gamepad environment variables (defaults are Xbox-layout; Flydigi/PS/Switch usual
 | `KUAFU_BTN_ESTOP` | 0 | estop button (A) |
 | `KUAFU_RUMBLE` | 1 | haptic feedback on arm/disarm/estop/reconnect; set 0 to disable |
 
-Hot-plug is supported: if the controller disconnects, `poll()` returns ESTOP and the arbiter parks the robot; on reconnect a short rumble confirms, and the operator must arm again. Calibrate a new controller's axis and button mapping with `SDL_VIDEODRIVER=dummy python -m rl.teleop.gamepad_source --calibrate`; the interactive tool guides you through each stick and trigger, auto-detects the v-axis invert, and prints ready-to-export `KUAFU_AXIS_*` / `KUAFU_BTN_*` lines. For a plain live axis monitor without guided prompts, use `--show-axes`.
+Hot-plug is supported: if the controller disconnects, `poll()` returns ESTOP and the arbiter parks the robot; on reconnect a short rumble confirms, and the operator must arm again. Calibrate a new controller's axis and button mapping with `python -m rl.teleop.calibrate_native`; the interactive tool reads `/dev/input/js0` directly (bypassing pygame/SDL, which can drop events on Bluetooth LE devices), guides you through each stick and trigger, auto-detects the v-axis invert, and prints ready-to-export `KUAFU_AXIS_*` / `KUAFU_BTN_*` lines. If the gamepad goes silent after being connected, disconnect and reconnect it to wake it from its Bluetooth idle state.
 
 Keyboard layout: `W/S` → v (±0.25 m/s), `A/D` → ω (±0.8 rad/s), `Q/E` → D0, `Enter` → arm, `Backspace` → disarm, `Space` → ESTOP, `R` → clear ESTOP latch. Keyboard commands are discrete gears and do not apply the stick curve.
 
