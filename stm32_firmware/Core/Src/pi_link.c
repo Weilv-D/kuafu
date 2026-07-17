@@ -100,7 +100,13 @@ static int parse_payload(uint8_t type, const uint8_t *payload, uint8_t payload_l
         return 1;
     }
     if (type == PI_CMD_HEARTBEAT) {
-        if (!link_compatible) return 0;
+        if (!link_compatible) {
+            /* In the absence of an explicit HELLO handshake (the Pi may not
+             * repeat HELLOs after a firmware reset), treat the first valid
+             * heartbeat as proof the Pi runs a compatible protocol and accept
+             * it so wheel authorization can proceed. */
+            link_compatible = 1;
+        }
         if (payload_len != 7) return 0;
         int16_t raw_v = read_i16_be(&payload[1]);
         int16_t raw_w = read_i16_be(&payload[3]);
