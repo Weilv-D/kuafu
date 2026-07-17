@@ -179,6 +179,7 @@ def main() -> None:
     zero_action = np.zeros(ACTION_DIM, dtype=np.float32)
     v_cmd = w_cmd = 0.0
     mode = 1
+    last_cmd_mode = -1
 
     try:
         while not stopping["flag"]:
@@ -277,9 +278,15 @@ def main() -> None:
                     hb, res = command_frames(seq, ts, mode, v_cmd, w_cmd,
                                              d0, zero_action)
                     seq = (seq + 2) & 0xFFFF
-                    ser.write(hb.encode() + res.encode())
-                except (ValueError, OSError):
-                    pass
+                    sent = hb.encode() + res.encode()
+                    ser.write(sent)
+                    # Debug: print first heartbeat of each mode
+                    if last_cmd_mode != mode:
+                        print(f"[teleop] TX hb mode={mode} v={v_cmd:.2f} w={w_cmd:.2f} "
+                              f"d0={d0:.1f} seq={seq-2:04X} {sent[:8].hex()}...")
+                        last_cmd_mode = mode
+                except (ValueError, OSError) as exc:
+                    print(f"[teleop] TX FAILED: {exc}", flush=True)
 
             # --- read telemetry ---
             for frame in decoder.feed(ser.read(256)):
