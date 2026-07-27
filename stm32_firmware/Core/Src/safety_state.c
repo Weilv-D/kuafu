@@ -39,13 +39,12 @@ void safety_state_trigger_fault(FaultMask_t fault) {
 }
 
 /* Stillness gate for gyro bias calibration: a stationary BMI088 reads well
- * below 0.08 rad/s (~4.6 deg/s) on all axes.  Samples taken while the robot
- * is moving would poison the bias estimate and lean the balance reference,
- * so any axis above the threshold discards the whole accumulation window.
- * A yaw bias here directly becomes a slow spin on the bench, so boot the
- * robot on the ground, untouched, for the 2 s window. */
+ * below 0.08 rad/s (~4.6 deg/s) on all axes.  Moving samples are skipped (not
+ * reset) so intermittent wobble does not poison the estimate.  Startup now
+ * self-recovers instead of latching FAULT, so this only needs to be long
+ * enough for a good bias mean: 1000 still samples @250 Hz ~= 4 s untouched. */
 #define GYRO_CALIB_STILL_RAD_S 0.08f
-#define GYRO_CALIB_SAMPLES 2000U
+#define GYRO_CALIB_SAMPLES 1000U
 
 void safety_state_gyro_calib_update(float gx, float gy, float gz, uint32_t now_ms) {
     (void)now_ms;
@@ -160,11 +159,41 @@ SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs) {
         safety_state_trigger_fault(FAULT_EMERGENCY);
         return decision;
     }
+    faults = runtime_faults(inputs);
+
     if (g_safety_state.current_mode == STATE_FAULT) {
+        /* Transient freshness faults (wheel/servo telemetry loss) self-clear
+         * once the device resumes replying, so a momentary bus blip at power-on
+         * or under load does not permanently disable balance.  Serious faults
+         * (tilt, pitch-rate, overtemp, IMU, emergency, init, internal) stay
+         * latched until reset as before. */
+        const FaultMask_t transient =
+            (FaultMask_t)(FAULT_WHEEL_LEFT | FAULT_WHEEL_RIGHT | FAULT_SERVO);
+        if ((faults & FAULT_WHEEL_LEFT) == 0U) {
+            g_safety_state.fault_mask &= ~((FaultMask_t)FAULT_WHEEL_LEFT);
+        }
+        if ((faults & FAULT_WHEEL_RIGHT) == 0U) {
+            g_safety_state.fault_mask &= ~((FaultMask_t)FAULT_WHEEL_RIGHT);
+        }
+        if ((faults & FAULT_SERVO) == 0U) {
+            g_safety_state.fault_mask &= ~((FaultMask_t)FAULT_SERVO);
+        }
+        if ((g_safety_state.fault_mask & ~transient) != 0U) {
+            return decision;   /* still seriously faulted: stay in FAULT */
+        }
+        if (g_safety_state.fault_mask == 0U) {
+            g_safety_state.current_mode = STATE_STAND;
+            g_safety_state.mode_timer_ms = inputs->now_ms;
+            g_safety_state.mode_grace_until_ms =
+                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
+            imu_stale_ticks = 0U;
+            wheel_l_stale_ticks = 0U;
+            wheel_r_stale_ticks = 0U;
+            servo_stale_ticks = 0U;
+        }
         return decision;
     }
 
-    faults = runtime_faults(inputs);
     if (g_safety_state.current_mode == STATE_INIT) {
         if ((faults & (FAULT_TILT | FAULT_PITCH_RATE | FAULT_OVERTEMP)) != 0U) {
             safety_state_trigger_fault(faults & (FAULT_TILT | FAULT_PITCH_RATE | FAULT_OVERTEMP));

@@ -50,8 +50,11 @@ void run_startup_manager_tests(void) {
     inputs.now_ms = 5600U;
     outputs = startup_manager_step(&manager, &inputs);
     TEST_EQ_INT(STARTUP_IMU_DISCOVERY, manager.phase);
+    TEST_TRUE(outputs.request_imu_init);
+    /* A transient at power-on (IMU slow to answer) must NOT latch FAULT: the
+     * manager keeps re-requesting discovery instead of failing. */
     inputs.now_ms = 10601U;
     outputs = startup_manager_step(&manager, &inputs);
-    TEST_EQ_INT(STARTUP_FAILED, manager.phase);
-    TEST_TRUE(outputs.fault_requested);
+    TEST_EQ_INT(STARTUP_IMU_DISCOVERY, manager.phase);
+    TEST_TRUE(!outputs.fault_requested);
 }

@@ -125,7 +125,7 @@ void run_safety_state_tests(void) {
     TEST_TRUE((g_safety_state.fault_mask & FAULT_INTERNAL) != 0U);
 
     safety_state_init();
-    for (int i = 0; i < 2000; ++i) {
+    for (int i = 0; i < 1000; ++i) {
         safety_state_gyro_calib_update(0.01f, -0.02f, 0.03f, (uint32_t)i);
     }
     TEST_TRUE(g_safety_state.is_gyro_calibrated);
@@ -136,18 +136,18 @@ void run_safety_state_tests(void) {
 
     /* Moving samples are skipped (not counted); accumulation continues. */
     safety_state_init();
-    for (int i = 0; i < 1000; ++i) {
+    for (int i = 0; i < 500; ++i) {
         safety_state_gyro_calib_update(0.01f, 0.01f, 0.01f, (uint32_t)i);
     }
     for (int i = 0; i < 500; ++i) {
-        safety_state_gyro_calib_update(0.5f, 0.0f, 0.0f, (uint32_t)(1000 + i));
+        safety_state_gyro_calib_update(0.5f, 0.0f, 0.0f, (uint32_t)(500 + i));
     }
-    for (int i = 0; i < 999; ++i) {
-        safety_state_gyro_calib_update(0.01f, 0.01f, 0.01f, (uint32_t)(1500 + i));
+    for (int i = 0; i < 499; ++i) {
+        safety_state_gyro_calib_update(0.01f, 0.01f, 0.01f, (uint32_t)(1000 + i));
     }
-    TEST_TRUE(!g_safety_state.is_gyro_calibrated);
-    safety_state_gyro_calib_update(0.01f, 0.01f, 0.01f, 3002U);
-    TEST_TRUE(g_safety_state.is_gyro_calibrated);
+    TEST_TRUE(!g_safety_state.is_gyro_calibrated);   /* 999 still < 1000 */
+    safety_state_gyro_calib_update(0.01f, 0.01f, 0.01f, 1999U);
+    TEST_TRUE(g_safety_state.is_gyro_calibrated);     /* 1000th still sample */
     TEST_NEAR(0.01f, g_safety_state.gyro_calib_offset[0], 1.0e-5f);
 
     /* A constantly moving robot never completes calibration. */

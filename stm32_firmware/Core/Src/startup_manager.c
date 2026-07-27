@@ -4,9 +4,6 @@
 
 #define STARTUP_POWER_WAIT_MS          500U
 #define STARTUP_RETRY_MS               100U
-#define STARTUP_IMU_TIMEOUT_MS        5000U
-#define STARTUP_GYRO_TIMEOUT_MS      15000U
-#define STARTUP_ACTUATOR_TIMEOUT_MS  10000U
 
 static uint8_t deadline_reached(uint32_t now_ms, uint32_t deadline_ms) {
     return (uint8_t)((int32_t)(now_ms - deadline_ms) >= 0);
@@ -32,7 +29,6 @@ void startup_manager_init(StartupManager_t *manager, uint32_t now_ms) {
 StartupOutputs_t startup_manager_step(StartupManager_t *manager,
                                       const StartupInputs_t *inputs) {
     StartupOutputs_t outputs = {0U, 0U, 0U, 0U};
-    uint32_t elapsed;
 
     if (manager == NULL || inputs == NULL) {
         outputs.fault_requested = 1U;
@@ -47,17 +43,14 @@ StartupOutputs_t startup_manager_step(StartupManager_t *manager,
         }
     }
 
-    elapsed = (uint32_t)(inputs->now_ms - manager->phase_started_ms);
     if (manager->phase == STARTUP_IMU_DISCOVERY) {
         if (inputs->imu_initialized) {
             enter_phase(manager, STARTUP_GYRO_CALIBRATION, inputs->now_ms);
             return outputs;
         }
-        if (elapsed > STARTUP_IMU_TIMEOUT_MS) {
-            enter_phase(manager, STARTUP_FAILED, inputs->now_ms);
-            outputs.fault_requested = 1U;
-            return outputs;
-        }
+        /* No hard failure: a transient (e.g. I2C busy at power-on) must not
+         * permanently disable the robot.  Keep re-requesting discovery until
+         * the IMU answers. */
         if (deadline_reached(inputs->now_ms, manager->next_action_ms)) {
             outputs.request_imu_init = 1U;
             manager->next_action_ms = inputs->now_ms + STARTUP_RETRY_MS;
@@ -66,18 +59,17 @@ StartupOutputs_t startup_manager_step(StartupManager_t *manager,
     }
 
     if (manager->phase == STARTUP_GYRO_CALIBRATION) {
+        /* Calibration only completes once the robot is still long enough to
+         * accumulate GYRO_CALIB_SAMPLES quiet samples.  If the operator is
+         * still placing / settling the robot, just keep waiting -- a moving
+         * platform must never latch a fatal fault.  Proceed as soon as done. */
         if (inputs->gyro_calibrated) {
             enter_phase(manager, STARTUP_ACTUATOR_DISCOVERY, inputs->now_ms);
-        } else if (elapsed > STARTUP_GYRO_TIMEOUT_MS) {
-            enter_phase(manager, STARTUP_FAILED, inputs->now_ms);
-            outputs.fault_requested = 1U;
-            return outputs;
-        } else {
-            return outputs;
         }
+        /* Fall through to the ACTUATOR_DISCOVERY handler so the first discovery
+         * request is issued on the same tick. */
     }
 
-    elapsed = (uint32_t)(inputs->now_ms - manager->phase_started_ms);
     if (manager->phase == STARTUP_ACTUATOR_DISCOVERY) {
         if (inputs->actuator_configured && inputs->wheel_l_online &&
             inputs->wheel_r_online && inputs->servos_online) {
@@ -85,11 +77,9 @@ StartupOutputs_t startup_manager_step(StartupManager_t *manager,
             outputs.enable_actuators = 1U;
             return outputs;
         }
-        if (elapsed > STARTUP_ACTUATOR_TIMEOUT_MS) {
-            enter_phase(manager, STARTUP_FAILED, inputs->now_ms);
-            outputs.fault_requested = 1U;
-            return outputs;
-        }
+        /* Likewise, actuators coming online after a cold power-up (servos/wheels
+         * need a moment to answer) must not latch a permanent FAULT.  Keep
+         * re-requesting discovery until everything is present. */
         if (deadline_reached(inputs->now_ms, manager->next_action_ms)) {
             outputs.request_actuator_discovery = 1U;
             manager->next_action_ms = inputs->now_ms + STARTUP_RETRY_MS;
