@@ -593,11 +593,14 @@ int main(void) {
                 gx -= g_safety_state.gyro_calib_offset[0];
                 gy -= g_safety_state.gyro_calib_offset[1];
                 gz -= g_safety_state.gyro_calib_offset[2];
-
-                mahony_update(&g_mahony,
-                              g_imu.accel[0], g_imu.accel[1], g_imu.accel[2],
-                              gx, gy, gz, fusion_dt);
-            } else {
+            }
+            /* Always fuse attitude.  Mahony is accel-referenced, so running
+             * with a zero gyro offset at start is safe; the bias estimate is
+             * refined in the background (below) once the robot settles. */
+            mahony_update(&g_mahony,
+                          g_imu.accel[0], g_imu.accel[1], g_imu.accel[2],
+                          gx, gy, gz, fusion_dt);
+            if (!g_safety_state.is_gyro_calibrated) {
                 safety_state_gyro_calib_update(gx, gy, gz, HAL_GetTick());
             }
             g_body_gyro[0] = gx;

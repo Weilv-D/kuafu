@@ -45,7 +45,13 @@ StartupOutputs_t startup_manager_step(StartupManager_t *manager,
 
     if (manager->phase == STARTUP_IMU_DISCOVERY) {
         if (inputs->imu_initialized) {
-            enter_phase(manager, STARTUP_GYRO_CALIBRATION, inputs->now_ms);
+            /* Skip a dedicated calibration wait: an unstable robot cannot hold
+             * still long enough to calibrate before it must balance.  Gyro bias
+             * is refined in the background (safety_state_gyro_calib_update, fed
+             * from the IMU data path) once the robot settles, and the Mahony
+             * attitude is accel-referenced so balancing with a zero offset is
+             * safe.  Proceed straight to actuator discovery. */
+            enter_phase(manager, STARTUP_ACTUATOR_DISCOVERY, inputs->now_ms);
             return outputs;
         }
         /* No hard failure: a transient (e.g. I2C busy at power-on) must not
@@ -56,18 +62,6 @@ StartupOutputs_t startup_manager_step(StartupManager_t *manager,
             manager->next_action_ms = inputs->now_ms + STARTUP_RETRY_MS;
         }
         return outputs;
-    }
-
-    if (manager->phase == STARTUP_GYRO_CALIBRATION) {
-        /* Calibration only completes once the robot is still long enough to
-         * accumulate GYRO_CALIB_SAMPLES quiet samples.  If the operator is
-         * still placing / settling the robot, just keep waiting -- a moving
-         * platform must never latch a fatal fault.  Proceed as soon as done. */
-        if (inputs->gyro_calibrated) {
-            enter_phase(manager, STARTUP_ACTUATOR_DISCOVERY, inputs->now_ms);
-        }
-        /* Fall through to the ACTUATOR_DISCOVERY handler so the first discovery
-         * request is issued on the same tick. */
     }
 
     if (manager->phase == STARTUP_ACTUATOR_DISCOVERY) {

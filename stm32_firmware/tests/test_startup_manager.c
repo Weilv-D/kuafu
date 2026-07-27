@@ -29,10 +29,9 @@ void run_startup_manager_tests(void) {
 
     inputs.imu_initialized = 1U;
     outputs = startup_manager_step(&manager, &inputs);
-    TEST_EQ_INT(STARTUP_GYRO_CALIBRATION, manager.phase);
+    TEST_EQ_INT(STARTUP_ACTUATOR_DISCOVERY, manager.phase);
 
     inputs.now_ms = 900U;
-    inputs.gyro_calibrated = 1U;
     outputs = startup_manager_step(&manager, &inputs);
     TEST_EQ_INT(STARTUP_ACTUATOR_DISCOVERY, manager.phase);
     TEST_TRUE(outputs.request_actuator_discovery);
