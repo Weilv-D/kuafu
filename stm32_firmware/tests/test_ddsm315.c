@@ -105,7 +105,9 @@ void run_ddsm315_tests(void) {
     TEST_EQ_INT(DDSM_BUS_TX, bus.phase);
     ddsm_bus_step(&bus, 27U);
     TEST_EQ_INT(DDSM_BUS_TX, bus.phase);
-    ddsm_bus_step(&bus, 28U);
+    ddsm_bus_step(&bus, 31U);
+    TEST_EQ_INT(DDSM_BUS_TX, bus.phase);
+    ddsm_bus_step(&bus, 32U);  /* 12 ms transaction deadline */
     TEST_TRUE(ddsm_bus_is_idle(&bus));
     TEST_EQ_INT(0, (int)test_uart_abort_count());
     TEST_EQ_INT(1, (int)state.health.timeout_count);

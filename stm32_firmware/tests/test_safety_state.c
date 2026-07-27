@@ -125,14 +125,37 @@ void run_safety_state_tests(void) {
     TEST_TRUE((g_safety_state.fault_mask & FAULT_INTERNAL) != 0U);
 
     safety_state_init();
-    for (int i = 0; i < 1000; ++i) {
-        safety_state_gyro_calib_update(0.1f, -0.2f, 0.3f, (uint32_t)i);
+    for (int i = 0; i < 2000; ++i) {
+        safety_state_gyro_calib_update(0.01f, -0.02f, 0.03f, (uint32_t)i);
     }
     TEST_TRUE(g_safety_state.is_gyro_calibrated);
-    TEST_NEAR(0.1f, g_safety_state.gyro_calib_offset[0], 1.0e-5f);
-    TEST_NEAR(-0.2f, g_safety_state.gyro_calib_offset[1], 1.0e-5f);
-    TEST_NEAR(0.3f, g_safety_state.gyro_calib_offset[2], 1.0e-5f);
+    TEST_NEAR(0.01f, g_safety_state.gyro_calib_offset[0], 1.0e-5f);
+    TEST_NEAR(-0.02f, g_safety_state.gyro_calib_offset[1], 1.0e-5f);
+    TEST_NEAR(0.03f, g_safety_state.gyro_calib_offset[2], 1.0e-5f);
     TEST_EQ_INT(STATE_INIT, g_safety_state.current_mode);
+
+    /* Moving samples are skipped (not counted); accumulation continues. */
+    safety_state_init();
+    for (int i = 0; i < 1000; ++i) {
+        safety_state_gyro_calib_update(0.01f, 0.01f, 0.01f, (uint32_t)i);
+    }
+    for (int i = 0; i < 500; ++i) {
+        safety_state_gyro_calib_update(0.5f, 0.0f, 0.0f, (uint32_t)(1000 + i));
+    }
+    for (int i = 0; i < 999; ++i) {
+        safety_state_gyro_calib_update(0.01f, 0.01f, 0.01f, (uint32_t)(1500 + i));
+    }
+    TEST_TRUE(!g_safety_state.is_gyro_calibrated);
+    safety_state_gyro_calib_update(0.01f, 0.01f, 0.01f, 3002U);
+    TEST_TRUE(g_safety_state.is_gyro_calibrated);
+    TEST_NEAR(0.01f, g_safety_state.gyro_calib_offset[0], 1.0e-5f);
+
+    /* A constantly moving robot never completes calibration. */
+    safety_state_init();
+    for (int i = 0; i < 2000; ++i) {
+        safety_state_gyro_calib_update(0.1f, -0.2f, 0.3f, (uint32_t)i);
+    }
+    TEST_TRUE(!g_safety_state.is_gyro_calibrated);
 
     /* --- Grace window on mode transition --- */
     safety_state_init();

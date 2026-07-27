@@ -81,16 +81,28 @@ void NMI_Handler(void)
 /**
   * @brief This function handles Hard fault interrupt.
   */
+/* Fault post-mortem dump at the top of RAM (outside the linker image, so it
+ * survives the IWDG reset that follows the fault).  Read 0x2001FFF0 via SWD:
+ * [0]=magic, [1]=stacked PC, [2]=stacked LR, [3]=CFSR. */
+#define FAULT_DUMP_BASE 0x2001FFF0U
+#define FAULT_DUMP_MAGIC 0xDEADF417U
+
+static void fault_dump_and_hang(void) {
+    volatile uint32_t *dump = (volatile uint32_t *)FAULT_DUMP_BASE;
+    uint32_t *sp = (uint32_t *)__get_MSP();
+    __disable_irq();
+    dump[1] = sp[6];        /* stacked PC: the faulting instruction */
+    dump[2] = sp[5];        /* stacked LR */
+    dump[3] = SCB->CFSR;    /* configurable fault status */
+    dump[0] = FAULT_DUMP_MAGIC;
+    while (1) {
+        /* IWDG (not refreshed) resets the chip; dump survives in RAM. */
+    }
+}
+
 void HardFault_Handler(void)
 {
-  /* USER CODE BEGIN HardFault_IRQn 0 */
-
-  /* USER CODE END HardFault_IRQn 0 */
-  while (1)
-  {
-    /* USER CODE BEGIN W1_HardFault_IRQn 0 */
-    /* USER CODE END W1_HardFault_IRQn 0 */
-  }
+  fault_dump_and_hang();
 }
 
 /**
@@ -98,14 +110,7 @@ void HardFault_Handler(void)
   */
 void MemManage_Handler(void)
 {
-  /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-
-  /* USER CODE END MemoryManagement_IRQn 0 */
-  while (1)
-  {
-    /* USER CODE BEGIN W1_MemoryManagement_IRQn 0 */
-    /* USER CODE END W1_MemoryManagement_IRQn 0 */
-  }
+  fault_dump_and_hang();
 }
 
 /**
@@ -113,14 +118,7 @@ void MemManage_Handler(void)
   */
 void BusFault_Handler(void)
 {
-  /* USER CODE BEGIN BusFault_IRQn 0 */
-
-  /* USER CODE END BusFault_IRQn 0 */
-  while (1)
-  {
-    /* USER CODE BEGIN W1_BusFault_IRQn 0 */
-    /* USER CODE END W1_BusFault_IRQn 0 */
-  }
+  fault_dump_and_hang();
 }
 
 /**
@@ -128,14 +126,7 @@ void BusFault_Handler(void)
   */
 void UsageFault_Handler(void)
 {
-  /* USER CODE BEGIN UsageFault_IRQn 0 */
-
-  /* USER CODE END UsageFault_IRQn 0 */
-  while (1)
-  {
-    /* USER CODE BEGIN W1_UsageFault_IRQn 0 */
-    /* USER CODE END W1_UsageFault_IRQn 0 */
-  }
+  fault_dump_and_hang();
 }
 
 /**

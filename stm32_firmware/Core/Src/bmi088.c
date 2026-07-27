@@ -215,11 +215,14 @@ int bmi088_init_step(BMI088_t *imu, uint32_t now_ms) {
     }
 }
 
+/* Blocking read timeout is 2 ms: it bounds the worst-case main-loop stall so
+ * a NACKed IMU cannot starve the 4 ms DDSM / 3 ms ST3215 bus deadlines and
+ * trigger cascading false device faults (previously 10 ms). */
 int bmi088_read_accel(BMI088_t *imu) {
     uint8_t buffer[6];
 
     /* Read 6 bytes of raw accelerometer data starting at BMI088_ACC_X_LSB (0x12) */
-    if (HAL_I2C_Mem_Read(imu->hi2c, BMI088_ACCEL_ADDR << 1, BMI088_ACC_X_LSB, I2C_MEMADD_SIZE_8BIT, buffer, 6, 10) != HAL_OK) {
+    if (HAL_I2C_Mem_Read(imu->hi2c, BMI088_ACCEL_ADDR << 1, BMI088_ACC_X_LSB, I2C_MEMADD_SIZE_8BIT, buffer, 6, 2) != HAL_OK) {
         device_health_mark_failure(&imu->health, DEVICE_FAILURE_TIMEOUT, 3U);
         return -1;
     }
@@ -240,7 +243,7 @@ int bmi088_read_gyro(BMI088_t *imu) {
     uint8_t buffer[6];
 
     /* Read 6 bytes of raw gyroscope data starting at BMI088_GYRO_X_LSB (0x02) */
-    if (HAL_I2C_Mem_Read(imu->hi2c, BMI088_GYRO_ADDR << 1, BMI088_GYRO_X_LSB, I2C_MEMADD_SIZE_8BIT, buffer, 6, 10) != HAL_OK) {
+    if (HAL_I2C_Mem_Read(imu->hi2c, BMI088_GYRO_ADDR << 1, BMI088_GYRO_X_LSB, I2C_MEMADD_SIZE_8BIT, buffer, 6, 2) != HAL_OK) {
         device_health_mark_failure(&imu->health, DEVICE_FAILURE_TIMEOUT, 3U);
         return -1;
     }
@@ -262,7 +265,7 @@ int bmi088_read_temp(BMI088_t *imu) {
     uint8_t buffer[2];
 
     /* Temperature lives on the accelerometer die (TEMP_MSB:0x22, TEMP_LSB:0x23) */
-    if (HAL_I2C_Mem_Read(imu->hi2c, BMI088_ACCEL_ADDR << 1, BMI088_ACC_TEMP_MSB, I2C_MEMADD_SIZE_8BIT, buffer, 2, 10) != HAL_OK) {
+    if (HAL_I2C_Mem_Read(imu->hi2c, BMI088_ACCEL_ADDR << 1, BMI088_ACC_TEMP_MSB, I2C_MEMADD_SIZE_8BIT, buffer, 2, 2) != HAL_OK) {
         device_health_mark_failure(&imu->health, DEVICE_FAILURE_TIMEOUT, 3U);
         return -1;
     }

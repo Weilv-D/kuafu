@@ -20,6 +20,17 @@ void mahony_reset(MahonyFilter_t *filter) {
     filter->yaw = 0.0f;
 }
 
+/* Bound the error integral: without a clamp, sustained linear acceleration
+ * (gravity estimate no longer pure) winds eInt up and biases the attitude
+ * long after the acceleration ends. */
+#define MAHONY_EINT_MAX 0.5f
+
+static float clamp_eint(float value) {
+    if (value > MAHONY_EINT_MAX) return MAHONY_EINT_MAX;
+    if (value < -MAHONY_EINT_MAX) return -MAHONY_EINT_MAX;
+    return value;
+}
+
 void mahony_update(MahonyFilter_t *filter, float ax, float ay, float az, float gx, float gy, float gz, float dt) {
     float q0 = filter->q0;
     float q1 = filter->q1;
@@ -60,9 +71,9 @@ void mahony_update(MahonyFilter_t *filter, float ax, float ay, float az, float g
 
     /* Compute integral feedback if enabled */
     if (filter->Ki > 0.0f) {
-        filter->eInt[0] += ex * dt;
-        filter->eInt[1] += ey * dt;
-        filter->eInt[2] += ez * dt;
+        filter->eInt[0] = clamp_eint(filter->eInt[0] + ex * dt);
+        filter->eInt[1] = clamp_eint(filter->eInt[1] + ey * dt);
+        filter->eInt[2] = clamp_eint(filter->eInt[2] + ez * dt);
         
         /* Apply feedback correction to gyro inputs */
         gx += filter->Kp * ex + filter->Ki * filter->eInt[0];

@@ -10,7 +10,10 @@
 #define DDSM_MODE_POSITION       3U
 #define DDSM_MODE_DISABLE        9U
 #define DDSM_FRAME_SIZE         10U
-#define DDSM_TRANSACTION_TIMEOUT_MS 8U
+/* High-load replies can exceed the nominal ~2 ms round trip; 8 ms caused
+ * retry chains that also starved the other wheel. 12 ms keeps the worst-case
+ * per-wheel service rate well above the 50 ms freshness budget. */
+#define DDSM_TRANSACTION_TIMEOUT_MS 12U
 
 typedef struct {
     uint8_t id;

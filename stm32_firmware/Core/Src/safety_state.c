@@ -38,9 +38,29 @@ void safety_state_trigger_fault(FaultMask_t fault) {
     g_safety_state.current_mode = STATE_FAULT;
 }
 
+/* Stillness gate for gyro bias calibration: a stationary BMI088 reads well
+ * below 0.08 rad/s (~4.6 deg/s) on all axes.  Samples taken while the robot
+ * is moving would poison the bias estimate and lean the balance reference,
+ * so any axis above the threshold discards the whole accumulation window.
+ * A yaw bias here directly becomes a slow spin on the bench, so boot the
+ * robot on the ground, untouched, for the 2 s window. */
+#define GYRO_CALIB_STILL_RAD_S 0.08f
+#define GYRO_CALIB_SAMPLES 2000U
+
 void safety_state_gyro_calib_update(float gx, float gy, float gz, uint32_t now_ms) {
     (void)now_ms;
     if (g_safety_state.is_gyro_calibrated) {
+        return;
+    }
+
+    if (fabsf(gx) > GYRO_CALIB_STILL_RAD_S ||
+        fabsf(gy) > GYRO_CALIB_STILL_RAD_S ||
+        fabsf(gz) > GYRO_CALIB_STILL_RAD_S) {
+        /* Skip moving samples WITHOUT resetting the accumulation: gyro bias
+         * is orientation-independent, so still samples collected around
+         * intermittent wobble (e.g. bench stand vibration) remain valid.
+         * Resetting here would make calibration impossible on any surface
+         * that is not perfectly still. */
         return;
     }
 
@@ -49,10 +69,10 @@ void safety_state_gyro_calib_update(float gx, float gy, float gz, uint32_t now_m
     calibration_sum[2] += gz;
     ++calibration_samples_count;
 
-    if (calibration_samples_count >= 1000U) {
-        g_safety_state.gyro_calib_offset[0] = calibration_sum[0] / 1000.0f;
-        g_safety_state.gyro_calib_offset[1] = calibration_sum[1] / 1000.0f;
-        g_safety_state.gyro_calib_offset[2] = calibration_sum[2] / 1000.0f;
+    if (calibration_samples_count >= GYRO_CALIB_SAMPLES) {
+        g_safety_state.gyro_calib_offset[0] = calibration_sum[0] / (float)GYRO_CALIB_SAMPLES;
+        g_safety_state.gyro_calib_offset[1] = calibration_sum[1] / (float)GYRO_CALIB_SAMPLES;
+        g_safety_state.gyro_calib_offset[2] = calibration_sum[2] / (float)GYRO_CALIB_SAMPLES;
         g_safety_state.is_gyro_calibrated = 1U;
     }
 }
@@ -251,6 +271,10 @@ SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs) {
     return decision;
 }
 
+/* The legacy 8-bit mask folds every fault at bit 8 and above (PITCH_RATE,
+ * INIT, INTERNAL) into 0x80, which deliberately collides with the low-byte
+ * FAULT_WHEEL_RIGHT bit.  Consumers that need the exact cause must read the
+ * full 32-bit fault_mask from the health telemetry frame instead. */
 uint8_t safety_state_legacy_fault_mask(void) {
     uint8_t legacy = (uint8_t)(g_safety_state.fault_mask & 0xFFU);
     if ((g_safety_state.fault_mask & ~((FaultMask_t)0xFFU)) != 0U) {

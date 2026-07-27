@@ -22,12 +22,32 @@ UART_HandleTypeDef huart3; /* ST3215 Half-Duplex Servo */
 UART_HandleTypeDef huart6; /* Pi 5 Bridge */
 IWDG_HandleTypeDef hiwdg;
 DMA_HandleTypeDef hdma_usart6_rx;
+DMA_HandleTypeDef hdma_usart3_rx;
+
+/* ST3215 servo bus RX ring: 1 Mbaud is far beyond single-byte HAL IRQ
+ * servicing; a circular DMA plus main-loop consumption removes the overrun
+ * storm entirely (see st3215.c note). */
+#define ST3215_RX_BUF_SIZE 64U
+static uint8_t g_st3215_rx_buf[ST3215_RX_BUF_SIZE];
+/* Drain cursor for the ring above; file scope so the RX re-arm path can
+ * reset it (a re-armed DMA restarts at buffer base). */
+static uint16_t g_st3215_rx_idx = 0U;
 
 /* Real-Time Telemetry and State variables */
 volatile uint32_t g_system_ticks = 0;
 BMI088_t g_imu;
 MahonyFilter_t g_mahony;
 LQRController_t g_lqr;
+
+/* One-pole low-pass on pitch rate to suppress gyro noise amplified by K3.
+ * α = 0.2 at 1 kHz → τ ≈ 4.5 ms → fc ≈ 35 Hz, well above balance bandwidth. */
+static float g_pitch_rate_filt = 0.0f;
+#define PITCH_RATE_FILTER_ALPHA 0.2f
+
+/* Latest fused attitude, shared between the DRDY-driven fusion block and the
+ * ms-deadline-driven safety block (which must keep running even if DRDY stops). */
+static float g_body_pitch = 0.0f;
+static float g_body_pitch_rate = 0.0f;
 
 DDSM_State_t g_ddsm_left;
 DDSM_State_t g_ddsm_right;
@@ -52,6 +72,46 @@ uint8_t g_pi_rx_buf[PI_RX_BUF_SIZE];
 static PiTransport_t g_pi_transport;
 static volatile uint8_t g_pi_poll_requested = 0U;
 static uint8_t g_reset_cause = 0U;
+
+/* Main-loop stall forensics: the SysTick handler (1 ms) watches the loop
+ * heartbeat; on a >100 ms stall it snapshots UART status/error evidence to
+ * the RAM-top dump area so an interrupt storm starving the loop is visible
+ * after the IWDG reset. */
+volatile uint32_t g_loop_heartbeat_ms = 0U;
+volatile uint32_t g_uart2_err_cnt = 0U;
+volatile uint32_t g_uart3_err_cnt = 0U;
+volatile uint32_t g_uart6_err_cnt = 0U;
+volatile uint32_t g_uart2_rx_cnt = 0U;
+volatile uint32_t g_uart3_rx_cnt = 0U;
+/* Set by the UART error ISR when an RX error (ORE/NE/FE) fires: the HAL clears
+ * CR3.DMAR and aborts the circular RX DMA on overrun, so without a re-arm the
+ * bus stays deaf until reboot (observed on USART3: one boot-time ORE killed
+ * all servo feedback).  The main loop performs the actual re-arm because the
+ * DMA abort completes asynchronously (Receive_DMA returns BUSY inside the ISR). */
+volatile uint8_t g_uart3_rx_rearm = 0U;
+volatile uint8_t g_uart6_rx_rearm = 0U;
+
+#define STALL_DUMP_BASE  0x2001FFC0U  /* 12 words; ends just below FAULT_DUMP @0x2001FFF0 */
+#define STALL_DUMP_MAGIC 0x57A11EDU
+
+void main_loop_stall_check(void) {
+    volatile uint32_t *dump = (volatile uint32_t *)STALL_DUMP_BASE;
+    uint32_t now = HAL_GetTick();
+    if (dump[0] == STALL_DUMP_MAGIC) return;             /* keep first stall */
+    if ((uint32_t)(now - g_loop_heartbeat_ms) <= 100U) return;
+    dump[1] = g_loop_heartbeat_ms;
+    dump[2] = g_system_ticks;
+    dump[3] = huart2.Instance->SR;
+    dump[4] = huart3.Instance->SR;
+    dump[5] = huart6.Instance->SR;
+    dump[6] = g_uart2_err_cnt;
+    dump[7] = g_uart3_err_cnt;
+    dump[8] = g_uart6_err_cnt;
+    dump[9] = g_uart2_rx_cnt;
+    dump[10] = g_uart3_rx_cnt;
+    dump[11] = hdma_usart6_rx.Instance->NDTR;
+    dump[0] = STALL_DUMP_MAGIC;
+}
 
 /* Function Prototypes */
 void SystemClock_Config(void);
@@ -83,6 +143,11 @@ int main(void) {
     /* Configure the system clock to 168 MHz */
     SystemClock_Config();
 
+    /* Keep the HAL tick alive under UART interrupt storms: HAL timeouts and
+     * delay loops depend on it, and a starved tick turns a bounded 2 ms I2C
+     * timeout into an unbounded wait. */
+    NVIC_SetPriority(SysTick_IRQn, 0U);
+
     /* Initialize all configured peripherals */
     MX_GPIO_Init();
     MX_DMA_Init();
@@ -99,7 +164,7 @@ int main(void) {
     pi_transport_init(&g_pi_transport, g_pi_rx_buf, PI_RX_BUF_SIZE);
     safety_state_init();
     lqr_init(&g_lqr);
-    mahony_init(&g_mahony, 2.0f, 0.005f); /* Kp = 2.0, Ki = 0.005 */
+    mahony_init(&g_mahony, 10.0f, 0.002f); /* Kp high for fast balance tracking */
 
     g_ddsm_left.id = DDSM_LEFT_ID;
     g_ddsm_right.id = DDSM_RIGHT_ID;
@@ -157,6 +222,8 @@ int main(void) {
     uint32_t last_pi_poll_ms = 0U;
     FirmwareRuntime_t firmware_runtime;
     uint8_t control_deadline_pending = 0U;
+    uint8_t lqr_deadline_pending = 0U;
+    uint8_t hold_ref_anchored = 0U;
     uint8_t servo_deadline_pending = 0U;
 
     startup_manager_init(&g_startup_manager, HAL_GetTick());
@@ -165,6 +232,7 @@ int main(void) {
     /* Main background scheduler loop */
     while (1) {
         uint32_t startup_now = HAL_GetTick();
+        g_loop_heartbeat_ms = startup_now;
         StartupInputs_t startup_inputs;
         StartupOutputs_t startup_outputs;
         FirmwareRuntimeInputs_t runtime_inputs;
@@ -177,6 +245,33 @@ int main(void) {
         uint8_t wheel_authorized;
         uint8_t startup_servos_online = 1U;
 
+        if (g_uart6_rx_rearm) {
+            /* Synchronous abort first: HAL clears CR3.DMAR and disables the RX
+             * DMA on an ORE/NE/FE, and that teardown completes ASYNCHRONOUSLY.
+             * Re-arming without waiting lets the late abort completion wipe the
+             * fresh Receive_DMA state (observed on USART3: bus permanently deaf
+             * with ORE latched, EIE=0 and no further error callbacks). */
+            (void)HAL_UART_AbortReceive(&huart6);
+            __HAL_UART_CLEAR_OREFLAG(&huart6);
+            if (HAL_UART_Receive_DMA(&huart6, g_pi_rx_buf, PI_RX_BUF_SIZE) == HAL_OK) {
+                g_uart6_rx_rearm = 0U;
+            }
+        } else if ((hdma_usart6_rx.Instance->CR & DMA_SxCR_EN) == 0U) {
+            /* Deaf-DMA watchdog: the abort-after-rearm race can end with the
+             * stream disabled and no error callback left to fire (EIE cleared),
+             * so re-detection must not rely on the error path alone. */
+            g_uart6_rx_rearm = 1U;
+        }
+        if (g_uart3_rx_rearm) {
+            (void)HAL_UART_AbortReceive(&huart3);
+            __HAL_UART_CLEAR_OREFLAG(&huart3);
+            if (HAL_UART_Receive_DMA(&huart3, g_st3215_rx_buf, ST3215_RX_BUF_SIZE) == HAL_OK) {
+                g_uart3_rx_rearm = 0U;
+                g_st3215_rx_idx = 0U;
+            }
+        } else if ((hdma_usart3_rx.Instance->CR & DMA_SxCR_EN) == 0U) {
+            g_uart3_rx_rearm = 1U;
+        }
         if (g_pi_poll_requested || startup_now != last_pi_poll_ms) {
             g_pi_poll_requested = 0U;
             last_pi_poll_ms = startup_now;
@@ -185,6 +280,19 @@ int main(void) {
         }
 
         ddsm_bus_step(&g_ddsm_bus, startup_now);
+        /* Drain the ST3215 DMA ring into the bus parser (main-loop context). */
+        {
+            uint16_t ndtr = (uint16_t)__HAL_DMA_GET_COUNTER(&hdma_usart3_rx);
+            uint16_t head = (ndtr == 0U) ? ST3215_RX_BUF_SIZE
+                                         : (uint16_t)(ST3215_RX_BUF_SIZE - ndtr);
+            while (g_st3215_rx_idx != head) {
+                ++g_uart3_rx_cnt;
+                st3215_bus_rx_byte_from_dma(&g_st3215_bus,
+                                            g_st3215_rx_buf[g_st3215_rx_idx],
+                                            startup_now);
+                g_st3215_rx_idx = (uint16_t)((g_st3215_rx_idx + 1U) % ST3215_RX_BUF_SIZE);
+            }
+        }
         st3215_bus_step(&g_st3215_bus, startup_now);
         Actuator_Feedback_Snapshot(&left_feedback, &right_feedback, servo_feedback);
         Pi_Command_Snapshot(&runtime_heartbeat, &runtime_action);
@@ -314,11 +422,10 @@ int main(void) {
             }
         }
 
-        /* The DDSM315 bus permits at most one request/response transaction per
-         * 4 ms.  Dispatch exactly one motor at each bus deadline and alternate
-         * sides after every successful submission.  This keeps both feedback
-         * ages bounded even when one motor times out or adapter echo shifts a
-         * frame, and avoids two independent deadlines becoming phase-locked. */
+        /* Dispatch wheel torque commands at the DDSM315 bus limit.
+         * At 115200 baud a 10-byte frame takes ~0.87 ms TX + ~0.87 ms RX;
+         * the 4 ms spacing matches the original bus scheduling and gives each
+         * wheel a 125 Hz update rate.  Removing it caused RS485 overruns. */
         if (g_actuator_configured && ddsm_bus_is_idle(&g_ddsm_bus) &&
             (int32_t)(startup_now - next_wheel_tx_ms) >= 0) {
             int wheel_result;
@@ -330,9 +437,6 @@ int main(void) {
                 wheel_result = ddsm_bus_queue_torque(&g_ddsm_bus, wheel,
                                                      torque, startup_now);
             } else if (g_safety_state.current_mode == STATE_FAULT) {
-                /* In FAULT keep streaming zero-torque so the motors actually
-                 * stop: a query frame leaves the last torque latched and the
-                 * wheels keep spinning. */
                 wheel_result = ddsm_bus_queue_torque(&g_ddsm_bus, wheel,
                                                      0.0f, startup_now);
             } else {
@@ -351,12 +455,91 @@ int main(void) {
         /* Reaching this point proves the scheduler is alive even before DRDY. */
         HAL_IWDG_Refresh(&hiwdg);
 
+        /* Consume the 250 Hz control deadline (HAL_GetTick-based) OUTSIDE the
+         * DRDY tick gate below.  The safety state machine must keep running
+         * when gyro DRDY stops: previously it lived inside the DRDY-gated
+         * tick block, so a dead BMI088 froze fault detection while the DDSM
+         * dispatch kept streaming the last cached torque command forever.
+         *
+         * The LQR deadline is LATCHED into lqr_deadline_pending instead of
+         * being consumed here: the LQR block only executes on a DRDY tick,
+         * and most loop iterations have none, so consuming the deadline at
+         * this point would silently drop ~3 of every 4 control cycles and
+         * leave the robot effectively open-loop. */
+        uint8_t control_due = control_deadline_pending;
+        if (control_due) {
+            control_deadline_pending = 0U;
+            lqr_deadline_pending = 1U;
+        }
+
+        /* Safety state machine update at 250 Hz on the ms deadline.  Uses the
+         * latest fused attitude published by the DRDY block (g_body_pitch /
+         * g_body_pitch_rate); if the IMU dies, imu_fresh goes stale and the
+         * debounced freshness fault latches FAULT regardless of DRDY. */
+        if (control_due && g_startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY) {
+            float max_temp = g_imu.temperature;
+            for (int i = 0; i < 4; i++) {
+                if (servo_feedback[i].temperature_c > max_temp) {
+                    max_temp = servo_feedback[i].temperature_c;
+                }
+            }
+            SafetyInputs_t safety_inputs;
+            SafetyDecision_t safety_decision;
+            uint32_t safety_now = HAL_GetTick();
+            uint8_t servos_fresh = 1U;
+            for (int i = 0; i < 4; ++i) {
+                if (!device_health_is_fresh(&servo_feedback[i].health,
+                                            safety_now,
+                                            SAFETY_SERVO_MAX_AGE_MS)) {
+                    servos_fresh = 0U;
+                }
+            }
+            safety_inputs.now_ms = safety_now;
+            safety_inputs.pitch_rad = g_body_pitch;
+            safety_inputs.pitch_rate_rads = g_body_pitch_rate;
+            safety_inputs.max_temp_c = max_temp;
+            safety_inputs.gyro_calibrated = g_safety_state.is_gyro_calibrated;
+            safety_inputs.startup_ready = servos_enabled;
+            safety_inputs.imu_fresh = device_health_is_fresh(&g_imu.health,
+                                                             safety_now,
+                                                             SAFETY_IMU_MAX_AGE_MS);
+            safety_inputs.wheel_l_fresh = device_health_is_fresh(&left_feedback.health,
+                                                                 safety_now,
+                                                                 SAFETY_WHEEL_MAX_AGE_MS);
+            safety_inputs.wheel_r_fresh = device_health_is_fresh(&right_feedback.health,
+                                                                 safety_now,
+                                                                 SAFETY_WHEEL_MAX_AGE_MS);
+            safety_inputs.servos_fresh = servos_fresh;
+            safety_inputs.link_compatible = pi_link_is_compatible();
+            safety_inputs.heartbeat_fresh = pi_link_heartbeat_fresh();
+            safety_inputs.action_fresh = pi_link_action_fresh();
+            safety_inputs.requested_mode = g_pi_cmd_heartbeat.mode_request;
+            safety_decision = safety_state_update(&safety_inputs);
+            if (safety_decision.enter_hold) {
+                pi_link_enter_hold();
+            } else if (safety_decision.clear_action) {
+                pi_link_clear_action();
+            }
+            if (g_safety_state.current_mode == STATE_FAULT ||
+                g_safety_state.current_mode == STATE_INIT) {
+                /* Zero the cached wheel commands on FAULT/INIT.  This must
+                 * happen on the ms deadline (not the DRDY tick) so a dead IMU
+                 * cannot leave a stale non-zero torque latched. */
+                g_ctrl_tau_l = 0.0f;
+                g_ctrl_tau_r = 0.0f;
+            }
+        }
+
         /* Soft real-time scheduler aligned to system ticks (1ms resolution) */
         if (g_system_ticks != last_tick) {
-            /* Use the actual elapsed time; blocking bus I/O can skip ticks */
+            /* Use the actual elapsed time; blocking bus I/O can skip ticks.
+             * Clamp the fusion step: after a long main-loop stall (e.g. an
+             * interrupt storm) dticks spans hundreds of ms, and integrating
+             * the quaternion with dt~1 s would blow up the attitude. */
             uint32_t dticks = g_system_ticks - last_tick;
             last_tick = g_system_ticks;
             float fusion_dt = (float)dticks * 0.001f;
+            if (fusion_dt > 0.02f) fusion_dt = 0.02f;
 
             /* DRDY can arrive while the BMI088 register sequence is still in
              * progress.  Do not read or calibrate from an uninitialized IMU. */
@@ -399,61 +582,25 @@ int main(void) {
             float body_pitch = ATT_PITCH(&g_mahony);
             float body_pitch_rate = ATT_PITCH_RATE_SIGN *
                 (g_imu.gyro[ATT_PITCH_RATE_IDX] - g_safety_state.gyro_calib_offset[ATT_PITCH_RATE_IDX]);
+            /* Low-pass filter pitch rate: the raw gyro Y has broadband noise
+             * that K3 amplifies into torque chatter.  A 35 Hz one-pole filter
+             * preserves the balance-relevant dynamics while cutting noise. */
+            g_pitch_rate_filt += PITCH_RATE_FILTER_ALPHA *
+                (body_pitch_rate - g_pitch_rate_filt);
+            body_pitch_rate = g_pitch_rate_filt;
+
+            /* Publish the latest attitude for the ms-deadline safety block. */
+            g_body_pitch = body_pitch;
+            g_body_pitch_rate = body_pitch_rate;
 
             /* 3. Run the 250 Hz motor deadline and lower-rate telemetry slots. */
             uint8_t slot = last_tick % 4;
-            uint8_t control_due = control_deadline_pending;
-            if (control_due) control_deadline_pending = 0U;
 
-            /* Safety state machine update (at 250 Hz, inside slot scheduler) */
-            if (control_due && g_startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY) {
-                float max_temp = g_imu.temperature;
-                for (int i = 0; i < 4; i++) {
-                    if (servo_feedback[i].temperature_c > max_temp) {
-                        max_temp = servo_feedback[i].temperature_c;
-                    }
-                }
-                SafetyInputs_t safety_inputs;
-                SafetyDecision_t safety_decision;
-                uint32_t safety_now = HAL_GetTick();
-                uint8_t servos_fresh = 1U;
-                for (int i = 0; i < 4; ++i) {
-                    if (!device_health_is_fresh(&servo_feedback[i].health,
-                                                safety_now,
-                                                SAFETY_SERVO_MAX_AGE_MS)) {
-                        servos_fresh = 0U;
-                    }
-                }
-                safety_inputs.now_ms = safety_now;
-                safety_inputs.pitch_rad = body_pitch;
-                safety_inputs.pitch_rate_rads = body_pitch_rate;
-                safety_inputs.max_temp_c = max_temp;
-                safety_inputs.gyro_calibrated = g_safety_state.is_gyro_calibrated;
-                safety_inputs.startup_ready = servos_enabled;
-                safety_inputs.imu_fresh = device_health_is_fresh(&g_imu.health,
-                                                                 safety_now,
-                                                                 SAFETY_IMU_MAX_AGE_MS);
-                safety_inputs.wheel_l_fresh = device_health_is_fresh(&left_feedback.health,
-                                                                     safety_now,
-                                                                     SAFETY_WHEEL_MAX_AGE_MS);
-                safety_inputs.wheel_r_fresh = device_health_is_fresh(&right_feedback.health,
-                                                                     safety_now,
-                                                                     SAFETY_WHEEL_MAX_AGE_MS);
-                safety_inputs.servos_fresh = servos_fresh;
-                safety_inputs.link_compatible = pi_link_is_compatible();
-                safety_inputs.heartbeat_fresh = pi_link_heartbeat_fresh();
-                safety_inputs.action_fresh = pi_link_action_fresh();
-                safety_inputs.requested_mode = g_pi_cmd_heartbeat.mode_request;
-                safety_decision = safety_state_update(&safety_inputs);
-                if (safety_decision.enter_hold) {
-                    pi_link_enter_hold();
-                } else if (safety_decision.clear_action) {
-                    pi_link_clear_action();
-                }
-            }
-
-            /* --- Control deadline: compute and cache both wheel commands --- */
-            if (control_due && g_startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY) {
+            /* --- Control deadline: compute and cache both wheel commands.
+             * Runs on the first DRDY tick after each latched 250 Hz deadline. */
+            if (lqr_deadline_pending &&
+                g_startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY) {
+                lqr_deadline_pending = 0U;
                 if (runtime_outputs.wheel_intent_allowed) {
                     /* Snapshot Pi commands atomically (updated in USART6 ISR) */
                     Pi_Command_Heartbeat_t hb;
@@ -465,10 +612,17 @@ int main(void) {
                     float wheel_vel_r = WHEEL_DIR_R * right_feedback.velocity_rads;
                     float yaw_rate = gz;
                     if (!pi_link_is_compatible() || !pi_link_heartbeat_fresh()) {
-                        /* Enter a fresh local hold reference immediately; do not
-                         * jerk-limit a stale command back to zero from its old
-                         * moving reference. */
-                        lqr_reset(&g_lqr, g_lqr.x_est, g_mahony.yaw);
+                        /* Re-anchor the hold reference ONCE on link loss, not
+                         * every cycle: resetting x_ref to x_est continuously
+                         * pins x_error at zero and silently disables the K0
+                         * position loop and the LQI integrator, so the robot
+                         * cruises away instead of holding its position. */
+                        if (!hold_ref_anchored) {
+                            lqr_reset(&g_lqr, g_lqr.x_est, g_mahony.yaw);
+                            hold_ref_anchored = 1U;
+                        }
+                    } else {
+                        hold_ref_anchored = 0U;
                     }
 
                     /* Run LQR once per 250 Hz cycle; cache both wheel commands. */
@@ -507,16 +661,9 @@ int main(void) {
                         g_ctrl_tau_r *= scale;
                     }
 
-                } else if (g_safety_state.current_mode == STATE_FAULT ||
-                           g_safety_state.current_mode == STATE_INIT) {
-                    /* Only zero the wheel commands on a real FAULT/INIT exit.
-                     * A transient busy bus must not wipe the LQR output: the
-                     * DDSM dispatch (which runs every loop iteration outside
-                     * this 250 Hz block) keeps sending the cached torque, so
-                     * zeroing it here would create control gaps. */
-                    g_ctrl_tau_l = 0.0f;
-                    g_ctrl_tau_r = 0.0f;
                 }
+                /* FAULT/INIT torque zeroing lives in the ms-deadline safety
+                 * block above so it cannot be frozen by a stopped DRDY. */
             }
 
             /* --- Slot 2: Queue telemetry data to Raspberry Pi 5 --- */
@@ -678,10 +825,14 @@ int main(void) {
         }
 
         /* Poll every servo round-robin, including offline devices, so a valid
-         * frame can restore health after line noise or a temporary disconnect. */
+         * frame can restore health after line noise or a temporary disconnect.
+         * 6 ms spacing (24 ms full cycle) deliberately mismatches the 50 Hz
+         * (20 ms) sync-write period: at 5 ms the cycles phase-locked and the
+         * same servo always landed right after the write burst, eating every
+         * delayed reply (observed: S1 timeout bursts, S2-S4 clean). */
         current_time = HAL_GetTick();
         if (g_startup_manager.phase >= STARTUP_ACTUATOR_DISCOVERY &&
-            current_time - last_servo_query_ms >= 5U &&
+            current_time - last_servo_query_ms >= 6U &&
             st3215_bus_queue_read(&g_st3215_bus,
                                   &g_servos[active_servo_query_idx],
                                   g_safety_state.current_mode == STATE_INIT
@@ -699,6 +850,9 @@ int main(void) {
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
     if (GPIO_Pin == IMU_INT_PIN) {
         g_system_ticks++;
+        /* Highest-priority context: runs even when a UART interrupt storm
+         * starves SysTick and the main loop, so stall forensics still work. */
+        main_loop_stall_check();
     }
 }
 
@@ -762,16 +916,24 @@ static void MX_GPIO_Init(void) {
 
 static void MX_DMA_Init(void) {
     __HAL_RCC_DMA2_CLK_ENABLE();
+    __HAL_RCC_DMA1_CLK_ENABLE();
 
     /* DMA2_Stream1_Channel5 for USART6_RX */
     HAL_NVIC_SetPriority(DMA2_Stream1_IRQn, 1, 0);
     HAL_NVIC_EnableIRQ(DMA2_Stream1_IRQn);
+
+    /* DMA1_Stream1_Channel4 for USART3_RX */
+    HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 1, 0);
+    HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
 }
 
 static void MX_IWDG_Init(void) {
     hiwdg.Instance = IWDG;
-    hiwdg.Init.Prescaler = IWDG_PRESCALER_64;
-    hiwdg.Init.Reload = 4095;
+    /* ~1.0 s window: LSI ~32 kHz / 16 = 2 kHz, reload 2000.  The previous
+     * 64/4095 setting (~8.2 s) let a hung main loop hold the last wheel
+     * torque far too long for a self-balancing robot. */
+    hiwdg.Init.Prescaler = IWDG_PRESCALER_16;
+    hiwdg.Init.Reload = 2000;
     if (HAL_IWDG_Init(&hiwdg) != HAL_OK) {
         Error_Handler();
     }
@@ -938,6 +1100,27 @@ static void MX_USART3_UART_Init(void) {
     if (HAL_UART_Init(&huart3) != HAL_OK) {
         Error_Handler();
     }
+
+    /* DMA1_Stream1_Channel4 circular RX (main loop consumes the ring). */
+    hdma_usart3_rx.Instance = DMA1_Stream1;
+    hdma_usart3_rx.Init.Channel = DMA_CHANNEL_4;
+    hdma_usart3_rx.Init.Direction = DMA_PERIPH_TO_MEMORY;
+    hdma_usart3_rx.Init.PeriphInc = DMA_PINC_DISABLE;
+    hdma_usart3_rx.Init.MemInc = DMA_MINC_ENABLE;
+    hdma_usart3_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+    hdma_usart3_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+    hdma_usart3_rx.Init.Mode = DMA_CIRCULAR;
+    hdma_usart3_rx.Init.Priority = DMA_PRIORITY_HIGH;
+    hdma_usart3_rx.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
+    if (HAL_DMA_Init(&hdma_usart3_rx) != HAL_OK) {
+        Error_Handler();
+    }
+    __HAL_LINKDMA(&huart3, hdmarx, hdma_usart3_rx);
+    if (HAL_UART_Receive_DMA(&huart3, g_st3215_rx_buf, ST3215_RX_BUF_SIZE) != HAL_OK) {
+        Error_Handler();
+    }
+
+    /* USART3 IRQ stays enabled for TX-complete (TX remains interrupt-driven). */
     HAL_NVIC_SetPriority(USART3_IRQn, 1, 0);
     HAL_NVIC_EnableIRQ(USART3_IRQn);
 }
@@ -1006,6 +1189,22 @@ void USART2_IRQHandler(void) {
 }
 
 void USART3_IRQHandler(void) {
+    /* Swallow NE/FE before HAL sees them: in DMA reception HAL treats ANY
+     * flagged error as blocking and aborts the whole circular RX stream
+     * (UART_DMAAbortOnError), so one noisy byte on this half-duplex bus cost
+     * a ~1 ms blind window that corrupted every in-flight reply (observed:
+     * ~25%% servo poll failures, freshness FAULT bursts).  A framing/noise
+     * blip now costs at most one garbage byte; the parser resynchronizes on
+     * the 0xFFFF header and the checksum drops a single frame.  Reading SR
+     * then DR clears the flags; DR is normally empty here because the DMA
+     * drains RXNE immediately, and stealing a byte in the rare race costs
+     * exactly one frame as well.  ORE still goes through the HAL abort path
+     * (g_uart3_rx_rearm in the main loop restores the stream). */
+    uint32_t sr = huart3.Instance->SR;
+    if ((sr & (USART_SR_NE | USART_SR_FE)) != 0U) {
+        volatile uint32_t drained = huart3.Instance->DR;
+        (void)drained;
+    }
     HAL_UART_IRQHandler(&huart3);
 }
 
@@ -1021,19 +1220,36 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     if (huart == &huart2) {
+        ++g_uart2_rx_cnt;
         ddsm_bus_on_rx_byte(&g_ddsm_bus, HAL_GetTick());
-    } else if (huart == &huart3) {
-        st3215_bus_on_rx_byte(&g_st3215_bus, HAL_GetTick());
     }
+    /* huart3 RX is DMA-driven; its bytes are consumed in the main loop. */
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
     if (huart == &huart2) {
+        ++g_uart2_err_cnt;
         ddsm_bus_on_uart_error(&g_ddsm_bus, huart);
     } else if (huart == &huart3) {
+        ++g_uart3_err_cnt;
         st3215_bus_on_uart_error(&g_st3215_bus);
+        if ((huart->ErrorCode & (HAL_UART_ERROR_ORE | HAL_UART_ERROR_NE |
+                                 HAL_UART_ERROR_FE)) != 0U) {
+            g_uart3_rx_rearm = 1U;
+        }
     } else if (huart == &huart6) {
-        pi_link_on_tx_error(huart);
+        ++g_uart6_err_cnt;
+        /* RX-side errors (overrun/noise/framing) must not drop queued TX
+         * telemetry: circular DMA reception keeps running and the streaming
+         * decoder resynchronizes on its own.  Only genuine TX failures fall
+         * through to the TX queue recovery.  Overrun still makes the HAL
+         * abort the RX DMA, so schedule a re-arm. */
+        if ((huart->ErrorCode & (HAL_UART_ERROR_ORE | HAL_UART_ERROR_NE |
+                                 HAL_UART_ERROR_FE)) == 0U) {
+            pi_link_on_tx_error(huart);
+        } else {
+            g_uart6_rx_rearm = 1U;
+        }
     }
 }
 
@@ -1042,6 +1258,13 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
  */
 void DMA2_Stream1_IRQHandler(void) {
     HAL_DMA_IRQHandler(&hdma_usart6_rx);
+}
+
+/**
+ * @brief DMA1 Stream1 (USART3 RX) global interrupt handler.
+ */
+void DMA1_Stream1_IRQHandler(void) {
+    HAL_DMA_IRQHandler(&hdma_usart3_rx);
 }
 
 /**

@@ -1,6 +1,8 @@
 #ifndef LQR_CONTROLLER_H
 #define LQR_CONTROLLER_H
 
+#include <stdint.h>
+
 typedef struct {
     float K[4];       /* F=-K[x-x_ref, pitch, vx-v_ref, pitch_rate]-Ki*x_int */
     float Ki;
@@ -12,6 +14,9 @@ typedef struct {
     float yaw_ref;
     float w_ref;
     float w_accel;
+    /* Counts consecutive ticks in the airborne signature (fast + level).
+     * Appended last so the SWD debug offsets of the fields above stay fixed. */
+    uint16_t air_sustain_ticks;
 } LQRController_t;
 
 void lqr_init(LQRController_t *controller);

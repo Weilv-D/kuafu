@@ -5,7 +5,7 @@
 #define STARTUP_POWER_WAIT_MS          500U
 #define STARTUP_RETRY_MS               100U
 #define STARTUP_IMU_TIMEOUT_MS        5000U
-#define STARTUP_GYRO_TIMEOUT_MS       5000U
+#define STARTUP_GYRO_TIMEOUT_MS      15000U
 #define STARTUP_ACTUATOR_TIMEOUT_MS  10000U
 
 static uint8_t deadline_reached(uint32_t now_ms, uint32_t deadline_ms) {

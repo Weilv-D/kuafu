@@ -98,9 +98,10 @@
 #define LQR_K3                  KUAFU_LQR_K3
 #define LQI_KI                  KUAFU_LQI_KI
 
-/* DDSM315 Current to Torque scaling factor */
-/* tau = 0.75 * I_amps. Command maps raw [-32767, 32767] to [-8.0, 8.0] Amps.
- * Hence: I_raw = tau * (32767.0f / 6.0f) ~= 5461.17f * tau */
+/* DDSM315 current to torque scaling factor.
+ * Motor characteristic: tau = 0.75 * I_amps; the raw command spans
+ * [-32767, 32767] over [-8.0, 8.0] A, i.e. raw = I * (32767/8).
+ * Combined: raw = tau * (32767 / (0.75*8)) = tau * 32767/6 ≈ 5461.17 * tau. */
 #define DDSM_TORQUE_TO_RAW      5461.17f
 #define DDSM_RAW_TO_TORQUE      (1.0f / DDSM_TORQUE_TO_RAW)
 
@@ -175,9 +176,12 @@
 #define SAFETY_HEARTBEAT_MS     200U            /* Pi heartbeat timeout */
 #define SAFETY_ACTION_MS        80U             /* RL action freshness timeout */
 #define SAFETY_IMU_MAX_AGE_MS   20U
-#define SAFETY_WHEEL_MAX_AGE_MS 50U
-#define SAFETY_SERVO_MAX_AGE_MS 250U
-#define SAFETY_FRESHNESS_DEBOUNCE_TICKS 5U  /* 250 Hz control loop; 5 ticks = 20 ms */
+#define SAFETY_WHEEL_MAX_AGE_MS 250U
+#define SAFETY_SERVO_MAX_AGE_MS 500U  /* Servos hold position via their own
+                               * internal loop; telemetry loss does not mean
+                               * torque loss.  250 ms latched FAULT on query
+                               * timeout bursts caused by ground vibration. */
+#define SAFETY_FRESHNESS_DEBOUNCE_TICKS 8U  /* 250 Hz control loop; 8 ticks = 32 ms */
 #define SAFETY_MODE_TRANSITION_GRACE_MS 100U
 
 #endif /* PIN_CONFIG_H */

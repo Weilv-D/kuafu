@@ -67,7 +67,7 @@ def main() -> None:
             imu = bytes(session.target.read_memory_block8(addresses["g_imu"], 0x34))
             left = bytes(session.target.read_memory_block8(addresses["g_ddsm_left"], 0x28))
             right = bytes(session.target.read_memory_block8(addresses["g_ddsm_right"], 0x28))
-            servos = bytes(session.target.read_memory_block8(addresses["g_servos"], 4 * 0x30))
+            servos = bytes(session.target.read_memory_block8(addresses["g_servos"], 4 * 0x34))
             servo_bus = bytes(session.target.read_memory_block8(addresses["g_st3215_bus"], 0x138))
             uart3 = bytes(session.target.read_memory_block8(addresses["huart3"], 0x44))
             wheel_bus = bytes(session.target.read_memory_block8(addresses["g_ddsm_bus"], 0x24))
@@ -77,7 +77,7 @@ def main() -> None:
             records = [("imu", decode_health(imu, 0x20)),
                        ("wheel_l", decode_health(left, 0x14)),
                        ("wheel_r", decode_health(right, 0x14))]
-            records += [(f"servo_{i + 1}", decode_health(servos, i * 0x30 + 0x1C)) for i in range(4)]
+            records += [(f"servo_{i + 1}", decode_health(servos, i * 0x34 + 0x20)) for i in range(4)]
             session.target.resume()
             print(f"drdy_tick={tick} hal_ms={hal_tick} mode={mode} fault=0x{fault:08x}")
             startup_phase, startup_since, startup_next = struct.unpack_from("<III", startup)
@@ -109,7 +109,7 @@ def main() -> None:
                 temp = ""
                 if name.startswith("servo_"):
                     index = int(name[-1]) - 1
-                    temp = f" temp_c={struct.unpack_from('<f', servos, index * 0x30 + 0x10)[0]:.1f}"
+                    temp = f" temp_c={struct.unpack_from('<f', servos, index * 0x34 + 0x10)[0]:.1f}"
                 print(f"  {name:8s} online={health['online']} age_ms={age:>5} "
                       f"errors={errors} consecutive={health['consecutive']}{uart_sub}{temp}")
             time.sleep(args.interval)

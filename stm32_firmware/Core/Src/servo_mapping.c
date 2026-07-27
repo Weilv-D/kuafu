@@ -6,11 +6,18 @@ static const int16_t k_servo_center[SERVO_MAPPING_COUNT] = SERVO_CENTER_INIT;
 
 int16_t servo_angle_to_tick(float angle_rad, uint8_t index) {
     int32_t delta;
+    int32_t tick;
     if (index >= SERVO_MAPPING_COUNT) {
         return 0;
     }
     delta = (int32_t)((float)k_servo_direction[index] * angle_rad * SERVO_TICKS_PER_RAD);
-    return (int16_t)((int32_t)k_servo_center[index] + delta);
+    tick = (int32_t)k_servo_center[index] + delta;
+    /* Defensive saturation: IK inputs are already workspace-clamped, so
+     * reaching these bounds means a contract violation upstream.  Clamp here
+     * (sync_write would clamp silently anyway) to keep one clear policy. */
+    if (tick < 0) tick = 0;
+    if (tick > 4095) tick = 4095;
+    return (int16_t)tick;
 }
 
 float servo_tick_to_angle(uint16_t raw_tick, uint8_t index) {

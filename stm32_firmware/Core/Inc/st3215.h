@@ -15,7 +15,10 @@
 #define ST_STATE_DATA_SIZE         15U
 #define ST_STATE_FRAME_SIZE        21U
 #define ST_MAX_PACKET_SIZE         96U
-#define ST_REPLY_TIMEOUT_MS         3U
+#define ST_REPLY_TIMEOUT_MS         6U  /* Loaded servos answer status reads in <1 ms typically, but a reply
+   * landing right after the 50 Hz sync-write burst can be delayed several
+   * ms; 3 ms produced timeout bursts on the servo that always follows the
+   * write slot (S1), tripping the freshness fault on ground vibration. */
 
 typedef struct {
     uint8_t id;
@@ -26,6 +29,7 @@ typedef struct {
     float temperature_c;
     float voltage;
     float current_a;
+    uint8_t error_flags;     /* Status-frame error byte (overload/overheat/voltage etc.) */
     DeviceHealth_t health;
 } ST3215_State_t;
 
@@ -75,6 +79,7 @@ int st3215_bus_queue_read(ST3215_Bus_t *bus, ST3215_State_t *target,
 void st3215_bus_step(ST3215_Bus_t *bus, uint32_t now_ms);
 void st3215_bus_on_tx_complete(ST3215_Bus_t *bus);
 void st3215_bus_on_rx_byte(ST3215_Bus_t *bus, uint32_t now_ms);
+void st3215_bus_rx_byte_from_dma(ST3215_Bus_t *bus, uint8_t byte, uint32_t now_ms);
 void st3215_bus_on_uart_error(ST3215_Bus_t *bus);
 
 #endif

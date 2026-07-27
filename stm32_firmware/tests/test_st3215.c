@@ -25,8 +25,8 @@ static void feed(ST3215_Bus_t *bus, const uint8_t *bytes,
                  uint8_t count, uint32_t now_ms) {
     uint8_t i;
     for (i = 0U; i < count; ++i) {
-        test_uart_supply_rx(&bytes[i], 1U);
-        st3215_bus_on_rx_byte(bus, now_ms);
+        /* Production feeds bytes from the DMA ring in main-loop context. */
+        st3215_bus_rx_byte_from_dma(bus, bytes[i], now_ms);
     }
 }
 
@@ -108,7 +108,9 @@ void run_st3215_tests(void) {
     TEST_EQ_INT(0, st3215_bus_queue_read(&bus, &state, 3U, 120U));
     st3215_bus_step(&bus, 122U);
     TEST_EQ_INT(ST_BUS_TX_READ, bus.phase);
-    st3215_bus_step(&bus, 123U);
+    st3215_bus_step(&bus, 125U);
+    TEST_EQ_INT(ST_BUS_TX_READ, bus.phase);  /* 6 ms reply budget not yet spent */
+    st3215_bus_step(&bus, 126U);
     TEST_TRUE(st3215_bus_is_idle(&bus));
     TEST_EQ_INT(1, (int)state.health.timeout_count);
 }

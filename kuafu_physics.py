@@ -203,9 +203,12 @@ def dlqr(Ad, Bd, Q, R):
 # Controller design weights are physical-model parameters, not copied gains.  The
 # position/integral weights were selected by the native B0 hold/command-direction
 # gate; gains below are regenerated from these values at import/generation time.
-LQR_Q_DIAG = (1000.0, 50.0, 1.0, 1.0)
-LQI_QI = 1000.0
-LQR_R = 0.5
+# Tuned on hardware after fixing the DDSM315 mode-switch frame (ddsm_build_mode
+# was writing the mode byte to the CRC slot).  With torque mode now working,
+# moderate gains give stable balance; excessive pitch weight causes chatter.
+LQR_Q_DIAG = (1000.0, 80.0, 1.0, 1.0)
+LQI_QI = 200.0
+LQR_R = 0.3
 
 
 def synth_lqr_k(dt: float = BASE_DT,

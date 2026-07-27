@@ -12,6 +12,7 @@ void run_st3215_tests(void);
 void run_pi_link_tests(void);
 void run_pi_transport_tests(void);
 void run_firmware_runtime_tests(void);
+void run_lqr_tests(void);
 
 static void test_crc8_maxim_known_vector(void) {
     const uint8_t bytes[] = {0x01, 0x02, 0x03, 0x04};
@@ -46,6 +47,7 @@ int main(void) {
     run_pi_link_tests();
     run_pi_transport_tests();
     run_firmware_runtime_tests();
+    run_lqr_tests();
 
     if (g_test_failures != 0) {
         fprintf(stderr, "%d firmware host test(s) failed\n", g_test_failures);

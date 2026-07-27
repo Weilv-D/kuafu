@@ -3,15 +3,15 @@
 
 /* AUTO-GENERATED from kuafu_physics.py. Regenerate with rl/verify/generate_artifacts.py. */
 #define KUAFU_MODEL_SCHEMA_VERSION "v1.1.0"
-#define KUAFU_MODEL_HASH "9838e7fe323c1809"
+#define KUAFU_MODEL_HASH "5a0adb5878976aa4"
 #define BASE_DT 0.004000f
 #define PHYS_DT 0.002000f
 #define RL_DT 0.020000f
-#define KUAFU_LQR_K0 -40.94398313f
-#define KUAFU_LQR_K1 -74.76473389f
-#define KUAFU_LQR_K2 -20.15910406f
-#define KUAFU_LQR_K3 -5.24903726f
-#define KUAFU_LQI_KI -40.86910183f
+#define KUAFU_LQR_K0 -52.49860838f
+#define KUAFU_LQR_K1 -81.25963842f
+#define KUAFU_LQR_K2 -24.31454271f
+#define KUAFU_LQR_K3 -5.82360047f
+#define KUAFU_LQI_KI -23.45785754f
 #define R_WHEEL_M 0.039080f
 #define D0_MIN_MM 58.0f
 #define D0_MAX_MM 207.0f

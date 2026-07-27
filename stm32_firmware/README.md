@@ -19,29 +19,39 @@ BMI088, two DDSM315 wheel motors, and four ST3215 servos powered together.
 
 ## Actuator Safety
 
-Wheel power is a separately authorized domain. Startup, `INIT`, `FAULT`, and a
-missing or incompatible Pi link use read-only DDSM feedback queries; they do not
-send a zero-current motion command and do not enable either wheel. Wheel enable
-requires all of the following:
+Wheel power is a separately authorized domain. Startup and `INIT` use read-only
+DDSM feedback queries; they do not send a zero-current motion command and do not
+enable either wheel. Wheel enable requires both of the following:
 
-1. startup phase `READY`;
-2. no latched safety fault;
-3. a compatible Pi `HELLO` model hash;
-4. a fresh heartbeat; and
-5. an explicit `STAND`, `ACTIVE`, or `CLIMB` mode request.
+1. startup phase `READY`; and
+2. no latched safety fault.
 
-`ACTIVE` is the only mode in which the learned residual is live, so it is the only
-mode in which the robot walks. `STAND` and `CLIMB` both run the LQR/LQI baseline as
-a zero-velocity hold (the Pi commands zero velocity/yaw); `CLIMB` is otherwise a
-reserved placeholder that shares `STAND`'s servo and wheel code path and is not
-trained in the RL policy. See `docs/architecture/system.md` for the full mode table
-and the CLIMB caveat.
+Self-balancing is a baseline capability that works standalone: `INIT -> STAND`
+does not require a Pi link, so after startup the robot enables its wheels and
+runs the LQR zero-velocity hold with no Raspberry Pi attached. The Pi link only
+gates higher-level behavior:
 
-Loss of authorization disables both wheels. A stale action removes residual
-commands, while a stale heartbeat removes motion authorization. Temperature must
-remain above 65°C continuously for 100 ms before the over-temperature fault is
+- a compatible Pi `HELLO` model hash plus a fresh heartbeat plus an explicit
+  mode request are required to enter `ACTIVE` (the only mode with a live learned
+  residual, i.e. the only mode in which the robot walks);
+- a stale action removes residual commands, while a stale heartbeat drops
+  `ACTIVE`/`CLIMB` back to `STAND` and re-anchors the local hold reference.
+
+`STAND` and `CLIMB` both run the LQR/LQI baseline as a zero-velocity hold (the
+Pi commands zero velocity/yaw); `CLIMB` is otherwise a reserved placeholder that
+shares `STAND`'s servo and wheel code path and is not trained in the RL policy.
+See `docs/architecture/system.md` for the full mode table and the CLIMB caveat.
+
+In `FAULT` the firmware keeps streaming explicit zero-torque frames to both
+wheels (a read-only query would leave the last torque latched in the motor) and
+queues motor disable. The safety state machine runs on the millisecond control
+deadline, not on the gyro DRDY timebase, so a dead BMI088 still latches
+`FAULT_IMU` and zeroes the wheels instead of freezing with torque applied.
+Gyro bias calibration only accumulates samples while all gyro axes read below
+0.08 rad/s; a moving robot never completes calibration. Temperature must remain
+above 65°C continuously for 100 ms before the over-temperature fault is
 latched, which rejects isolated telemetry spikes without weakening sustained
-over-temperature protection.
+over-temperature protection. The IWDG window is ~1 s.
 
 ## Calibrated Hardware Values
 

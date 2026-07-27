@@ -71,6 +71,9 @@ int st3215_parse_state_frame(const uint8_t *frame, uint8_t frame_len,
     if (frame[0] != 0xFFU || frame[1] != 0xFFU || frame[3] != 17U) return -1;
     if (frame[2] != state->id) return -2;
     if (checksum(&frame[2], (uint8_t)(frame_len - 3U)) != frame[frame_len - 1U]) return -3;
+    /* Error byte (bit flags: voltage / overheat / overload / ...).  The frame
+     * data is still valid, so report the flags instead of rejecting. */
+    state->error_flags = frame[4];
     value = (uint16_t)(((uint16_t)frame[6] << 8) | frame[5]);
     state->position_tick = value;
     state->position_rad = (float)value * TICK_TO_RAD;
@@ -85,12 +88,6 @@ int st3215_parse_state_frame(const uint8_t *frame, uint8_t frame_len,
     value = (uint16_t)(((uint16_t)frame[19] << 8) | frame[18]);
     state->current_a = (float)(int16_t)value * 0.0065f;
     return 0;
-}
-
-static void arm_rx(ST3215_Bus_t *bus) {
-    if (bus != NULL && bus->huart != NULL) {
-        (void)HAL_UART_Receive_IT(bus->huart, &bus->rx_byte, 1U);
-    }
 }
 
 static void reset_parser(ST3215_Bus_t *bus) {
@@ -138,6 +135,12 @@ static void accept_stream_byte(ST3215_Bus_t *bus, uint8_t byte, uint32_t now_ms)
             result = st3215_parse_state_frame(bus->frame, bus->frame_len, bus->target);
             if (result == 0) {
                 device_health_mark_valid(&bus->target->health, now_ms);
+                if (bus->target->error_flags != 0U) {
+                    /* Count the flag-bearing frame for diagnostics without
+                     * knocking the servo offline (offline_after = 0). */
+                    device_health_mark_failure(&bus->target->health,
+                                               DEVICE_FAILURE_PROTOCOL, 0U);
+                }
                 bus->target = NULL;
                 bus->phase = ST_BUS_IDLE;
             } else {
@@ -163,6 +166,18 @@ static void consume_with_echo_filter(ST3215_Bus_t *bus, uint8_t byte, uint32_t n
     accept_stream_byte(bus, byte, now_ms);
 }
 
+/* RX is serviced by a circular DMA stream (see main.c): single-byte RX
+ * interrupts cannot keep up with 1 Mbaud -- the HAL IRQ handler alone costs
+ * longer than the 10 us byte time, so any preemption overruns, and re-arming
+ * inside the error callback turned overruns into a CPU-starving interrupt
+ * storm (measured: 55k error callbacks in 10 s, ending in an IWDG reset).
+ * Bytes now arrive through st3215_bus_rx_byte_from_dma() in main-loop
+ * context; no per-byte interrupt and nothing to re-arm. */
+void st3215_bus_rx_byte_from_dma(ST3215_Bus_t *bus, uint8_t byte, uint32_t now_ms) {
+    if (bus == NULL) return;
+    consume_with_echo_filter(bus, byte, now_ms);
+}
+
 static int start_tx(ST3215_Bus_t *bus, uint8_t len, ST3215_BusPhase_t phase) {
     if (bus == NULL || bus->huart == NULL || bus->phase != ST_BUS_IDLE) return -1;
     bus->tx_len = len;
@@ -180,7 +195,7 @@ void st3215_bus_init(ST3215_Bus_t *bus, UART_HandleTypeDef *huart) {
     memset(bus, 0, sizeof(*bus));
     bus->huart = huart;
     bus->phase = ST_BUS_IDLE;
-    arm_rx(bus);
+    /* RX armed by the caller as circular DMA (see main.c). */
 }
 
 uint8_t st3215_bus_is_idle(const ST3215_Bus_t *bus) {
@@ -239,9 +254,10 @@ void st3215_bus_on_tx_complete(ST3215_Bus_t *bus) {
 }
 
 void st3215_bus_on_rx_byte(ST3215_Bus_t *bus, uint32_t now_ms) {
+    /* Legacy single-byte IT path; DMA mode feeds bytes via
+     * st3215_bus_rx_byte_from_dma() instead. */
     if (bus == NULL) return;
     consume_with_echo_filter(bus, bus->rx_byte, now_ms);
-    arm_rx(bus);
 }
 
 void st3215_bus_on_uart_error(ST3215_Bus_t *bus) {
@@ -251,5 +267,5 @@ void st3215_bus_on_uart_error(ST3215_Bus_t *bus) {
     } else if (bus->phase == ST_BUS_TX_ONLY) {
         bus->phase = ST_BUS_IDLE;
     }
-    arm_rx(bus);
+    /* DMA reception is not affected by UART error flags and needs no re-arm. */
 }

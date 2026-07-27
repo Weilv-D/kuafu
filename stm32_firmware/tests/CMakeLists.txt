@@ -14,6 +14,7 @@ add_executable(firmware_host_tests
     test_st3215.c
     test_pi_link.c
     test_firmware_runtime.c
+    test_lqr.c
     test_support.c
     ../Core/Src/crc8.c
     ../Core/Src/kinematics.c
@@ -27,6 +28,7 @@ add_executable(firmware_host_tests
     ../Core/Src/pi_link.c
     ../Core/Src/pi_transport.c
     ../Core/Src/firmware_runtime.c
+    ../Core/Src/lqr_controller.c
 )
 
 target_include_directories(firmware_host_tests PRIVATE
@@ -35,7 +37,10 @@ target_include_directories(firmware_host_tests PRIVATE
 )
 
 if(MSVC)
-    target_compile_options(firmware_host_tests PRIVATE /W4 /WX)
+    # /utf-8: sources contain UTF-8 comments (em-dashes, CJK); without this
+    # MSVC on a non-UTF-8 system code page raises C4819, which /WX promotes
+    # to a build failure.
+    target_compile_options(firmware_host_tests PRIVATE /W4 /WX /utf-8)
 else()
     target_compile_options(firmware_host_tests PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(firmware_host_tests PRIVATE m)

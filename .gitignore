@@ -79,3 +79,5 @@ stm32_firmware/**/*.build_log.htm
 stm32_firmware/**/*.map
 stm32_firmware/**/*.lst
 stm32_firmware/MDK-ARM/build_keil.log
+stm32_firmware/MDK-ARM/build.log
+stm32_firmware/MDK-ARM/debug_tools/*_trace_run.txt

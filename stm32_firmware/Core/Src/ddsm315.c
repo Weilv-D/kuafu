@@ -63,7 +63,14 @@ void ddsm_build_mode(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, uint8_t mode) 
     memset(packet, 0, DDSM_FRAME_SIZE);
     packet[0] = id;
     packet[1] = 0xA0U;
-    packet[9] = mode;
+    /* Sub-command byte: 0x01=current loop, 0x02=velocity loop, 0x03=position.
+     * Previously the mode value was written to byte[9] (the CRC slot) and
+     * byte[2] was left at 0x00, which is not a valid sub-command — the motor
+     * silently ignored the mode switch and stayed in its default velocity loop.
+     * The LQR torque commands (0x64) were then sent to a motor running in
+     * velocity mode, producing erratic sprinting. */
+    packet[2] = mode;
+    packet[9] = crc8_calculate(packet, 9U);
 }
 
 void ddsm_build_query(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id) {
