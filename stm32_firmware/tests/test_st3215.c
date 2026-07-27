@@ -108,9 +108,9 @@ void run_st3215_tests(void) {
     TEST_EQ_INT(0, st3215_bus_queue_read(&bus, &state, 3U, 120U));
     st3215_bus_step(&bus, 122U);
     TEST_EQ_INT(ST_BUS_TX_READ, bus.phase);
-    st3215_bus_step(&bus, 125U);
-    TEST_EQ_INT(ST_BUS_TX_READ, bus.phase);  /* 6 ms reply budget not yet spent */
-    st3215_bus_step(&bus, 126U);
+    st3215_bus_step(&bus, 129U);
+    TEST_EQ_INT(ST_BUS_TX_READ, bus.phase);  /* 10 ms reply budget not yet spent */
+    st3215_bus_step(&bus, 131U);            /* 11 ms elapsed -> timeout latched */
     TEST_TRUE(st3215_bus_is_idle(&bus));
     TEST_EQ_INT(1, (int)state.health.timeout_count);
 }

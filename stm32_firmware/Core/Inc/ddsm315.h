@@ -40,6 +40,11 @@ typedef struct {
     DDSM_BusPhase_t phase;
     uint8_t rx_byte;
     uint8_t rx_len;
+    /* Fire-and-forget commands (mode switch, enable) elicit no motor reply.
+     * When 0, a transaction timeout is treated as a clean completion and does
+     * NOT penalise the target's health -- otherwise the repeated 12 ms no-reply
+     * windows stack into a false stale burst and latch a spurious wheel FAULT. */
+    uint8_t expect_reply;
 } DDSM_Bus_t;
 
 void ddsm_build_torque(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, float torque_nm);

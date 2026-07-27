@@ -62,6 +62,19 @@ void run_ddsm315_tests(void) {
     TEST_EQ_U8(2U, packet[3]);
     TEST_EQ_U8(0x92U, packet[9]);
 
+    /* DDSM315 Protocol-3 mode frame: A0 header, mode VALUE in byte[9], NO CRC.
+     * byte[2] must remain the sub-command slot (0x00 here), never the mode. */
+    ddsm_build_mode(packet, 1U, DDSM_MODE_CURRENT);
+    TEST_EQ_U8(1U, packet[0]);
+    TEST_EQ_U8(0xA0U, packet[1]);
+    TEST_EQ_U8(0x00U, packet[2]);
+    TEST_EQ_U8(0x01U, packet[9]); /* mode value, not a CRC */
+
+    ddsm_build_mode(packet, 2U, DDSM_MODE_SPEED);
+    TEST_EQ_U8(2U, packet[0]);
+    TEST_EQ_U8(0x02U, packet[9]);
+    TEST_EQ_U8(0x00U, packet[2]);
+
     make_feedback(frame, 1U);
     TEST_EQ_INT(0, ddsm_parse_feedback(frame, &state));
     TEST_TRUE(state.torque < 0.0f);

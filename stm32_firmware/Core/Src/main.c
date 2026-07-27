@@ -55,6 +55,11 @@ ST3215_State_t g_servos[4];
 StartupManager_t g_startup_manager;
 uint8_t g_actuator_discovery_step;
 uint8_t g_actuator_configured;
+/* Per-wheel mask (bit0=left, bit1=right) recording that a current-loop mode
+ * frame has been (re)sent while the motor is enabled.  Mode switching while
+ * the motor is disabled is unreliable on the DDSM315, so once the wheels are
+ * armed we re-assert current mode on each wheel exactly once. */
+static uint8_t g_wheel_mode_sent = 0U;
 static DDSM_Bus_t g_ddsm_bus;
 static ST3215_Bus_t g_st3215_bus;
 
@@ -353,25 +358,29 @@ int main(void) {
             !g_actuator_configured) {
             int discovery_result = -1;
             if (g_actuator_discovery_step == 0U) {
+                /* Bring the motor out of its power-up state first (Protocol-3
+                 * mode switching is only honoured once the motor is enabled). */
+                discovery_result = ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_left,
+                                                         0U, startup_now);
+            } else if (g_actuator_discovery_step == 1U) {
+                /* Select the current (torque) loop.  Protocol-3 form: byte[9]=mode
+                 * with no CRC.  Re-asserted while enabled after arming too. */
                 discovery_result = ddsm_bus_queue_mode(&g_ddsm_bus, &g_ddsm_left,
                                                        DDSM_MODE_CURRENT, startup_now);
-            } else if (g_actuator_discovery_step == 1U) {
+            } else if (g_actuator_discovery_step == 2U) {
                 /* Explicit zero-torque clears any stale torque retained across
                  * power cycles so the motor does not spin before the Pi arms. */
                 discovery_result = ddsm_bus_queue_torque(&g_ddsm_bus, &g_ddsm_left,
                                                          0.0f, startup_now);
-            } else if (g_actuator_discovery_step == 2U) {
-                discovery_result = ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_left,
-                                                         0U, startup_now);
             } else if (g_actuator_discovery_step == 3U) {
-                discovery_result = ddsm_bus_queue_mode(&g_ddsm_bus, &g_ddsm_right,
-                                                       DDSM_MODE_CURRENT, startup_now);
-            } else if (g_actuator_discovery_step == 4U) {
-                discovery_result = ddsm_bus_queue_torque(&g_ddsm_bus, &g_ddsm_right,
-                                                         0.0f, startup_now);
-            } else if (g_actuator_discovery_step == 5U) {
                 discovery_result = ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_right,
                                                          0U, startup_now);
+            } else if (g_actuator_discovery_step == 4U) {
+                discovery_result = ddsm_bus_queue_mode(&g_ddsm_bus, &g_ddsm_right,
+                                                       DDSM_MODE_CURRENT, startup_now);
+            } else if (g_actuator_discovery_step == 5U) {
+                discovery_result = ddsm_bus_queue_torque(&g_ddsm_bus, &g_ddsm_right,
+                                                         0.0f, startup_now);
             } else if (g_actuator_discovery_step == 6U) {
                 discovery_result = st3215_bus_queue_torque(
                     &g_st3215_bus, ST3215_BROADCAST_ID, 0U);
@@ -419,6 +428,24 @@ int main(void) {
                 }
             } else if (ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_right, 0U, startup_now) == 0) {
                 wheel_enable_mask &= (uint8_t)~0x02U;
+            }
+        }
+
+        /* Once both wheels are armed, re-assert the current-loop mode on any
+         * wheel that has not yet received it while enabled.  Mode switching is
+         * only reliably honoured by the DDSM315 after the motor is enabled. */
+        if (g_actuator_configured && wheel_enable_mask == 0x03U &&
+            g_wheel_mode_sent != 0x03U && ddsm_bus_is_idle(&g_ddsm_bus)) {
+            if ((g_wheel_mode_sent & 0x01U) == 0U) {
+                if (ddsm_bus_queue_mode(&g_ddsm_bus, &g_ddsm_left,
+                                        DDSM_MODE_CURRENT, startup_now) == 0) {
+                    g_wheel_mode_sent |= 0x01U;
+                }
+            } else if ((g_wheel_mode_sent & 0x02U) == 0U) {
+                if (ddsm_bus_queue_mode(&g_ddsm_bus, &g_ddsm_right,
+                                        DDSM_MODE_CURRENT, startup_now) == 0) {
+                    g_wheel_mode_sent |= 0x02U;
+                }
             }
         }
 

@@ -177,10 +177,13 @@
 #define SAFETY_ACTION_MS        80U             /* RL action freshness timeout */
 #define SAFETY_IMU_MAX_AGE_MS   20U
 #define SAFETY_WHEEL_MAX_AGE_MS 250U
-#define SAFETY_SERVO_MAX_AGE_MS 500U  /* Servos hold position via their own
+#define SAFETY_SERVO_MAX_AGE_MS 1000U /* Servos hold position via their own
                                * internal loop; telemetry loss does not mean
-                               * torque loss.  250 ms latched FAULT on query
-                               * timeout bursts caused by ground vibration. */
+                               * torque loss.  Latching on query-timeout bursts
+                               * (worst on S3 during ground vibration) was the
+                               * direct cause of the FAULT_SERVO lockdown that
+                               * killed balance.  1 s gives the bus margin while
+                               * staying well inside the health watchdog budget. */
 #define SAFETY_FRESHNESS_DEBOUNCE_TICKS 8U  /* 250 Hz control loop; 8 ticks = 32 ms */
 #define SAFETY_MODE_TRANSITION_GRACE_MS 100U
 

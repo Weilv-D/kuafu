@@ -63,14 +63,22 @@ void ddsm_build_mode(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, uint8_t mode) 
     memset(packet, 0, DDSM_FRAME_SIZE);
     packet[0] = id;
     packet[1] = 0xA0U;
-    /* Sub-command byte: 0x01=current loop, 0x02=velocity loop, 0x03=position.
-     * Previously the mode value was written to byte[9] (the CRC slot) and
-     * byte[2] was left at 0x00, which is not a valid sub-command — the motor
-     * silently ignored the mode switch and stayed in its default velocity loop.
-     * The LQR torque commands (0x64) were then sent to a motor running in
-     * velocity mode, producing erratic sprinting. */
-    packet[2] = mode;
-    packet[9] = crc8_calculate(packet, 9U);
+    /* DDSM315 UART protocol (Protocol 3, documented "no feedback, no CRC"):
+     *     A0 frame: byte[2] is the sub-command, mode VALUE lives in byte[9].
+     *     Reference frame:  01 A0 01 00 00 00 00 00 00 00   (byte[9]=mode)
+     * The official DDSM example firmware (ddsm_ctrl.cpp) uses the same layout
+     * (value in byte[9], no CRC) and it is accepted by the hardware.
+     *
+     * NOTE: the DDSM315 wiki is internally contradictory. Its prose says the
+     * mode value goes in byte[9] with no CRC, but its own serial-capture
+     * example shows `mode` in byte[2] with a trailing CRC (the DDSM210-style
+     * framing). Field evidence on this robot (mode byte persistently reads
+     * 0x02 while the wheels behave like a current loop) shows the wiki prose
+     * is the correct interpretation for this firmware: byte[9]=mode, NO CRC.
+     * A prior commit put the value in byte[2] with a CRC; that frame was
+     * ignored by the motor, leaving it in its default velocity loop — the
+     * real cause of the earlier "sprinting", NOT a frame-format bug. */
+    packet[9] = mode;
 }
 
 void ddsm_build_query(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id) {
@@ -135,6 +143,7 @@ int ddsm_bus_submit(DDSM_Bus_t *bus,
     bus->deadline_ms = now_ms + DDSM_TRANSACTION_TIMEOUT_MS;
     bus->phase = DDSM_BUS_TX;
     bus->rx_len = 0U;
+    bus->expect_reply = 1U;
     if (HAL_UART_Transmit_IT(bus->huart, bus->tx, DDSM_FRAME_SIZE) != HAL_OK) {
         finish_failure(bus, DEVICE_FAILURE_PROTOCOL);
         return -3;
@@ -153,17 +162,23 @@ int ddsm_bus_queue_torque(DDSM_Bus_t *bus, DDSM_State_t *target,
 int ddsm_bus_queue_enable(DDSM_Bus_t *bus, DDSM_State_t *target,
                           uint8_t enable, uint32_t now_ms) {
     uint8_t packet[DDSM_FRAME_SIZE];
+    int rc;
     if (target == NULL) return -1;
     ddsm_build_enable(packet, target->id, enable);
-    return ddsm_bus_submit(bus, target, packet, now_ms);
+    rc = ddsm_bus_submit(bus, target, packet, now_ms);
+    if (rc == 0) bus->expect_reply = 0U;
+    return rc;
 }
 
 int ddsm_bus_queue_mode(DDSM_Bus_t *bus, DDSM_State_t *target,
                         uint8_t mode, uint32_t now_ms) {
     uint8_t packet[DDSM_FRAME_SIZE];
+    int rc;
     if (target == NULL) return -1;
     ddsm_build_mode(packet, target->id, mode);
-    return ddsm_bus_submit(bus, target, packet, now_ms);
+    rc = ddsm_bus_submit(bus, target, packet, now_ms);
+    if (rc == 0) bus->expect_reply = 0U;
+    return rc;
 }
 
 int ddsm_bus_queue_query(DDSM_Bus_t *bus, DDSM_State_t *target,
@@ -177,7 +192,15 @@ int ddsm_bus_queue_query(DDSM_Bus_t *bus, DDSM_State_t *target,
 void ddsm_bus_step(DDSM_Bus_t *bus, uint32_t now_ms) {
     if (bus == NULL || bus->phase == DDSM_BUS_IDLE) return;
     if (deadline_reached(now_ms, bus->deadline_ms)) {
-        finish_failure(bus, DEVICE_FAILURE_TIMEOUT);
+        if (bus->expect_reply) {
+            finish_failure(bus, DEVICE_FAILURE_TIMEOUT);
+        } else {
+            /* No-reply command (mode/enable): a quiet line is the expected
+             * outcome, not a failure.  Drop the target and return to idle
+             * without touching its health counters. */
+            bus->target = NULL;
+            bus->phase = DDSM_BUS_IDLE;
+        }
         bus->rx_len = 0U;
     }
 }

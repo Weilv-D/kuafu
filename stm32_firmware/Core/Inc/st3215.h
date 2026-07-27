@@ -15,10 +15,12 @@
 #define ST_STATE_DATA_SIZE         15U
 #define ST_STATE_FRAME_SIZE        21U
 #define ST_MAX_PACKET_SIZE         96U
-#define ST_REPLY_TIMEOUT_MS         6U  /* Loaded servos answer status reads in <1 ms typically, but a reply
+#define ST_REPLY_TIMEOUT_MS         10U  /* Loaded servos answer status reads in <1 ms typically, but a reply
    * landing right after the 50 Hz sync-write burst can be delayed several
-   * ms; 3 ms produced timeout bursts on the servo that always follows the
-   * write slot (S1), tripping the freshness fault on ground vibration. */
+   * ms; 3-6 ms produced timeout bursts on the servo that always follows the
+   * write slot (S3), tripping the freshness fault on ground vibration.  10 ms
+   * absorbs the worst measured delay while remaining far below the 1 s servo
+   * freshness latch. */
 
 typedef struct {
     uint8_t id;

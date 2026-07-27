@@ -215,10 +215,14 @@ python kuafu_balance_trace.py 60
 9. 健壮性：栈 1KB→4KB、IWDG 8.2s→1s、Mahony eInt 限幅、fusion_dt 钳位、SysTick 最高优先级。
 10. RX DMA 中止竞态永久失聪（ORE 后 HAL 异步关 DMA，主循环重臂被迟到的中止完成擦掉，EIE=0 再无回调）→ 重臂前同步 `HAL_UART_AbortReceive` + 清 ORE + DMA EN=0 失聪看门狗强制重臂（USART3+USART6）。
 11. 噪声字节误杀整条 DMA（HAL 对 NE/FE 也走中止路径，单次噪声≈1ms 盲区毁掉全部在途帧，舵机轮询失败率 ~25% → 新鲜度 FAULT）→ USART3 ISR 预吞 NE/FE（读 SR+DR 清标志），parser 自行按 0xFFFF+校验重同步；ORE 仍走中止-重臂。修复后站立 57s+ 无故障，舵机错误率 ~25%→<4%。
+12. **DDSM315 模式帧误诊（之前 commit 把电机留在速度环）**：原 commit 把 mode 写到 `byte[2]` 并补 CRC（DDSM210 风格），但 DDSM315 协议 3 要求 mode 值在 `byte[9]` 且**无 CRC**（官方 `ddsm_ctrl.cpp` 例程同此布局）。SWD 实测两轮 `mode=2`（速度环），LQR 的"力矩"被当成速度设定值下发，是当年"爆冲/平衡不了"的根因之一。改回协议 3 格式（`byte[9]=mode` 无 CRC），发现序列改为 **enable → mode → torque**，并在使能后对每台轮补发一次电流环模式帧；SWD 实测两轮 `mode=1`（电流环）确认切换生效。注意：DDSM315 wiki 自身前后矛盾（散文说 byte[9] 无 CRC，串口示例却写 byte[2]+CRC），以行为实测为准。
+13. **无回复帧误判健康超时**：`mode`/`enable`（0xA0）帧电机不回复，总线每发一次就记一次 timeout；多个 12ms 无回复窗口叠加越过 32ms 新鲜度门槛，锁存**虚假 WHEEL_R FAULT 把轮力矩清零**——这正是"平衡不了"的症状。总线新增 `expect_reply` 标志，无回复命令超时不惩罚健康。修复后 SWD 实测 `safety=STAND`、`fault=0x0`，两轮均在线、超时计数低。
+14. **舵机门控放宽**：`SAFETY_SERVO_MAX_AGE_MS` 500→1000ms、`ST_REPLY_TIMEOUT_MS` 6→10ms。舵机靠内部位置环自保持，遥测丢失≠失控；放宽后既保留健康监控又避免地面振动引发的 query-timeout 突刺锁存 `FAULT_SERVO`（S3 最严重）。
 
 ### 未解决 / 待验证 ⚠️
-- **冷启动地面站立**：修复 #10/#11 后实测 57s+ 无 FAULT（SWD 探针 26s 掉线但机器人持续站立）；此前 `ground6.txt` 90s。复现性需连跑 3-5 次确认。
-- **抖动极限环**：俯仰 ±2.3°、~1.9Hz，空中地面都有。可调杠杆：俯仰率滤波（现 35Hz）、K3、力矩死带。
+- **冷启动地面站立**：修复 #10/#11/#13/#14 后 SWD 实测无 FAULT、两轮在线、电流环生效；需连跑 3-5 次确认复现性（接 Pi 做真实平衡）。
+- **抖动极限环**：俯仰 ±2.3°、~1.9Hz，空中地面都有。原假设是速度环滞后所致——现已确认是**电流环**，若极限环仍在则是 LQR 增益问题（俯仰率滤波现 35Hz、K3、力矩死带可调），需接 Pi 实地验证。
+- **LQR 增益是否需重调**：先前增益是在"误诊速度环"状态下整定的；当前已确认真电流环，被控对象与文档/StackForce 参考架构一致，理论上应更稳。若平衡行为变化，从保守增益起步重整定。
 - **架空→落地过渡**：缓存的饱和 `x_int` + 轮速突变会触发爆冲。**这是测试场景的副产物，不是产品需求**（产品是"上电就站在地上"）。
 - **SWD 探针偶发掉线**（`Unexpected ACK '0'`）：长 trace 会中途断；降速（200kHz）更稳。
 - Git 仓库：`main` 跟踪 `origin/main`（github.com/Weilv-D/kuafu）。
