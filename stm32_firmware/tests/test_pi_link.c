@@ -175,9 +175,9 @@ void run_pi_transport_tests(void) {
                       (const uint8_t *)KUAFU_MODEL_HASH, 16U);
     pi_transport_init(&transport, ring, sizeof(ring));
     memcpy(ring, frame, 20U);
-    TEST_EQ_INT(0, pi_transport_poll(&transport, (uint16_t)(sizeof(ring) - 20U)));
+    TEST_EQ_INT(0, pi_transport_poll(&transport, 0U, (uint16_t)(sizeof(ring) - 20U)));
     memcpy(&ring[20], &frame[20], (size_t)(len - 20U));
-    TEST_EQ_INT(1, pi_transport_poll(&transport,
+    TEST_EQ_INT(1, pi_transport_poll(&transport, 0U,
                                      (uint16_t)(sizeof(ring) - len)));
     TEST_TRUE(pi_link_is_compatible());
 
@@ -188,7 +188,7 @@ void run_pi_transport_tests(void) {
     transport.read_index = 60U;
     memcpy(&ring[60], frame, 4U);
     memcpy(ring, &frame[4], (size_t)(len - 4U));
-    TEST_EQ_INT(1, pi_transport_poll(&transport,
+    TEST_EQ_INT(1, pi_transport_poll(&transport, 0U,
                                      (uint16_t)(sizeof(ring) - (len - 4U))));
     TEST_NEAR(0.05f, g_pi_cmd_heartbeat.target_velocity, 0.0001f);
 }

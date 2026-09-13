@@ -26,6 +26,16 @@ uint32_t HAL_GetTick(void) {
     return g_fake_time_ms;
 }
 
+/* Host stubs for the nestable CMSIS critical-section idiom (single-threaded
+ * host execution: PRIMASK stays zero). */
+uint32_t __get_PRIMASK(void) {
+    return 0U;
+}
+
+void __set_PRIMASK(uint32_t primask) {
+    (void)primask;
+}
+
 void test_i2c_reset(void) {
     g_i2c_operations = 0U;
     g_accel_id = 0x1EU;

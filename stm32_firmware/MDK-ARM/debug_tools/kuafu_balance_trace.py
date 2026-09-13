@@ -13,16 +13,16 @@ import time
 from pyocd.core.helpers import ConnectHelper
 
 ADDR = {
-    "mahony": 0x20000340,   # roll@+36 pitch@+40 yaw@+44
-    "lqr": 0x20000370,      # x_est@+20 x_ref@+24 x_int@+28 yaw_ref@+40
-    "ddsm_l": 0x200003A8,   # velocity_rads@+8
-    "ddsm_r": 0x200003D0,
-    "startup": 0x200004C8,
-    "safety": 0x2000073C,   # mode@+0 fault_mask@+12
-    "body_gyro": 0x20000088,
-    "tau_l": 0x20000018,
-    "tau_r": 0x2000001C,
-    "bpr": 0x20000014,
+    "mahony": 0x200003cc,   # roll@+36 pitch@+40 yaw@+44
+    "lqr": 0x20000718,      # x_est@+20 x_ref@+24 x_int@+28 yaw_ref@+40
+    "ddsm_l": 0x20000404,   # velocity_rads@+8
+    "ddsm_r": 0x2000042c,
+    "startup": 0x20000524,
+    "safety": 0x20000888,   # mode@+0 fault_mask@+12
+    "body_gyro": 0x200000a8,
+    "tau_l": 0x2000001c,
+    "tau_r": 0x20000020,
+    "bpr": 0x20000018,
 }
 
 MODES = ["INIT", "STAND", "ACTIVE", "CLIMB", "FAULT"]

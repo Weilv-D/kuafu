@@ -14,7 +14,13 @@ add_executable(firmware_host_tests
     test_st3215.c
     test_pi_link.c
     test_firmware_runtime.c
+    test_control_section.c
     test_lqr.c
+    test_balance_trace.c
+    test_actuator_supervisor.c
+    test_mahony.c
+    test_dma_rx_ring.c
+    test_pi_transport.c
     test_support.c
     ../Core/Src/crc8.c
     ../Core/Src/kinematics.c
@@ -28,7 +34,12 @@ add_executable(firmware_host_tests
     ../Core/Src/pi_link.c
     ../Core/Src/pi_transport.c
     ../Core/Src/firmware_runtime.c
+    ../Core/Src/control_section.c
     ../Core/Src/lqr_controller.c
+    ../Core/Src/balance_trace.c
+    ../Core/Src/actuator_supervisor.c
+    ../Core/Src/mahony.c
+    ../Core/Src/dma_rx_ring.c
 )
 
 target_include_directories(firmware_host_tests PRIVATE

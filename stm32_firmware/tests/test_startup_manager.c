@@ -28,6 +28,8 @@ void run_startup_manager_tests(void) {
     TEST_TRUE(outputs.request_imu_init);
 
     inputs.imu_initialized = 1U;
+    inputs.accel_valid = 1U;
+    inputs.gyro_valid = 1U;
     outputs = startup_manager_step(&manager, &inputs);
     TEST_EQ_INT(STARTUP_ACTUATOR_DISCOVERY, manager.phase);
 
@@ -56,4 +58,17 @@ void run_startup_manager_tests(void) {
     outputs = startup_manager_step(&manager, &inputs);
     TEST_EQ_INT(STARTUP_IMU_DISCOVERY, manager.phase);
     TEST_TRUE(!outputs.fault_requested);
+
+    /* Persistent IMU failure is diagnosed and remains latched. */
+    startup_manager_init(&manager, 0U);
+    inputs = (StartupInputs_t){0};
+    inputs.now_ms = 15500U;
+    outputs = startup_manager_step(&manager, &inputs);
+    TEST_EQ_INT(STARTUP_FAILED, manager.phase);
+    TEST_TRUE(outputs.fault_requested);
+    TEST_EQ_INT(STARTUP_FAILURE_IMU_TIMEOUT, outputs.failure_reason);
+    inputs.now_ms = 20000U;
+    outputs = startup_manager_step(&manager, &inputs);
+    TEST_TRUE(outputs.fault_requested);
+    TEST_EQ_INT(STARTUP_FAILURE_IMU_TIMEOUT, outputs.failure_reason);
 }

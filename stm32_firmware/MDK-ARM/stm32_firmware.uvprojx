@@ -544,6 +544,11 @@
               <FilePath>..\Core\Src\firmware_runtime.c</FilePath>
             </File>
             <File>
+              <FileName>control_section.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\control_section.c</FilePath>
+            </File>
+            <File>
               <FileName>firmware_runtime.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Core\Inc\firmware_runtime.h</FilePath>
@@ -562,6 +567,36 @@
               <FileName>lqr_controller.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Core\Inc\lqr_controller.h</FilePath>
+            </File>
+            <File>
+              <FileName>dma_rx_ring.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\dma_rx_ring.c</FilePath>
+            </File>
+            <File>
+              <FileName>dma_rx_ring.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\dma_rx_ring.h</FilePath>
+            </File>
+            <File>
+              <FileName>actuator_supervisor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\actuator_supervisor.c</FilePath>
+            </File>
+            <File>
+              <FileName>actuator_supervisor.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\actuator_supervisor.h</FilePath>
+            </File>
+            <File>
+              <FileName>balance_trace.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\balance_trace.c</FilePath>
+            </File>
+            <File>
+              <FileName>balance_trace.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\balance_trace.h</FilePath>
             </File>
           </Files>
         </Group>

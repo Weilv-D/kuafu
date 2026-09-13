@@ -18,22 +18,23 @@ import time
 from pyocd.core.helpers import ConnectHelper
 
 ADDR = {
-    "act_cfg": 0x20000005,
-    "ticks": 0x20000008,
-    "pitch_filt": 0x2000000C,
-    "body_pitch": 0x20000010,
-    "body_pitch_rate": 0x20000014,
-    "tau_l": 0x20000018,
-    "tau_r": 0x2000001C,
-    "body_gyro": 0x20000088,      # float[3]
-    "imu": 0x20000304,            # +4 accel[3] +16 gyro[3] +28 temp +32 health.last_valid
-    "mahony": 0x20000340,         # +36 roll +40 pitch +44 yaw
-    "lqr": 0x20000370,            # +20 x_est +24 x_ref +28 x_int +32 v_ref
-    "ddsm_l": 0x200003A8,         # +4 torque +8 vel +12 pos +16 err +20 health.last_valid
-    "ddsm_r": 0x200003D0,
-    "startup": 0x200004C8,        # +0 phase
-    "safety": 0x2000073C,         # +0 mode +12 fault_mask +16 gyro_calib[3] +28 calibrated
-    "hb": 0x2000085C,             # +0 mode_request +4 vx +8 wz +12 d0 +16 last_hb_ms
+    "act_cfg": 0x20000008,
+    "wheel_gate": 0x20000001,   # final wheel-output authorization (250 Hz verdict)
+    "ticks": 0x2000000c,
+    "pitch_filt": 0x20000010,
+    "body_pitch": 0x20000014,
+    "body_pitch_rate": 0x20000018,
+    "tau_l": 0x2000001c,
+    "tau_r": 0x20000020,
+    "body_gyro": 0x200000a8,      # float[3]
+    "imu": 0x2000033c,            # +4 accel[3] +16 gyro[3] +28 temp +32 health.last_valid
+    "mahony": 0x200003cc,         # +36 roll +40 pitch +44 yaw
+    "lqr": 0x20000718,            # +20 x_est +24 x_ref +28 x_int +32 v_ref
+    "ddsm_l": 0x20000404,         # +4 torque +8 vel +12 pos +16 err +20 health.last_valid
+    "ddsm_r": 0x2000042c,
+    "startup": 0x20000524,        # +0 phase
+    "safety": 0x20000888,         # +0 mode +12 fault_mask +16 gyro_calib[3] +28 calibrated
+    "hb": 0x200009a8,             # +0 mode_request +4 vx +8 wz +12 d0 +16 last_hb_ms
 }
 
 MODES = ["INIT", "STAND", "ACTIVE", "CLIMB", "FAULT"]
@@ -86,11 +87,12 @@ def main():
             x_est = read_f(target, ADDR["lqr"] + 20)
             x_ref = read_f(target, ADDR["lqr"] + 24)
             x_int = read_f(target, ADDR["lqr"] + 28)
+            gate = target.read8(ADDR["wheel_gate"])
             imu_age_owner = read_u32(target, ADDR["imu"] + 32)
             mode_str = MODES[mode] if mode < len(MODES) else f"?{mode}"
             phase_str = PHASES[phase] if phase < len(PHASES) else f"?{phase}"
             print(
-                f"{phase_str:10s} {mode_str:6s} calib={calib} fault={fault_str(fault_mask):12s} "
+                f"{phase_str:10s} {mode_str:6s} gate={gate} calib={calib} fault={fault_str(fault_mask):12s} "
                 f"pitch={pitch:+7.3f} roll={roll:+7.3f} bp={bp:+7.3f} bpr={bpr:+7.3f} "
                 f"gyro=({gyro[0]:+6.2f},{gyro[1]:+6.2f},{gyro[2]:+6.2f}) "
                 f"wl={wl:+7.2f} wr={wr:+7.2f} tau=({tau_l:+6.3f},{tau_r:+6.3f}) "

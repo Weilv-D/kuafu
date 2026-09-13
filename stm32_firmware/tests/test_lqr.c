@@ -1,5 +1,7 @@
 #include "lqr_controller.h"
 #include "kuafu_generated.h"
+#include "pin_config.h"
+#include "ddsm315.h"
 #include "test_support.h"
 
 #include <math.h>
@@ -152,6 +154,42 @@ static void test_lqr_integral_clamp(void) {
     TEST_TRUE(c.x_int >= -0.05f - 1.0e-6f);
 }
 
+static void test_lqr_elapsed_dt_api(void) {
+    LQRController_t c;
+    float tau_l = 0.0f, tau_r = 0.0f;
+    float used;
+    lqr_init(&c);
+    used = lqr_update_elapsed_dt(&c, 0.008f, 0.0f, 0.0f,
+                                 1.0f, 1.0f, 0.0f, 0.0f,
+                                 0.0f, 0.0f, 0.0f, 0.0f,
+                                 &tau_l, &tau_r);
+    TEST_NEAR(0.008f, used, 1.0e-7f);
+    TEST_NEAR(0.008f * WHEEL_RADIUS_M, c.x_est, 1.0e-7f);
+    used = lqr_update_elapsed_dt(&c, 0.100f, 0.0f, 0.0f,
+                                 0.0f, 0.0f, 0.0f, 0.0f,
+                                 0.0f, 0.0f, 0.0f, 0.0f,
+                                 &tau_l, &tau_r);
+    TEST_NEAR(LQR_ELAPSED_DT_MAX, used, 1.0e-7f);
+}
+
+/* Body-frame equal torque becomes opposite raw signs for the mirrored right
+ * motor, while decoding remains one explicit provisional conversion. */
+static void test_wheel_dir_raw_contract(void) {
+    uint8_t packet_l[DDSM_FRAME_SIZE];
+    uint8_t packet_r[DDSM_FRAME_SIZE];
+    int16_t raw_l, raw_r;
+    const float body_tau = 0.2f;
+    ddsm_build_torque(packet_l, DDSM_LEFT_ID, WHEEL_DIR_L * body_tau);
+    ddsm_build_torque(packet_r, DDSM_RIGHT_ID, WHEEL_DIR_R * body_tau);
+    raw_l = (int16_t)(((uint16_t)packet_l[2] << 8) | packet_l[3]);
+    raw_r = (int16_t)(((uint16_t)packet_r[2] << 8) | packet_r[3]);
+    TEST_TRUE(raw_l > 0);
+    TEST_TRUE(raw_r < 0);
+    TEST_NEAR(body_tau, (float)raw_l * DDSM_RAW_TO_TORQUE, 2.0e-4f);
+    TEST_NEAR(-body_tau, (float)raw_r * DDSM_RAW_TO_TORQUE, 2.0e-4f);
+    TEST_TRUE(fabsf((float)raw_l * DDSM_RAW_TO_TORQUE) < 0.5f);
+}
+
 /* Tipping past the fade-out window clears the position integral. */
 static void test_lqr_integral_cleared_when_fallen(void) {
     LQRController_t c;
@@ -171,5 +209,7 @@ void run_lqr_tests(void) {
     test_lqr_yaw_torque_clamp();
     test_lqr_airborne_reanchor();
     test_lqr_integral_clamp();
+    test_lqr_elapsed_dt_api();
+    test_wheel_dir_raw_contract();
     test_lqr_integral_cleared_when_fallen();
 }

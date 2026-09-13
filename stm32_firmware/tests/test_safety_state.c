@@ -2,6 +2,7 @@
 #include "safety_state.h"
 #include "test_support.h"
 
+#include <math.h>
 #include <string.h>
 
 static SafetyInputs_t healthy_inputs(void) {
@@ -134,7 +135,8 @@ void run_safety_state_tests(void) {
     TEST_NEAR(0.03f, g_safety_state.gyro_calib_offset[2], 1.0e-5f);
     TEST_EQ_INT(STATE_INIT, g_safety_state.current_mode);
 
-    /* Moving samples are skipped (not counted); accumulation continues. */
+    /* Moving samples are skipped, not reset: scattered still samples still
+     * accumulate (bounded by the sample-gap guard). */
     safety_state_init();
     for (int i = 0; i < 500; ++i) {
         safety_state_gyro_calib_update(0.01f, 0.01f, 0.01f, (uint32_t)i);
@@ -146,9 +148,20 @@ void run_safety_state_tests(void) {
         safety_state_gyro_calib_update(0.01f, 0.01f, 0.01f, (uint32_t)(1000 + i));
     }
     TEST_TRUE(!g_safety_state.is_gyro_calibrated);   /* 999 still < 1000 */
-    safety_state_gyro_calib_update(0.01f, 0.01f, 0.01f, 1999U);
+    safety_state_gyro_calib_update(0.01f, 0.01f, 0.01f, 1499U);
     TEST_TRUE(g_safety_state.is_gyro_calibrated);     /* 1000th still sample */
     TEST_NEAR(0.01f, g_safety_state.gyro_calib_offset[0], 1.0e-5f);
+
+    /* A >50 ms sample gap restarts the window: stale and fresh samples must
+     * not average together across a real interruption. */
+    safety_state_init();
+    for (int i = 0; i < 600; ++i) {
+        safety_state_gyro_calib_update(0.01f, 0.01f, 0.01f, (uint32_t)i);
+    }
+    for (int i = 0; i < 600; ++i) {
+        safety_state_gyro_calib_update(0.01f, 0.01f, 0.01f, (uint32_t)(1000 + i));
+    }
+    TEST_TRUE(!g_safety_state.is_gyro_calibrated);   /* gap reset: only 600 */
 
     /* A constantly moving robot never completes calibration. */
     safety_state_init();
@@ -178,6 +191,44 @@ void run_safety_state_tests(void) {
     }
     TEST_EQ_INT(STATE_FAULT, g_safety_state.current_mode);
     TEST_TRUE((g_safety_state.fault_mask & FAULT_IMU) != 0U);
+
+    /* A serious fault arriving during transient recovery is combined and
+     * remains latched; it must not be erased by the transient clear path. */
+    safety_state_init();
+    inputs = healthy_inputs();
+    enter_stand(&inputs);
+    inputs.now_ms = g_safety_state.mode_grace_until_ms + 1U;
+    inputs.wheel_l_fresh = 0U;   /* transient device fault, debounced */
+    for (uint8_t i = 0U; i < SAFETY_FRESHNESS_DEBOUNCE_TICKS; ++i) {
+        (void)safety_state_update(&inputs);
+        inputs.now_ms += 4U;
+    }
+    TEST_EQ_INT(STATE_FAULT, g_safety_state.current_mode);
+    TEST_TRUE((g_safety_state.fault_mask & FAULT_WHEEL_LEFT) != 0U);
+    /* The transient recovers in the SAME update that reports a new serious
+     * tilt fault: the new fault must be merged, never dropped by the recovery
+     * branch (the original bug returned STAND here for one cycle). */
+    inputs.wheel_l_fresh = 1U;
+    inputs.pitch_rad = SAFETY_MAX_PITCH_RAD + 0.2f;
+    (void)safety_state_update(&inputs);
+    TEST_TRUE((g_safety_state.fault_mask & FAULT_TILT) != 0U);
+    TEST_EQ_INT(STATE_FAULT, g_safety_state.current_mode);
+    /* Serious faults stay latched after the condition disappears. */
+    inputs.pitch_rad = 0.0f;
+    (void)safety_state_update(&inputs);
+    TEST_EQ_INT(STATE_FAULT, g_safety_state.current_mode);
+    TEST_TRUE((g_safety_state.fault_mask & FAULT_TILT) != 0U);
+
+    /* Non-finite physical inputs are safety faults, never silently accepted. */
+    inputs = healthy_inputs();
+    inputs.pitch_rad = NAN;
+    expect_immediate_fault(inputs, FAULT_TILT);
+    inputs = healthy_inputs();
+    inputs.pitch_rate_rads = INFINITY;
+    expect_immediate_fault(inputs, FAULT_PITCH_RATE);
+    inputs = healthy_inputs();
+    inputs.max_temp_c = NAN;
+    expect_immediate_fault(inputs, FAULT_OVERTEMP);
 
     /* Hard faults still latch even during the grace window. */
     safety_state_init();

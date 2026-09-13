@@ -21,6 +21,15 @@ typedef struct {
     uint8_t wheel_intent_allowed;
     uint8_t servo_intent_allowed;
     uint8_t residual_allowed;
+    /* Clear cached Pi motion on stale heartbeat/action; STAND remains valid
+     * without a Pi and is intentionally not cleared by link absence alone. */
+    uint8_t clear_motion;
+    /* Base-layer velocity/yaw commands are an ACTIVE-mode contract: STAND is a
+     * position hold and CLIMB is height-only.  The Pi heartbeat carries its
+     * latest vx/wz regardless of requested mode, so the runtime tells the
+     * controller when those fields are meaningful instead of trusting the
+     * sender to zero them. */
+    uint8_t velocity_command_active;
 } FirmwareRuntimeOutputs_t;
 
 typedef struct {

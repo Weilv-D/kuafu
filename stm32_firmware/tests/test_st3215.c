@@ -68,6 +68,25 @@ void run_st3215_tests(void) {
     TEST_EQ_INT(0, st3215_parse_state_frame(frame, ST_STATE_FRAME_SIZE, &state));
     TEST_EQ_INT(0x234, state.position_tick);
     TEST_TRUE(state.velocity_rads < 0.0f);
+    /* Speed is sign-magnitude: flipping ONLY bit15 must yield the same
+     * magnitude with the opposite sign (a two's-complement decoder would
+     * return a ~32768x larger negative value for 0x8064). */
+    {
+        float v_pos;
+        float v_neg;
+        make_state_frame(frame, 1U);
+        frame[7] = 0x64U; frame[8] = 0x00U;              /* +100 ticks */
+        frame[20] = st_checksum(&frame[2], 18U);
+        TEST_EQ_INT(0, st3215_parse_state_frame(frame, ST_STATE_FRAME_SIZE, &state));
+        v_pos = state.velocity_rads;
+        TEST_TRUE(v_pos > 0.0f);
+        frame[8] = 0x80U;                                 /* -100 ticks */
+        frame[20] = st_checksum(&frame[2], 18U);
+        TEST_EQ_INT(0, st3215_parse_state_frame(frame, ST_STATE_FRAME_SIZE, &state));
+        v_neg = state.velocity_rads;
+        TEST_TRUE(v_neg < 0.0f);
+        TEST_NEAR(v_pos, -v_neg, 1.0e-6f);
+    }
     TEST_NEAR(-0.300f, state.load, 0.001f);
     TEST_NEAR(12.0f, state.voltage, 0.001f);
     TEST_NEAR(45.0f, state.temperature_c, 0.001f);

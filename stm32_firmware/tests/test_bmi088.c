@@ -73,4 +73,27 @@ void run_bmi088_tests(void) {
     TEST_EQ_INT(-1, result);
     TEST_TRUE(!imu.initialized);
     TEST_EQ_INT(BMI088_MAX_INIT_ATTEMPTS, imu.init_attempts);
+
+    /* Channel health is independent; an unchanged static sample is not a
+     * freshness fault, while an explicit read failure revokes only that channel. */
+    memset(&imu, 0, sizeof(imu));
+    test_i2c_reset();
+    test_set_time_ms(100U);
+    bmi088_begin_init(&imu, &i2c, 0U);
+    TEST_EQ_INT(0, bmi088_read_accel(&imu));
+    TEST_EQ_INT(0, bmi088_read_gyro(&imu));
+    {
+        BMI088SampleValidity_t validity;
+        bmi088_get_sample_validity(&imu, 100U, 20U, &validity);
+        TEST_TRUE(validity.accel_valid && validity.gyro_valid);
+        TEST_TRUE(validity.accel_fresh && validity.gyro_fresh);
+        TEST_EQ_INT(1, (int)validity.accel_sequence);
+        TEST_EQ_INT(1, (int)validity.gyro_sequence);
+        bmi088_get_sample_validity(&imu, 121U, 20U, &validity);
+        TEST_TRUE(!validity.accel_fresh && !validity.gyro_fresh);
+    }
+    test_i2c_fail_next(1U);
+    TEST_EQ_INT(-1, bmi088_read_gyro(&imu));
+    TEST_TRUE(!bmi088_gyro_healthy(&imu, 100U, 20U));
+    TEST_TRUE(bmi088_accel_healthy(&imu, 100U, 20U));
 }

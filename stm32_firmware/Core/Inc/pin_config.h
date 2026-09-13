@@ -98,12 +98,12 @@
 #define LQR_K3                  KUAFU_LQR_K3
 #define LQI_KI                  KUAFU_LQI_KI
 
-/* DDSM315 current to torque scaling factor.
- * Motor characteristic: tau = 0.75 * I_amps; the raw command spans
- * [-32767, 32767] over [-8.0, 8.0] A, i.e. raw = I * (32767/8).
- * Combined: raw = tau * (32767 / (0.75*8)) = tau * 32767/6 ≈ 5461.17 * tau. */
-#define DDSM_TORQUE_TO_RAW      5461.17f
-#define DDSM_RAW_TO_TORQUE      (1.0f / DDSM_TORQUE_TO_RAW)
+/* DDSM315 torque conversion.  This is explicitly provisional: the vendor
+ * current-unit/torque constant still requires bench calibration.  Keep one
+ * generated source of truth and never apply an additional empirical multiplier
+ * to feedback. */
+#define DDSM_TORQUE_TO_RAW      DDSM_TORQUE_TO_RAW_PROVISIONAL
+#define DDSM_RAW_TO_TORQUE      DDSM_RAW_TO_TORQUE_PROVISIONAL
 
 /* Wheel geometry & rated torque (mirrors kuafu_physics.py) */
 #define WHEEL_RADIUS_M          R_WHEEL_M

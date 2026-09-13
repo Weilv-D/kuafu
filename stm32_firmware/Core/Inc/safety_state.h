@@ -55,7 +55,17 @@ typedef struct {
 typedef struct {
     uint8_t enter_hold;
     uint8_t clear_action;
+    /* Set whenever a new safety fault was observed on this update.  Consumers
+     * must apply this decision before dispatching cached control output. */
+    uint8_t fault_active;
+    /* Serious faults are latched until safety_state_init/reset. */
+    uint8_t fault_latched;
 } SafetyDecision_t;
+
+#define SAFETY_TRANSIENT_FAULTS \
+    ((FaultMask_t)(FAULT_WHEEL_LEFT | FAULT_WHEEL_RIGHT | FAULT_SERVO))
+#define SAFETY_SERIOUS_FAULTS \
+    ((FaultMask_t)~SAFETY_TRANSIENT_FAULTS)
 
 extern SafetyState_t g_safety_state;
 

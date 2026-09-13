@@ -22,10 +22,10 @@ static float wrap_angle(float value) {
 }
 
 static float jerk_limited_ref(float target, float *value, float *accel,
-                              float max_accel, float max_jerk) {
-    float target_accel = clamp_float((target - *value) / BASE_DT, -max_accel, max_accel);
-    *accel += clamp_float(target_accel - *accel, -max_jerk * BASE_DT, max_jerk * BASE_DT);
-    *value += *accel * BASE_DT;
+                              float max_accel, float max_jerk, float dt) {
+    float target_accel = clamp_float((target - *value) / dt, -max_accel, max_accel);
+    *accel += clamp_float(target_accel - *accel, -max_jerk * dt, max_jerk * dt);
+    *value += *accel * dt;
     return *value;
 }
 
@@ -50,25 +50,32 @@ void lqr_reset(LQRController_t *controller, float x_est, float yaw_rad) {
     controller->air_sustain_ticks = 0U;
 }
 
-void lqr_update(LQRController_t *controller,
-                float pitch_rad,
-                float pitch_rate_rads,
-                float wheel_vel_l_rads,
-                float wheel_vel_r_rads,
-                float yaw_rad,
-                float yaw_rate_rads,
-                float vx_cmd,
-                float wz_cmd,
-                float delta_tau_common,
-                float delta_tau_yaw,
-                float *out_tau_l,
-                float *out_tau_r) {
+float lqr_update_elapsed_dt(LQRController_t *controller,
+                            float elapsed_dt_s,
+                            float pitch_rad,
+                            float pitch_rate_rads,
+                            float wheel_vel_l_rads,
+                            float wheel_vel_r_rads,
+                            float yaw_rad,
+                            float yaw_rate_rads,
+                            float vx_cmd,
+                            float wz_cmd,
+                            float delta_tau_common,
+                            float delta_tau_yaw,
+                            float *out_tau_l,
+                            float *out_tau_r) {
+    float dt = clamp_float(elapsed_dt_s, 0.0f, LQR_ELAPSED_DT_MAX);
+    if (dt <= 0.0f) {
+        *out_tau_l = 0.0f;
+        *out_tau_r = 0.0f;
+        return 0.0f;
+    }
     float wheel_vel_avg_rads = 0.5f * (wheel_vel_l_rads + wheel_vel_r_rads);
     float vx = wheel_vel_avg_rads * WHEEL_RADIUS_M;
-    controller->x_est += vx * BASE_DT;
-    float v_ref = jerk_limited_ref(vx_cmd, &controller->v_ref, &controller->v_accel, 2.0f, 8.0f);
-    float w_ref = jerk_limited_ref(wz_cmd, &controller->w_ref, &controller->w_accel, 4.0f, 16.0f);
-    controller->x_ref += v_ref * BASE_DT;
+    controller->x_est += vx * dt;
+    float v_ref = jerk_limited_ref(vx_cmd, &controller->v_ref, &controller->v_accel, 2.0f, 8.0f, dt);
+    float w_ref = jerk_limited_ref(wz_cmd, &controller->w_ref, &controller->w_accel, 4.0f, 16.0f, dt);
+    controller->x_ref += v_ref * dt;
     if (wz_cmd == 0.0f) {
         /* No turn command: track the measured heading so the yaw loop
          * degenerates to pure rate damping.  Mahony yaw has no magnetometer
@@ -78,7 +85,7 @@ void lqr_update(LQRController_t *controller,
          * with both wheels counter-rotating at +-3.3 rad/s). */
         controller->yaw_ref = yaw_rad;
     } else {
-        controller->yaw_ref = wrap_angle(controller->yaw_ref + w_ref * BASE_DT);
+        controller->yaw_ref = wrap_angle(controller->yaw_ref + w_ref * dt);
     }
 
     float x_error = controller->x_est - controller->x_ref;
@@ -125,7 +132,8 @@ void lqr_update(LQRController_t *controller,
          * a 0.25 m·s accumulation produces multi-newton force overshoot.  Limit
          * to 0.05 so the integral never contributes more than ~10% of rated
          * wheel torque — enough to cancel steady-state drift without sprinting. */
-        controller->x_int = clamp_float(controller->x_int + x_error * BASE_DT, -0.05f, 0.05f);
+        controller->x_int = clamp_float(controller->x_int + x_error * dt,
+                                             -LQI_INTEGRAL_CLAMP, LQI_INTEGRAL_CLAMP);
     }
     float force = -(controller->K[0] * x_error
                     + controller->K[1] * pitch_rad
@@ -163,4 +171,24 @@ void lqr_update(LQRController_t *controller,
     *out_tau_r = limit_wheel_torque(
         -tau_pitch - tau_yaw - tau_common_residual - tau_yaw_residual,
         wheel_vel_r_rads);
+    return dt;
+}
+
+void lqr_update(LQRController_t *controller,
+                float pitch_rad,
+                float pitch_rate_rads,
+                float wheel_vel_l_rads,
+                float wheel_vel_r_rads,
+                float yaw_rad,
+                float yaw_rate_rads,
+                float vx_cmd,
+                float wz_cmd,
+                float delta_tau_common,
+                float delta_tau_yaw,
+                float *out_tau_l,
+                float *out_tau_r) {
+    (void)lqr_update_elapsed_dt(controller, BASE_DT, pitch_rad, pitch_rate_rads,
+                                wheel_vel_l_rads, wheel_vel_r_rads, yaw_rad,
+                                yaw_rate_rads, vx_cmd, wz_cmd, delta_tau_common,
+                                delta_tau_yaw, out_tau_l, out_tau_r);
 }

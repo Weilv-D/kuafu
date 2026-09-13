@@ -1,5 +1,6 @@
 #include "bmi088.h"
 #include "pin_config.h"
+#include <math.h>
 
 #define GRAVITY_M_S2         9.80665f
 #define PI                   3.14159265f
@@ -7,6 +8,8 @@
 /* Conversion factors */
 #define ACCEL_24G_SCALE      ((24.0f / 32768.0f) * GRAVITY_M_S2)
 #define GYRO_2000_SCALE      ((2000.0f / 32768.0f) * (PI / 180.0f))
+#define BMI088_ACCEL_MAX_M_S2  60.0f
+#define BMI088_GYRO_MAX_RAD_S  40.0f
 
 /* Delay between SCL edges during the 9-clock bus recovery sequence. */
 #define BMI_BUS_RECOVERY_DELAY_US  10U
@@ -108,8 +111,12 @@ void bmi088_recover_bus(BMI088_t *imu) {
 }
 
 /* Called from the init state machine whenever an I2C transaction fails.
- * Returns 0 to let the caller restart the init sequence (retry), or -1 once
- * BMI088_MAX_INIT_ATTEMPTS is exhausted (give up -> FAILED). */
+ * Each retry round runs the full soft-reset sequence with a bus recovery
+ * between attempts and gives up after BMI088_MAX_INIT_ATTEMPTS; the startup
+ * manager re-issues begin_init on its 100 ms cadence, so the overall bound
+ * on a permanently dead IMU is STARTUP_TOTAL_TIMEOUT_MS (15 s), after which
+ * startup latches FAILED.  Returns 0 to restart the sequence this round,
+ * -1 when this round's attempts are exhausted. */
 static int bmi_init_retry_or_fail(BMI088_t *imu, uint32_t now_ms) {
     if (imu->init_attempts < UINT8_MAX) {
         ++imu->init_attempts;
@@ -135,12 +142,29 @@ static int bmi_init_write(BMI088_t *imu, uint8_t addr, uint8_t reg, uint8_t valu
 }
 
 void bmi088_begin_init(BMI088_t *imu, I2C_HandleTypeDef *hi2c, uint32_t now_ms) {
+    if (imu == NULL) {
+        return;
+    }
     device_health_init(&imu->health);
+    device_health_init(&imu->accel_health);
+    device_health_init(&imu->gyro_health);
     imu->hi2c = hi2c;
     imu->initialized = 0U;
     imu->init_state = BMI_INIT_ACC_RESET;
     imu->init_deadline_ms = now_ms;
     imu->init_attempts = 0U;
+    imu->accel_last_valid_ms = 0U;
+    imu->gyro_last_valid_ms = 0U;
+    imu->accel_sequence = 0U;
+    imu->gyro_sequence = 0U;
+    imu->accel_sample_valid = 0U;
+    imu->gyro_sample_valid = 0U;
+    imu->accel_calibration.bias[0] = 0.0f;
+    imu->accel_calibration.bias[1] = 0.0f;
+    imu->accel_calibration.bias[2] = 0.0f;
+    imu->accel_calibration.scale[0] = 1.0f;
+    imu->accel_calibration.scale[1] = 1.0f;
+    imu->accel_calibration.scale[2] = 1.0f;
 }
 
 int bmi088_init_step(BMI088_t *imu, uint32_t now_ms) {
@@ -176,6 +200,13 @@ int bmi088_init_step(BMI088_t *imu, uint32_t now_ms) {
             return bmi_init_write(imu, BMI088_ACCEL_ADDR, BMI088_ACC_RANGE, 0x03,
                                   BMI_INIT_ACC_CONF, now_ms, 2U);
         case BMI_INIT_ACC_CONF:
+            /* 0xAC = bandwidth 0xA (normal) in the HIGH nibble | ODR 0xC
+             * (1600 Hz) in the low nibble — bitfield order per the official
+             * Bosch BMI08x_SensorAPI (bmi08a.c: odr = reg & 0x0F,
+             * bw = (reg & 0xF0) >> 4; valid bw 0x8..0xA, valid ODR
+             * 0x5..0xC).  The 1600 Hz sensor rate covers the 1 kHz poll
+             * below, so every read returns data newer than one poll period
+             * and the per-channel freshness stamp is honest. */
             return bmi_init_write(imu, BMI088_ACCEL_ADDR, BMI088_ACC_CONF, 0xAC,
                                   BMI_INIT_GYRO_RESET, now_ms, 2U);
         case BMI_INIT_GYRO_RESET:
@@ -218,47 +249,149 @@ int bmi088_init_step(BMI088_t *imu, uint32_t now_ms) {
 /* Blocking read timeout is 2 ms: it bounds the worst-case main-loop stall so
  * a NACKed IMU cannot starve the 4 ms DDSM / 3 ms ST3215 bus deadlines and
  * trigger cascading false device faults (previously 10 ms). */
+static uint8_t bmi_vector_finite_and_bounded(const float value[3], float limit) {
+    uint8_t i;
+    for (i = 0U; i < 3U; ++i) {
+        if (!isfinite(value[i]) || fabsf(value[i]) > limit) {
+            return 0U;
+        }
+    }
+    return 1U;
+}
+
+static void bmi_try_mark_pair_valid(BMI088_t *imu, uint32_t now_ms) {
+    if (imu->accel_sample_valid && imu->gyro_sample_valid &&
+        imu->accel_last_valid_ms == now_ms && imu->gyro_last_valid_ms == now_ms) {
+        device_health_mark_valid(&imu->health, now_ms);
+    }
+}
+
 int bmi088_read_accel(BMI088_t *imu) {
     uint8_t buffer[6];
+    float sample[3];
+    uint32_t now_ms;
+    int16_t raw_x;
+    int16_t raw_y;
+    int16_t raw_z;
 
-    /* Read 6 bytes of raw accelerometer data starting at BMI088_ACC_X_LSB (0x12) */
-    if (HAL_I2C_Mem_Read(imu->hi2c, BMI088_ACCEL_ADDR << 1, BMI088_ACC_X_LSB, I2C_MEMADD_SIZE_8BIT, buffer, 6, 2) != HAL_OK) {
-        device_health_mark_failure(&imu->health, DEVICE_FAILURE_TIMEOUT, 3U);
+    if (imu == NULL || imu->hi2c == NULL) return -1;
+    if (HAL_I2C_Mem_Read(imu->hi2c, BMI088_ACCEL_ADDR << 1, BMI088_ACC_X_LSB,
+                         I2C_MEMADD_SIZE_8BIT, buffer, 6, 2) != HAL_OK) {
+        imu->accel_sample_valid = 0U;
+        device_health_mark_failure(&imu->accel_health, DEVICE_FAILURE_TIMEOUT, 1U);
         return -1;
     }
-
-    /* Combine raw values (two's complement int16) and scale to m/s^2 */
-    int16_t raw_x = (int16_t)(((uint16_t)buffer[1] << 8) | buffer[0]);
-    int16_t raw_y = (int16_t)(((uint16_t)buffer[3] << 8) | buffer[2]);
-    int16_t raw_z = (int16_t)(((uint16_t)buffer[5] << 8) | buffer[4]);
-
-    imu->accel[0] = (float)raw_x * ACCEL_24G_SCALE;
-    imu->accel[1] = (float)raw_y * ACCEL_24G_SCALE;
-    imu->accel[2] = (float)raw_z * ACCEL_24G_SCALE;
-
+    raw_x = (int16_t)(((uint16_t)buffer[1] << 8) | buffer[0]);
+    raw_y = (int16_t)(((uint16_t)buffer[3] << 8) | buffer[2]);
+    raw_z = (int16_t)(((uint16_t)buffer[5] << 8) | buffer[4]);
+    sample[0] = (float)raw_x * ACCEL_24G_SCALE;
+    sample[1] = (float)raw_y * ACCEL_24G_SCALE;
+    sample[2] = (float)raw_z * ACCEL_24G_SCALE;
+    sample[0] = (sample[0] - imu->accel_calibration.bias[0]) * imu->accel_calibration.scale[0];
+    sample[1] = (sample[1] - imu->accel_calibration.bias[1]) * imu->accel_calibration.scale[1];
+    sample[2] = (sample[2] - imu->accel_calibration.bias[2]) * imu->accel_calibration.scale[2];
+    if (!bmi_vector_finite_and_bounded(sample, BMI088_ACCEL_MAX_M_S2)) {
+        imu->accel_sample_valid = 0U;
+        device_health_mark_failure(&imu->accel_health, DEVICE_FAILURE_PROTOCOL, 1U);
+        return -1;
+    }
+    imu->accel[0] = sample[0];
+    imu->accel[1] = sample[1];
+    imu->accel[2] = sample[2];
+    now_ms = HAL_GetTick();
+    imu->accel_last_valid_ms = now_ms;
+    if (imu->accel_sequence != UINT32_MAX) ++imu->accel_sequence;
+    imu->accel_sample_valid = 1U;
+    device_health_mark_valid(&imu->accel_health, now_ms);
+    bmi_try_mark_pair_valid(imu, now_ms);
     return 0;
 }
 
 int bmi088_read_gyro(BMI088_t *imu) {
     uint8_t buffer[6];
+    float sample[3];
+    uint32_t now_ms;
+    int16_t raw_x;
+    int16_t raw_y;
+    int16_t raw_z;
 
-    /* Read 6 bytes of raw gyroscope data starting at BMI088_GYRO_X_LSB (0x02) */
-    if (HAL_I2C_Mem_Read(imu->hi2c, BMI088_GYRO_ADDR << 1, BMI088_GYRO_X_LSB, I2C_MEMADD_SIZE_8BIT, buffer, 6, 2) != HAL_OK) {
-        device_health_mark_failure(&imu->health, DEVICE_FAILURE_TIMEOUT, 3U);
+    if (imu == NULL || imu->hi2c == NULL) return -1;
+    if (HAL_I2C_Mem_Read(imu->hi2c, BMI088_GYRO_ADDR << 1, BMI088_GYRO_X_LSB,
+                         I2C_MEMADD_SIZE_8BIT, buffer, 6, 2) != HAL_OK) {
+        imu->gyro_sample_valid = 0U;
+        device_health_mark_failure(&imu->gyro_health, DEVICE_FAILURE_TIMEOUT, 1U);
         return -1;
     }
-
-    /* Combine raw values (two's complement int16) and scale to rad/s */
-    int16_t raw_x = (int16_t)(((uint16_t)buffer[1] << 8) | buffer[0]);
-    int16_t raw_y = (int16_t)(((uint16_t)buffer[3] << 8) | buffer[2]);
-    int16_t raw_z = (int16_t)(((uint16_t)buffer[5] << 8) | buffer[4]);
-
-    imu->gyro[0] = (float)raw_x * GYRO_2000_SCALE;
-    imu->gyro[1] = (float)raw_y * GYRO_2000_SCALE;
-    imu->gyro[2] = (float)raw_z * GYRO_2000_SCALE;
-    device_health_mark_valid(&imu->health, HAL_GetTick());
-
+    raw_x = (int16_t)(((uint16_t)buffer[1] << 8) | buffer[0]);
+    raw_y = (int16_t)(((uint16_t)buffer[3] << 8) | buffer[2]);
+    raw_z = (int16_t)(((uint16_t)buffer[5] << 8) | buffer[4]);
+    sample[0] = (float)raw_x * GYRO_2000_SCALE;
+    sample[1] = (float)raw_y * GYRO_2000_SCALE;
+    sample[2] = (float)raw_z * GYRO_2000_SCALE;
+    if (!bmi_vector_finite_and_bounded(sample, BMI088_GYRO_MAX_RAD_S)) {
+        imu->gyro_sample_valid = 0U;
+        device_health_mark_failure(&imu->gyro_health, DEVICE_FAILURE_PROTOCOL, 1U);
+        return -1;
+    }
+    imu->gyro[0] = sample[0];
+    imu->gyro[1] = sample[1];
+    imu->gyro[2] = sample[2];
+    now_ms = HAL_GetTick();
+    imu->gyro_last_valid_ms = now_ms;
+    if (imu->gyro_sequence != UINT32_MAX) ++imu->gyro_sequence;
+    imu->gyro_sample_valid = 1U;
+    device_health_mark_valid(&imu->gyro_health, now_ms);
+    bmi_try_mark_pair_valid(imu, now_ms);
     return 0;
+}
+
+void bmi088_set_accel_calibration(BMI088_t *imu,
+                                  const BMI088AccelCalibration_t *calibration) {
+    uint8_t i;
+    if (imu == NULL || calibration == NULL) return;
+    for (i = 0U; i < 3U; ++i) {
+        if (isfinite(calibration->bias[i]) && isfinite(calibration->scale[i]) &&
+            calibration->scale[i] > 0.0f && calibration->scale[i] < 10.0f) {
+            imu->accel_calibration.bias[i] = calibration->bias[i];
+            imu->accel_calibration.scale[i] = calibration->scale[i];
+        }
+    }
+}
+
+void bmi088_get_sample_validity(const BMI088_t *imu,
+                                uint32_t now_ms,
+                                uint32_t max_age_ms,
+                                BMI088SampleValidity_t *validity) {
+    uint32_t age;
+    if (validity == NULL) return;
+    *validity = (BMI088SampleValidity_t){0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
+    if (imu == NULL) return;
+    validity->accel_valid = imu->accel_sample_valid;
+    validity->gyro_valid = imu->gyro_sample_valid;
+    validity->accel_sequence = imu->accel_sequence;
+    validity->gyro_sequence = imu->gyro_sequence;
+    if (imu->accel_sample_valid) {
+        age = (uint32_t)(now_ms - imu->accel_last_valid_ms);
+        validity->accel_age_ms = age;
+        validity->accel_fresh = (uint8_t)(age <= max_age_ms);
+    }
+    if (imu->gyro_sample_valid) {
+        age = (uint32_t)(now_ms - imu->gyro_last_valid_ms);
+        validity->gyro_age_ms = age;
+        validity->gyro_fresh = (uint8_t)(age <= max_age_ms);
+    }
+}
+
+uint8_t bmi088_accel_healthy(const BMI088_t *imu, uint32_t now_ms, uint32_t max_age_ms) {
+    BMI088SampleValidity_t validity;
+    bmi088_get_sample_validity(imu, now_ms, max_age_ms, &validity);
+    return (uint8_t)(validity.accel_valid && validity.accel_fresh);
+}
+
+uint8_t bmi088_gyro_healthy(const BMI088_t *imu, uint32_t now_ms, uint32_t max_age_ms) {
+    BMI088SampleValidity_t validity;
+    bmi088_get_sample_validity(imu, now_ms, max_age_ms, &validity);
+    return (uint8_t)(validity.gyro_valid && validity.gyro_fresh);
 }
 
 int bmi088_read_temp(BMI088_t *imu) {

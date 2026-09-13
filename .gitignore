@@ -56,6 +56,9 @@ MUJOCO_LOG.TXT
 logs/
 *.bak
 
+# ---- Firmware host tests ----
+stm32_firmware/tests/build-host-msvc/
+
 # ---- Keil MDK-ARM ----
 stm32_firmware/**/Listings/
 stm32_firmware/**/Objects/
@@ -81,3 +84,7 @@ stm32_firmware/**/*.lst
 stm32_firmware/MDK-ARM/build_keil.log
 stm32_firmware/MDK-ARM/build.log
 stm32_firmware/MDK-ARM/debug_tools/*_trace_run.txt
+
+# ---- SWD trace captures (local debugging artifacts) ----
+balance_trace.csv
+*.trace_dump/

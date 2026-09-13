@@ -89,52 +89,73 @@ void run_ddsm315_tests(void) {
     test_uart_reset();
     ddsm_bus_init(&bus, &uart);
     TEST_TRUE(ddsm_bus_is_idle(&bus));
+
+    /* Single outstanding transaction starts immediately. */
     TEST_EQ_INT(0, ddsm_bus_queue_torque(&bus, &state, 0.25f, 10U));
     TEST_EQ_INT(DDSM_BUS_TX, bus.phase);
     TEST_EQ_INT(1, (int)test_uart_tx_count());
     TEST_EQ_INT(DDSM_FRAME_SIZE, test_uart_last_tx_size());
+    TEST_EQ_INT(DDSM_TX_STATUS_ACTIVE, (int)ddsm_bus_status(&bus));
+
+    /* A busy bus queues (up to depth 4) instead of dropping the command;
+     * overflow is reported explicitly and counted. */
+    TEST_EQ_INT(0, ddsm_bus_queue_torque(&bus, &state, 0.0f, 10U));
+    TEST_EQ_INT(0, ddsm_bus_queue_torque(&bus, &state, 0.0f, 10U));
+    TEST_EQ_INT(0, ddsm_bus_queue_torque(&bus, &state, 0.0f, 10U));
+    TEST_EQ_INT(0, ddsm_bus_queue_torque(&bus, &state, 0.0f, 10U));
+    TEST_EQ_INT(4, (int)ddsm_bus_queue_depth(&bus));
     TEST_EQ_INT(-2, ddsm_bus_queue_torque(&bus, &state, 0.0f, 10U));
+    TEST_EQ_INT(1, (int)bus.queue_overflow_count);
 
-    ddsm_bus_on_tx_complete(&bus);
-    TEST_EQ_INT(DDSM_BUS_RX, bus.phase);
-    feed_bus(&bus, bus.tx, DDSM_FRAME_SIZE, 10U); /* self-echo */
-    make_feedback(frame, 1U);
-    feed_bus(&bus, frame, DDSM_FRAME_SIZE, 11U);
+    /* Drain all five transactions.  A completed frame auto-starts the next
+     * pending one, so the bus reports idle only when the queue empties. */
+    for (int i = 0; i < 5; ++i) {
+        ddsm_bus_on_tx_complete_at(&bus, 11U);
+        TEST_EQ_INT(DDSM_BUS_RX, bus.phase);
+        feed_bus(&bus, bus.tx, DDSM_FRAME_SIZE, 11U); /* adapter self-echo */
+        make_feedback(frame, 1U);
+        feed_bus(&bus, frame, DDSM_FRAME_SIZE, 12U);
+    }
     TEST_TRUE(ddsm_bus_is_idle(&bus));
+    TEST_EQ_INT(0, (int)ddsm_bus_queue_depth(&bus));
+    TEST_EQ_INT(5, (int)test_uart_tx_count());
     TEST_TRUE(state.health.online);
-    TEST_EQ_INT(11, (int)state.health.last_valid_ms);
+    TEST_EQ_INT(12, (int)state.health.last_valid_ms);
+    TEST_EQ_INT(DDSM_TX_STATUS_FEEDBACK_VALID, (int)ddsm_bus_status(&bus));
+    TEST_EQ_INT(DDSM_MODE_CURRENT, (int)ddsm_bus_mode_feedback(&bus));
 
-    /* The serialized owner accepts the opposite motor after the first slot. */
-    TEST_EQ_INT(0, ddsm_bus_queue_torque(&bus, &right, -0.25f, 12U));
-    ddsm_bus_on_tx_complete(&bus);
+    /* The serialized owner accepts the opposite motor in the next slot. */
+    TEST_EQ_INT(0, ddsm_bus_queue_torque(&bus, &right, -0.25f, 13U));
+    ddsm_bus_on_tx_complete_at(&bus, 13U);
+    feed_bus(&bus, bus.tx, DDSM_FRAME_SIZE, 13U);
     make_feedback(frame, 2U);
-    feed_bus(&bus, frame, DDSM_FRAME_SIZE, 13U);
+    feed_bus(&bus, frame, DDSM_FRAME_SIZE, 14U);
     TEST_TRUE(right.health.online);
+    TEST_TRUE(ddsm_bus_is_idle(&bus));
 
+    /* No reply in time: bounded transaction deadline, health timeout, idle. */
     TEST_EQ_INT(0, ddsm_bus_queue_torque(&bus, &state, 0.0f, 20U));
     ddsm_bus_step(&bus, 21U);
     TEST_EQ_INT(DDSM_BUS_TX, bus.phase);
-    ddsm_bus_step(&bus, 24U);
-    TEST_EQ_INT(DDSM_BUS_TX, bus.phase);
     ddsm_bus_step(&bus, 27U);
-    TEST_EQ_INT(DDSM_BUS_TX, bus.phase);
-    ddsm_bus_step(&bus, 31U);
     TEST_EQ_INT(DDSM_BUS_TX, bus.phase);
     ddsm_bus_step(&bus, 32U);  /* 12 ms transaction deadline */
     TEST_TRUE(ddsm_bus_is_idle(&bus));
     TEST_EQ_INT(0, (int)test_uart_abort_count());
     TEST_EQ_INT(1, (int)state.health.timeout_count);
+    TEST_EQ_INT(DDSM_TX_STATUS_TIMEOUT, (int)ddsm_bus_status(&bus));
 
     /* A valid transaction after timeout restores online health. */
     TEST_EQ_INT(0, ddsm_bus_queue_torque(&bus, &state, 0.0f, 30U));
-    ddsm_bus_on_tx_complete(&bus);
+    ddsm_bus_on_tx_complete_at(&bus, 30U);
     make_feedback(frame, 1U);
     feed_bus(&bus, frame, DDSM_FRAME_SIZE, 31U);
     TEST_EQ_INT(0, (int)state.health.consecutive_failures);
     TEST_TRUE(state.health.online);
 
+    /* Corrupt CRC slides the window instead of failing the transaction. */
     TEST_EQ_INT(0, ddsm_bus_queue_torque(&bus, &state, 0.0f, 40U));
-    ddsm_bus_on_tx_complete(&bus);
+    ddsm_bus_on_tx_complete_at(&bus, 40U);
     make_feedback(frame, 1U);
     frame[9] ^= 1U;
     feed_bus(&bus, frame, DDSM_FRAME_SIZE, 41U);
@@ -144,4 +165,48 @@ void run_ddsm315_tests(void) {
     feed_bus(&bus, frame, DDSM_FRAME_SIZE, 42U);
     TEST_TRUE(ddsm_bus_is_idle(&bus));
     TEST_EQ_INT(0, (int)state.health.consecutive_failures);
+
+    /* The TX snapshot reports what actually reached the wire, not an ACK. */
+    {
+        const DDSM_TxSnapshot_t *snap = ddsm_bus_get_last_tx(&bus);
+        TEST_TRUE(snap != NULL);
+        TEST_EQ_INT(1, (int)snap->id);
+        TEST_EQ_INT(40, (int)snap->queued_ms);
+        TEST_EQ_INT(40, (int)snap->tx_complete_ms);
+        TEST_EQ_INT(42, (int)snap->finished_ms);
+        TEST_EQ_INT(DDSM_TX_STATUS_FEEDBACK_VALID, (int)snap->status);
+    }
+
+    /* Queuing a no-reply control frame while a reply-expecting transaction
+     * is in flight must not disturb the active transaction: the expectation
+     * travels with the queued frame itself (start_pending re-arms it), so a
+     * late enable/mode can never collapse the in-flight reply window and
+     * cost a freshness timeout. */
+    {
+        test_uart_reset();
+        memset(&state, 0, sizeof(state));
+        state.id = 1U;
+        device_health_init(&state.health);
+        ddsm_bus_init(&bus, &uart);
+
+        TEST_EQ_INT(0, ddsm_bus_queue_torque(&bus, &state, 0.25f, 60U));
+        TEST_EQ_INT(1, (int)bus.expect_reply);
+        TEST_EQ_INT(0, ddsm_bus_queue_enable(&bus, &state, 1U, 60U));
+        TEST_EQ_INT(1, (int)ddsm_bus_queue_depth(&bus));
+        TEST_EQ_INT(1, (int)bus.expect_reply); /* active transaction intact */
+
+        ddsm_bus_on_tx_complete_at(&bus, 61U);
+        TEST_EQ_INT(DDSM_BUS_RX, bus.phase);   /* still waiting for the reply */
+        feed_bus(&bus, bus.tx, DDSM_FRAME_SIZE, 61U); /* adapter self-echo */
+        make_feedback(frame, 1U);
+        feed_bus(&bus, frame, DDSM_FRAME_SIZE, 62U);
+        TEST_TRUE(state.health.online);
+        TEST_EQ_INT(0, (int)ddsm_bus_queue_depth(&bus));
+        TEST_EQ_INT(DDSM_BUS_TX, bus.phase);   /* enable already auto-started */
+
+        /* The queued enable runs as a no-reply transaction. */
+        TEST_EQ_INT(0, (int)bus.expect_reply);
+        ddsm_bus_on_tx_complete_at(&bus, 63U);
+        TEST_TRUE(ddsm_bus_is_idle(&bus));
+    }
 }

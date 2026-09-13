@@ -7,7 +7,7 @@ import time
 
 from pyocd.core.helpers import ConnectHelper
 
-TICKS_ADDR = 0x20000008
+TICKS_ADDR = 0x2000000C
 FREEZE_S = 0.3
 
 

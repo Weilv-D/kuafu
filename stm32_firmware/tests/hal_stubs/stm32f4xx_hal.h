@@ -30,6 +30,12 @@ typedef enum {
 #define __HAL_UART_FLUSH_DRREGISTER(huart) ((void)(huart))
 #define __disable_irq() ((void)0)
 #define __enable_irq() ((void)0)
+/* Host stand-ins for the nestable CMSIS critical-section idiom: the real
+ * firmware saves/restores PRIMASK because these helpers run in both main and
+ * interrupt context; unconditional __enable_irq() would unmask interrupts
+ * inside an ISR. */
+uint32_t __get_PRIMASK(void);
+void __set_PRIMASK(uint32_t primask);
 
 uint32_t HAL_GetTick(void);
 HAL_StatusTypeDef HAL_I2C_Init(I2C_HandleTypeDef *hi2c);

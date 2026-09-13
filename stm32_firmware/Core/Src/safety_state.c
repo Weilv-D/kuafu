@@ -9,6 +9,9 @@ SafetyState_t g_safety_state;
 
 static uint32_t calibration_samples_count = 0U;
 static float calibration_sum[3] = {0.0f, 0.0f, 0.0f};
+static float calibration_sum_sq[3] = {0.0f, 0.0f, 0.0f};
+static uint32_t calibration_last_ms = 0U;
+static uint8_t calibration_have_timestamp = 0U;
 static uint32_t overtemp_started_ms = 0U;
 static uint8_t overtemp_active = 0U;
 
@@ -25,6 +28,11 @@ void safety_state_init(void) {
     calibration_sum[0] = 0.0f;
     calibration_sum[1] = 0.0f;
     calibration_sum[2] = 0.0f;
+    calibration_sum_sq[0] = 0.0f;
+    calibration_sum_sq[1] = 0.0f;
+    calibration_sum_sq[2] = 0.0f;
+    calibration_last_ms = 0U;
+    calibration_have_timestamp = 0U;
     overtemp_started_ms = 0U;
     overtemp_active = 0U;
     imu_stale_ticks = 0U;
@@ -34,46 +42,83 @@ void safety_state_init(void) {
 }
 
 void safety_state_trigger_fault(FaultMask_t fault) {
+    if (fault == FAULT_NONE) return;
     g_safety_state.fault_mask |= fault;
     g_safety_state.current_mode = STATE_FAULT;
 }
 
 /* Stillness gate for gyro bias calibration: a stationary BMI088 reads well
- * below 0.08 rad/s (~4.6 deg/s) on all axes.  Moving samples are skipped (not
- * reset) so intermittent wobble does not poison the estimate.  Startup now
- * self-recovers instead of latching FAULT, so this only needs to be long
- * enough for a good bias mean: 1000 still samples @250 Hz ~= 4 s untouched. */
+ * below 0.08 rad/s (~4.6 deg/s) on all axes.  Moving samples are SKIPPED, not
+ * reset: bench-stand wobble must not make calibration impossible on any real
+ * surface, and an unstable robot balances (uncalibrated) while the window
+ * accumulates in the background.  Two guards bound the window instead:
+ * a >50 ms sample gap restarts it (the IMU path runs at ~1 kHz), and the
+ * completed window must pass a per-axis variance gate. */
 #define GYRO_CALIB_STILL_RAD_S 0.08f
 #define GYRO_CALIB_SAMPLES 1000U
+#define GYRO_CALIB_MAX_GAP_MS 50U
+#define GYRO_CALIB_MAX_VARIANCE 0.0025f
 
 void safety_state_gyro_calib_update(float gx, float gy, float gz, uint32_t now_ms) {
-    (void)now_ms;
-    if (g_safety_state.is_gyro_calibrated) {
-        return;
+    uint32_t n;
+    float mean;
+    float variance;
+    if (g_safety_state.is_gyro_calibrated) return;
+
+    /* Never allow NaN/Inf to poison the running sums.  This is deliberately a
+     * local guard: balance remains available while a bad sample is discarded. */
+    if (!isfinite(gx) || !isfinite(gy) || !isfinite(gz)) return;
+    if (calibration_have_timestamp && now_ms == calibration_last_ms) return;
+    if (calibration_have_timestamp &&
+        (uint32_t)(now_ms - calibration_last_ms) > GYRO_CALIB_MAX_GAP_MS) {
+        calibration_samples_count = 0U;
+        calibration_sum[0] = calibration_sum[1] = calibration_sum[2] = 0.0f;
+        calibration_sum_sq[0] = calibration_sum_sq[1] = calibration_sum_sq[2] = 0.0f;
     }
+    calibration_last_ms = now_ms;
+    calibration_have_timestamp = 1U;
 
     if (fabsf(gx) > GYRO_CALIB_STILL_RAD_S ||
         fabsf(gy) > GYRO_CALIB_STILL_RAD_S ||
         fabsf(gz) > GYRO_CALIB_STILL_RAD_S) {
-        /* Skip moving samples WITHOUT resetting the accumulation: gyro bias
-         * is orientation-independent, so still samples collected around
-         * intermittent wobble (e.g. bench stand vibration) remain valid.
-         * Resetting here would make calibration impossible on any surface
-         * that is not perfectly still. */
         return;
     }
 
     calibration_sum[0] += gx;
     calibration_sum[1] += gy;
     calibration_sum[2] += gz;
+    calibration_sum_sq[0] += gx * gx;
+    calibration_sum_sq[1] += gy * gy;
+    calibration_sum_sq[2] += gz * gz;
     ++calibration_samples_count;
 
-    if (calibration_samples_count >= GYRO_CALIB_SAMPLES) {
-        g_safety_state.gyro_calib_offset[0] = calibration_sum[0] / (float)GYRO_CALIB_SAMPLES;
-        g_safety_state.gyro_calib_offset[1] = calibration_sum[1] / (float)GYRO_CALIB_SAMPLES;
-        g_safety_state.gyro_calib_offset[2] = calibration_sum[2] / (float)GYRO_CALIB_SAMPLES;
-        g_safety_state.is_gyro_calibrated = 1U;
-    }
+    if (calibration_samples_count < GYRO_CALIB_SAMPLES) return;
+    n = calibration_samples_count;
+    mean = calibration_sum[0] / (float)n;
+    variance = calibration_sum_sq[0] / (float)n - mean * mean;
+    /* A constant signal can round to a tiny negative variance; that is float
+     * error, not inconsistency.  Only genuinely excessive spread restarts. */
+    if (variance < 0.0f) variance = 0.0f;
+    if (variance > GYRO_CALIB_MAX_VARIANCE) goto reset_window;
+    mean = calibration_sum[1] / (float)n;
+    variance = calibration_sum_sq[1] / (float)n - mean * mean;
+    if (variance < 0.0f) variance = 0.0f;
+    if (variance > GYRO_CALIB_MAX_VARIANCE) goto reset_window;
+    mean = calibration_sum[2] / (float)n;
+    variance = calibration_sum_sq[2] / (float)n - mean * mean;
+    if (variance < 0.0f) variance = 0.0f;
+    if (variance > GYRO_CALIB_MAX_VARIANCE) goto reset_window;
+
+    g_safety_state.gyro_calib_offset[0] = calibration_sum[0] / (float)n;
+    g_safety_state.gyro_calib_offset[1] = calibration_sum[1] / (float)n;
+    g_safety_state.gyro_calib_offset[2] = calibration_sum[2] / (float)n;
+    g_safety_state.is_gyro_calibrated = 1U;
+    return;
+
+reset_window:
+    calibration_samples_count = 0U;
+    calibration_sum[0] = calibration_sum[1] = calibration_sum[2] = 0.0f;
+    calibration_sum_sq[0] = calibration_sum_sq[1] = calibration_sum_sq[2] = 0.0f;
 }
 
 static uint8_t freshness_under_grace(uint32_t now_ms) {
@@ -83,13 +128,14 @@ static uint8_t freshness_under_grace(uint32_t now_ms) {
 
 static FaultMask_t runtime_faults(const SafetyInputs_t *inputs) {
     FaultMask_t faults = FAULT_NONE;
-    if (fabsf(inputs->pitch_rad) > SAFETY_MAX_PITCH_RAD) {
-        faults |= FAULT_TILT;
-    }
-    if (fabsf(inputs->pitch_rate_rads) > SAFETY_MAX_PITCH_RATE_RAD_S) {
+    if (!isfinite(inputs->pitch_rad)) faults |= FAULT_TILT;
+    else if (fabsf(inputs->pitch_rad) > SAFETY_MAX_PITCH_RAD) faults |= FAULT_TILT;
+    if (!isfinite(inputs->pitch_rate_rads)) faults |= FAULT_PITCH_RATE;
+    else if (fabsf(inputs->pitch_rate_rads) > SAFETY_MAX_PITCH_RATE_RAD_S) {
         faults |= FAULT_PITCH_RATE;
     }
-    if (inputs->max_temp_c > SAFETY_MAX_TEMP_C) {
+    if (!isfinite(inputs->max_temp_c)) faults |= FAULT_OVERTEMP;
+    else if (inputs->max_temp_c > SAFETY_MAX_TEMP_C) {
         if (!overtemp_active) {
             overtemp_active = 1U;
             overtemp_started_ms = inputs->now_ms;
@@ -143,32 +189,42 @@ static FaultMask_t runtime_faults(const SafetyInputs_t *inputs) {
 }
 
 SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs) {
-    SafetyDecision_t decision = {0U, 0U};
+    SafetyDecision_t decision = {0U, 0U, 0U, 0U};
     FaultMask_t faults;
 
     if (inputs == NULL) {
         safety_state_trigger_fault(FAULT_INTERNAL);
+        decision.fault_active = 1U;
+        decision.fault_latched = 1U;
         return decision;
     }
     if ((uint8_t)g_safety_state.current_mode > (uint8_t)STATE_FAULT ||
         inputs->requested_mode > (uint8_t)STATE_FAULT) {
         safety_state_trigger_fault(FAULT_INTERNAL);
+        decision.fault_active = 1U;
+        decision.fault_latched = 1U;
         return decision;
     }
     if (inputs->requested_mode == (uint8_t)STATE_FAULT) {
         safety_state_trigger_fault(FAULT_EMERGENCY);
+        decision.fault_active = 1U;
+        decision.fault_latched = 1U;
         return decision;
     }
     faults = runtime_faults(inputs);
+    if (faults != FAULT_NONE) decision.fault_active = 1U;
 
     if (g_safety_state.current_mode == STATE_FAULT) {
-        /* Transient freshness faults (wheel/servo telemetry loss) self-clear
-         * once the device resumes replying, so a momentary bus blip at power-on
-         * or under load does not permanently disable balance.  Serious faults
-         * (tilt, pitch-rate, overtemp, IMU, emergency, init, internal) stay
-         * latched until reset as before. */
-        const FaultMask_t transient =
-            (FaultMask_t)(FAULT_WHEEL_LEFT | FAULT_WHEEL_RIGHT | FAULT_SERVO);
+        /* Re-evaluate and combine faults before considering recovery.  The old
+         * code only examined the old mask, so a new tilt/NaN/over-temperature
+         * fault arriving during transient recovery could be lost. */
+        /* Preserve every newly observed cause, including a second transient
+         * device fault while another transient fault is recovering. */
+        g_safety_state.fault_mask |= faults;
+        if ((g_safety_state.fault_mask & SAFETY_SERIOUS_FAULTS) != 0U) {
+            decision.fault_latched = 1U;
+            return decision;
+        }
         if ((faults & FAULT_WHEEL_LEFT) == 0U) {
             g_safety_state.fault_mask &= ~((FaultMask_t)FAULT_WHEEL_LEFT);
         }
@@ -177,9 +233,6 @@ SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs) {
         }
         if ((faults & FAULT_SERVO) == 0U) {
             g_safety_state.fault_mask &= ~((FaultMask_t)FAULT_SERVO);
-        }
-        if ((g_safety_state.fault_mask & ~transient) != 0U) {
-            return decision;   /* still seriously faulted: stay in FAULT */
         }
         if (g_safety_state.fault_mask == 0U) {
             g_safety_state.current_mode = STATE_STAND;
@@ -195,8 +248,10 @@ SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs) {
     }
 
     if (g_safety_state.current_mode == STATE_INIT) {
-        if ((faults & (FAULT_TILT | FAULT_PITCH_RATE | FAULT_OVERTEMP)) != 0U) {
-            safety_state_trigger_fault(faults & (FAULT_TILT | FAULT_PITCH_RATE | FAULT_OVERTEMP));
+        if ((faults & SAFETY_SERIOUS_FAULTS) != 0U) {
+            safety_state_trigger_fault(faults & SAFETY_SERIOUS_FAULTS);
+            decision.fault_active = 1U;
+            decision.fault_latched = 1U;
             return decision;
         }
         if (inputs->startup_ready && inputs->imu_fresh &&
@@ -215,6 +270,8 @@ SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs) {
 
     if (faults != FAULT_NONE) {
         safety_state_trigger_fault(faults);
+        decision.fault_active = 1U;
+        decision.fault_latched = (uint8_t)((faults & SAFETY_SERIOUS_FAULTS) != 0U);
         return decision;
     }
 

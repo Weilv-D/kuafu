@@ -3,12 +3,11 @@
 
 #include "stm32f4xx_hal.h"
 #include "device_health.h"
+#include <stdint.h>
 
-/* I2C Device Addresses */
 #define BMI088_ACCEL_ADDR        0x18
 #define BMI088_GYRO_ADDR         0x68
 
-/* Accel Register Map */
 #define BMI088_ACC_CHIP_ID       0x00
 #define BMI088_ACC_ERR_REG       0x02
 #define BMI088_ACC_STATUS        0x03
@@ -21,7 +20,6 @@
 #define BMI088_ACC_PWR_CTRL      0x7D
 #define BMI088_ACC_SOFTRESET     0x7E
 
-/* Gyro Register Map */
 #define BMI088_GYRO_CHIP_ID      0x00
 #define BMI088_GYRO_X_LSB        0x02
 #define BMI088_GYRO_RANGE        0x0F
@@ -32,59 +30,60 @@
 #define BMI088_GYRO_SOFTRESET    0x14
 
 typedef struct {
+    float bias[3];
+    float scale[3];
+} BMI088AccelCalibration_t;
+
+typedef struct {
+    uint8_t accel_valid;
+    uint8_t gyro_valid;
+    uint8_t accel_fresh;
+    uint8_t gyro_fresh;
+    uint32_t accel_age_ms;
+    uint32_t gyro_age_ms;
+    uint32_t accel_sequence;
+    uint32_t gyro_sequence;
+} BMI088SampleValidity_t;
+
+typedef struct {
     I2C_HandleTypeDef *hi2c;
-    float accel[3];          /* Accel X, Y, Z in m/s^2 */
-    float gyro[3];           /* Gyro X, Y, Z in rad/s */
-    float temperature;       /* Chip temperature in degC */
+    float accel[3];
+    float gyro[3];
+    float temperature;
+    /* Legacy aggregate health is refreshed only after a valid accel+gyro pair. */
     DeviceHealth_t health;
-    uint32_t init_deadline_ms;
+    DeviceHealth_t accel_health;
+    DeviceHealth_t gyro_health;
+    BMI088AccelCalibration_t accel_calibration;
+    uint32_t accel_last_valid_ms;
+    uint32_t gyro_last_valid_ms;
+    uint32_t accel_sequence;
+    uint32_t gyro_sequence;
+    uint8_t accel_sample_valid;
+    uint8_t gyro_sample_valid;
     uint8_t init_state;
     uint8_t initialized;
-    uint8_t init_attempts;   /* I2C failures seen during the current init sequence */
+    uint8_t init_attempts;
+    uint32_t init_deadline_ms;
 } BMI088_t;
 
-#define BMI088_MAX_INIT_ATTEMPTS 5U   /* I2C failures tolerated before giving up */
+#define BMI088_MAX_INIT_ATTEMPTS 5U
+#define BMI088_DEFAULT_MAX_AGE_MS 20U
 
-/**
- * @brief Initializes the BMI088 IMU over I2C.
- *
- * @param imu Pointer to the device structure.
- * @param hi2c Pointer to initialized STM32 HAL I2C handle.
- * @return int 0 on success, -1 on failure.
- */
 void bmi088_begin_init(BMI088_t *imu, I2C_HandleTypeDef *hi2c, uint32_t now_ms);
-
-/* Recovers a locked I2C bus: deinitializes the peripheral, toggles 9 SCL
- * clocks as a GPIO to release a slave holding SDA low, then re-initializes.
- * Called automatically on init failure; also safe to call on demand. */
 void bmi088_recover_bus(BMI088_t *imu);
-
-/* Advances at most one register transaction when its deadline is reached.
- * Returns 1 when initialized, 0 while in progress, and -1 on a failed attempt. */
 int bmi088_init_step(BMI088_t *imu, uint32_t now_ms);
-
-/**
- * @brief Reads the raw accelerometer values and converts to m/s^2.
- * 
- * @param imu Pointer to the device structure.
- * @return int 0 on success, -1 on failure.
- */
 int bmi088_read_accel(BMI088_t *imu);
-
-/**
- * @brief Reads the raw gyroscope values and converts to rad/s.
- * 
- * @param imu Pointer to the device structure.
- * @return int 0 on success, -1 on failure.
- */
 int bmi088_read_gyro(BMI088_t *imu);
-
-/**
- * @brief Reads the accelerometer chip temperature and converts to degC.
- *
- * @param imu Pointer to the device structure.
- * @return int 0 on success, -1 on failure.
- */
 int bmi088_read_temp(BMI088_t *imu);
 
-#endif /* BMI088_H */
+void bmi088_set_accel_calibration(BMI088_t *imu,
+                                  const BMI088AccelCalibration_t *calibration);
+void bmi088_get_sample_validity(const BMI088_t *imu,
+                                uint32_t now_ms,
+                                uint32_t max_age_ms,
+                                BMI088SampleValidity_t *validity);
+uint8_t bmi088_accel_healthy(const BMI088_t *imu, uint32_t now_ms, uint32_t max_age_ms);
+uint8_t bmi088_gyro_healthy(const BMI088_t *imu, uint32_t now_ms, uint32_t max_age_ms);
+
+#endif

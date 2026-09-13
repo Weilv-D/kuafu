@@ -4,6 +4,13 @@
 #include <string.h>
 
 #define TICK_TO_RAD ((2.0f * 3.14159265f) / 4096.0f)
+#define RPM_TO_RADS (2.0f * 3.14159265f / 60.0f)
+/* Source: Feetech's official FTServo_Python SDK (sms_sts.py ReadSpeed and
+ * protocol_packet_handler.py scs_tohost),
+ * https://github.com/ftservo/FTServo_Python . Present speed is a 16-bit
+ * signed-magnitude value with direction in bit 15; it is not an int16 two's
+ * complement value. The ST3215 register's documented scale is 0.0146 RPM/LSB. */
+#define ST3215_SPEED_RPM_PER_TICK 0.0146f
 
 static uint8_t checksum(const uint8_t *body, uint8_t size) {
     uint8_t sum = 0U;
@@ -78,8 +85,13 @@ int st3215_parse_state_frame(const uint8_t *frame, uint8_t frame_len,
     state->position_tick = value;
     state->position_rad = (float)value * TICK_TO_RAD;
     value = (uint16_t)(((uint16_t)frame[8] << 8) | frame[7]);
-    signed_value = (int16_t)value;
-    state->velocity_rads = (float)signed_value * TICK_TO_RAD;
+    /* Speed is sign-magnitude, like the load field in the same frame: bit15 is
+     * the direction flag and bits14..0 the magnitude (~0.0146 RPM/tick per the
+     * ST-series serial bus protocol).  A two's-complement cast here turns a
+     * slow negative speed into a huge one. */
+    signed_value = (value & 0x8000U) ? -(int16_t)(value & 0x7FFFU)
+                                     : (int16_t)(value & 0x7FFFU);
+    state->velocity_rads = (float)signed_value * ST3215_SPEED_RPM_PER_TICK * RPM_TO_RADS;
     value = (uint16_t)(((uint16_t)frame[10] << 8) | frame[9]);
     signed_value = (value & 0x0400U) ? -(int16_t)(value & 0x03FFU) : (int16_t)(value & 0x03FFU);
     state->load = (float)signed_value / 1000.0f;

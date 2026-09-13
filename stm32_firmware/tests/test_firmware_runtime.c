@@ -41,6 +41,7 @@ void run_firmware_runtime_tests(void) {
     inputs.action_fresh = 0U;
     outputs = firmware_runtime_step(&runtime, &inputs);
     TEST_TRUE(!outputs.residual_allowed);
+    TEST_TRUE(outputs.clear_motion);
     TEST_TRUE(outputs.wheel_intent_allowed);
 
     inputs.wheel_authorized = 0U;
@@ -73,9 +74,23 @@ void run_firmware_runtime_tests(void) {
     TEST_TRUE(!outputs.wheel_intent_allowed);
     TEST_TRUE(!outputs.servo_intent_allowed);
 
+    /* Base velocity/yaw references are an ACTIVE-mode contract: STAND holds
+     * position, CLIMB drives height only, and the heartbeat's latest vx/wz
+     * are ignored outside ACTIVE regardless of what the sender carries. */
+    inputs.mode = STATE_STAND;
+    outputs = firmware_runtime_step(&runtime, &inputs);
+    TEST_TRUE(!outputs.velocity_command_active);
+    inputs.mode = STATE_CLIMB;
+    outputs = firmware_runtime_step(&runtime, &inputs);
+    TEST_TRUE(!outputs.velocity_command_active);
+    inputs.mode = STATE_ACTIVE;
+    outputs = firmware_runtime_step(&runtime, &inputs);
+    TEST_TRUE(outputs.velocity_command_active);
+
     firmware_runtime_init(&runtime, UINT32_MAX - 2U);
     inputs.mode = STATE_STAND;
     inputs.now_ms = 2U;
     outputs = firmware_runtime_step(&runtime, &inputs);
     TEST_TRUE(outputs.control_due);
+    TEST_TRUE(!outputs.velocity_command_active);
 }

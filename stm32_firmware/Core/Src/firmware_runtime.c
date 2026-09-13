@@ -19,7 +19,7 @@ void firmware_runtime_init(FirmwareRuntime_t *runtime, uint32_t now_ms) {
 
 FirmwareRuntimeOutputs_t firmware_runtime_step(FirmwareRuntime_t *runtime,
                                                const FirmwareRuntimeInputs_t *inputs) {
-    FirmwareRuntimeOutputs_t outputs = {0U, 0U, 0U, 0U, 0U};
+    FirmwareRuntimeOutputs_t outputs = {0U, 0U, 0U, 0U, 0U, 0U, 0U};
     uint8_t operational;
     if (runtime == NULL || inputs == NULL) return outputs;
 
@@ -46,5 +46,10 @@ FirmwareRuntimeOutputs_t firmware_runtime_step(FirmwareRuntime_t *runtime,
                                          inputs->link_compatible &&
                                          inputs->heartbeat_fresh &&
                                          inputs->action_fresh);
+    outputs.clear_motion = (uint8_t)(inputs->mode == STATE_ACTIVE &&
+                                     (!inputs->link_compatible ||
+                                      !inputs->heartbeat_fresh ||
+                                      !inputs->action_fresh));
+    outputs.velocity_command_active = (uint8_t)(inputs->mode == STATE_ACTIVE);
     return outputs;
 }

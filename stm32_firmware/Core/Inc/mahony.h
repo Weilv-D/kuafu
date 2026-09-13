@@ -1,46 +1,42 @@
 #ifndef MAHONY_H
 #define MAHONY_H
 
-#include <math.h>
+#include <stdint.h>
+
+typedef enum {
+    MAHONY_UPDATE_REJECTED = 0,
+    MAHONY_UPDATE_FULL = 1,
+    MAHONY_UPDATE_GYRO_ONLY = 2
+} MahonyUpdateStatus_t;
 
 typedef struct {
-    float q0, q1, q2, q3; /* Quaternion states */
-    float Kp;             /* Proportional gain */
-    float Ki;             /* Integral gain */
-    float eInt[3];        /* Integral error buffer */
-    float roll;           /* Roll angle (radians) */
-    float pitch;          /* Pitch angle (radians) */
-    float yaw;            /* Yaw angle (radians) */
+    float q0, q1, q2, q3;
+    float Kp;
+    float Ki;
+    float eInt[3];
+    float roll;
+    float pitch;
+    float yaw;
+    float gyro_only_elapsed_s;
+    uint8_t control_valid;
+    MahonyUpdateStatus_t last_status;
 } MahonyFilter_t;
 
-/**
- * @brief Initializes the Mahony filter structure.
- * 
- * @param filter Pointer to the filter structure.
- * @param Kp Proportional gain.
- * @param Ki Integral gain.
- */
 void mahony_init(MahonyFilter_t *filter, float Kp, float Ki);
-
-/**
- * @brief Resets the filter to a known alignment.
- * 
- * @param filter Pointer to the filter structure.
- */
 void mahony_reset(MahonyFilter_t *filter);
 
-/**
- * @brief Updates the attitude filter with accelerometer and gyroscope measurements.
- * 
- * @param filter Pointer to the filter structure.
- * @param ax Accelerometer x reading (m/s^2 or g, normalized inside).
- * @param ay Accelerometer y reading.
- * @param az Accelerometer z reading.
- * @param gx Gyroscope x reading (radians per second).
- * @param gy Gyroscope y reading.
- * @param gz Gyroscope z reading.
- * @param dt Update time interval in seconds.
- */
-void mahony_update(MahonyFilter_t *filter, float ax, float ay, float az, float gx, float gy, float gz, float dt);
+/* Safe update. Invalid gyro is always rejected. Invalid/out-of-range accel
+ * temporarily permits bounded gyro-only propagation, without accel correction. */
+MahonyUpdateStatus_t mahony_update_validated(MahonyFilter_t *filter,
+                                             float ax, float ay, float az,
+                                             float gx, float gy, float gz,
+                                             float dt,
+                                             uint8_t accel_valid,
+                                             uint8_t gyro_valid);
 
-#endif /* MAHONY_H */
+/* Compatibility wrapper; callers that control actuators must use the return
+ * status from mahony_update_validated instead. */
+void mahony_update(MahonyFilter_t *filter, float ax, float ay, float az,
+                   float gx, float gy, float gz, float dt);
+
+#endif

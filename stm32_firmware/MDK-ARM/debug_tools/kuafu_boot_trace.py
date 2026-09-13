@@ -14,17 +14,17 @@ import time
 from pyocd.core.helpers import ConnectHelper
 
 ADDR = {
-    "ticks": 0x20000008,
-    "body_pitch": 0x20000010,
-    "body_pitch_rate": 0x20000014,
-    "tau_l": 0x20000018,
-    "tau_r": 0x2000001C,
-    "mahony": 0x20000340,
-    "lqr": 0x20000370,
-    "ddsm_l": 0x200003A8,
-    "ddsm_r": 0x200003D0,
-    "startup": 0x200004C8,
-    "safety": 0x2000073C,
+    "ticks": 0x2000000c,
+    "body_pitch": 0x20000014,
+    "body_pitch_rate": 0x20000018,
+    "tau_l": 0x2000001c,
+    "tau_r": 0x20000020,
+    "mahony": 0x200003cc,
+    "lqr": 0x20000718,
+    "ddsm_l": 0x20000404,
+    "ddsm_r": 0x2000042c,
+    "startup": 0x20000524,
+    "safety": 0x20000888,
 }
 
 MODES = ["INIT", "STAND", "ACTIVE", "CLIMB", "FAULT"]

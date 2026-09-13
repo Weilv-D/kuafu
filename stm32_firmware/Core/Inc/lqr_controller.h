@@ -25,6 +25,27 @@ void lqr_reset(LQRController_t *controller, float x_est, float yaw_rad);
 /* 250 Hz baseline controller. Commands are SI units; residuals are normalized
  * common/yaw actions in [-1,1].  Positive yaw residual means right torque > left
  * torque, which is +wz under the repository frame contract. */
+/* Elapsed-time API for main-loop integration.  elapsed_dt_s is measured wall
+ * time since the previous controller update; it is bounded to [0, LQR_ELAPSED_DT_MAX]
+ * so a missed deadline cannot be integrated as one unbounded nominal step.  The
+ * return value is the dt actually used. Wheel feedback is the caller's latest
+ * valid/held body-frame sample. */
+float lqr_update_elapsed_dt(LQRController_t *controller,
+                            float elapsed_dt_s,
+                            float pitch_rad,
+                            float pitch_rate_rads,
+                            float wheel_vel_l_rads,
+                            float wheel_vel_r_rads,
+                            float yaw_rad,
+                            float yaw_rate_rads,
+                            float vx_cmd,
+                            float wz_cmd,
+                            float delta_tau_common,
+                            float delta_tau_yaw,
+                            float *out_tau_l,
+                            float *out_tau_r);
+
+/* Compatibility wrapper for the original fixed 250 Hz unit-test/API call. */
 void lqr_update(LQRController_t *controller,
                 float pitch_rad,
                 float pitch_rate_rads,
