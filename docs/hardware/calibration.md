@@ -37,15 +37,24 @@ used because mirrored mounting faces reverse the observer's view.
 
 ## Wheel Calibration State
 
-Left DDSM315 is ID 1 and right DDSM315 is ID 2. Both return valid 10-byte CRC
-frames. `WHEEL_DIR_L` and `WHEEL_DIR_R` remain `+1`; body-frame forward and yaw
-signs must be confirmed during the supervised unloaded-wheel motion gate before
-ground contact.
+Left DDSM315 is ID 1 and right DDSM315 is ID 2. Both returned valid 10-byte CRC
+frames during electronics bring-up. Current configuration is `WHEEL_DIR_L=+1`
+and `WHEEL_DIR_R=-1`; these are configuration assumptions, not proof of the
+present hardware's body-frame forward and yaw signs. Confirm them during the
+supervised unloaded-wheel motion gate before ground contact.
+
+Check the complete chain rather than changing an isolated minus sign: physical
+forward tilt, reported pitch and pitch rate, controller torque, raw wheel command,
+and actual wheel motion. A host sign test proves the software transform only.
+The torque/current conversion remains provisional until measured at the wheel
+shaft; matching commanded and reported raw current alone does not calibrate Nm.
 
 ## Ordered Motion Gates
 
-1. Lift and secure the robot. Confirm both wheels remain disabled without Pi
-   authorization.
+1. With actuator power isolated, lift and mechanically secure the robot, provide
+   an accessible emergency power cut, and verify the supported test/inhibit state
+   before restoring actuator power. Standalone firmware may enable wheels without
+   Pi authorization; an absent Pi is not a safe inhibit.
 2. At reduced servo speed and acceleration, command `Qx=0`, `D0=63 mm` and
    confirm joint signs `[-,-,+,+]` and raw ticks `[down,up,up,down]`.
 3. Return to `D0=58 mm` and confirm all joint angles return near zero and raw
@@ -60,6 +69,29 @@ ground contact.
 The electronics bring-up record does not claim these motion gates. A failed
 direction, thermal, freshness, or mechanical-clearance check returns testing to
 the preceding safe gate.
+
+## Evidence Required Before Balance Acceptance
+
+Record firmware build/trace version, mechanical configuration, IMU mounting and
+calibration, battery/supply conditions, wheel/servo IDs, and explicit pass/fail
+results for each gate. Do not reuse a historical electronics pass as motion proof.
+
+- With wheel power inhibited, tilt forward/backward and check pitch and pitch-rate
+  signs against the body convention; check a stationary pose for offset/drift.
+- Collect six stable accelerometer faces to estimate per-axis bias and scale.
+  Neutral defaults do not constitute a completed sensor calibration.
+- Use unloaded, reduced-output, one-wheel-at-a-time tests to establish raw command
+  and encoder directions. Stop on unexpected direction or actuator state.
+- Confirm current-loop mode using protocol feedback where available. Measure
+  torque with an appropriate supported load/fixture; supply current is not a
+  substitute for motor phase current or wheel-shaft torque. Do not run a sustained
+  stall test merely to derive a conversion constant.
+- For tethered contact testing, retain a valid trace across first failure,
+  including real timestamps, mode/fault, actuator state, target/sent/feedback
+  torques, IMU validity and feedback ages. An empty buffer or all-zero export is
+  not proof of stable operation.
+- Test fault/recovery only in a supported fixture. Software recovery must not be
+  interpreted as proof that a fallen mechanism can safely re-erect itself.
 
 Battery-voltage calibration is not applicable because the sensing input is not
 connected.

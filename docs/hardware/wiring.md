@@ -80,8 +80,15 @@ Bluetooth uses a separate UART and the kernel console sits on `tty1`, so this
 PL011 is free for the STM32 link with no overlay changes. Add the runtime user
 to the `dialout` group to open the device (`sudo usermod -aG dialout $USER`).
 
-The Pi must send a compatible model-hash `HELLO`, a fresh heartbeat, and an
-explicit mode request before either wheel can be enabled.
+Standalone `STAND` balance does not require a Pi connection. Once startup and
+actuator readiness checks succeed, the firmware may enable both wheels with no
+Pi attached. Disconnecting the Pi is **not** an emergency stop or an inhibit for
+wheel power. Secure the robot and isolate actuator power before wiring work.
+
+A compatible model-hash `HELLO`, fresh heartbeat, and explicit mode request gate
+`ACTIVE`; fresh action data additionally gates learned residuals. Link loss must
+remove motion commands/residuals while preserving authorized local balance.
+The 2026-07-16 record describes historical bring-up, not current motion acceptance.
 
 ## Power
 

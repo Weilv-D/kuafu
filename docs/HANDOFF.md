@@ -1,6 +1,6 @@
 # KUAFU 项目交接文档（给新 Agent）
 
-> 最后更新：2026-07-27。本文档面向**完全不了解本项目的工程师/Agent**，读完即可开始开发。
+> 最后更新：2026-09-13。本文档面向**完全不了解本项目的工程师/Agent**，读完即可开始开发。
 
 ---
 
@@ -161,21 +161,26 @@ EOF
 
 | 符号 | 地址 | 含义 |
 |------|------|------|
-| `g_mahony` | `0x20000340` | pitch@+40, yaw@+44 |
-| `g_lqr` | `0x20000370` | x_est@+20, x_ref@+24, x_int@+28 |
-| `g_ddsm_left/right` | `0x200003A8 / 0x200003D0` | velocity_rads@+8, health@+20 |
-| `g_servos[4]` | `0x200003F8` | 每元素 52B，health@+32 |
-| `g_startup_manager` | `0x200004C8` | phase（0=INIT..4=READY,5=FAILED） |
-| `g_safety_state` | `0x2000073C` | mode@+0, fault_mask@+12 |
-| `uwTick` | `0x20000080` | HAL 毫秒计数器 |
-| `g_system_ticks` | `0x20000008` | DRDY 1kHz 计数 |
-| `g_body_pitch / g_body_pitch_rate` | `0x20000010 / 0x20000014` | DRDY 发布的最新姿态 |
-| `g_pitch_rate_filt` | `0x2000000C` | 俯仰率一阶低通状态 |
-| `g_ctrl_tau_l / g_ctrl_tau_r` | `0x20000018 / 0x2000001C` | 缓存的轮力矩命令 |
-| `g_body_gyro` | `0x20000088` | float[3] |
-| `g_actuator_configured` | `0x20000005` | 执行器配置完成标志 |
-| `g_pi_cmd_heartbeat` | `0x2000085C` | mode@+0, vx@+4, wz@+8, d0@+12, last_hb@+16 |
-| `g_loop_heartbeat_ms` | `0x20000020` | 主循环心跳（stall 取证） |
+| `g_wheel_mode_sent` | `0x20000000` | 电流环模式补发掩码（bit0=左,bit1=右） |
+| `g_wheel_output_gate` | `0x20000001` | ★ 轮输出最终授权（250Hz 判决，持久到下个期限） |
+| `g_actuator_configured` | `0x20000008` | 执行器配置完成标志 |
+| `g_system_ticks` | `0x2000000C` | DRDY 1kHz 计数 |
+| `g_pitch_rate_filt` | `0x20000010` | 俯仰率一阶低通状态 |
+| `g_body_pitch / g_body_pitch_rate` | `0x20000014 / 0x20000018` | DRDY 发布的最新姿态 |
+| `g_ctrl_tau_l / g_ctrl_tau_r` | `0x2000001C / 0x20000020` | 缓存的轮力矩命令 |
+| `g_loop_heartbeat_ms` | `0x20000034` | 主循环心跳（stall 取证，EXTI1 观察） |
+| `g_st3215_ring` | `0x20000324` | servo RX 环：laps@+8, produced@+12, consumed@+16, overrun@+20 |
+| `g_imu` | `0x2000033C` | accel@+4, gyro@+16, temp@+28 |
+| `g_mahony` | `0x200003CC` | pitch@+40, yaw@+44 |
+| `g_ddsm_left/right` | `0x20000404 / 0x2000042C` | velocity_rads@+8, health@+20 |
+| `g_servos[4]` | `0x20000454` | 每元素 52B，health@+32 |
+| `g_startup_manager` | `0x20000524` | phase（0=INIT..4=READY,5=FAILED） |
+| `g_control_section` | `0x20000704` | ★ 控制节状态：lqr@+20（x_est@+40,x_ref@+44,x_int@+48）、supervisor.phase@+76（AC6 短枚举） |
+| `g_pi_transport` | `0x20000858` | Pi RX 环：read_idx@+6, laps@+8, produced@+12, consumed@+16, overrun@+20 |
+| `g_safety_state` | `0x20000888` | mode@+0, fault_mask@+12 |
+| `g_pi_cmd_heartbeat` | `0x200009A8` | mode@+0, vx@+4, wz@+8, d0@+12, last_hb@+16 |
+| `g_body_gyro` | `0x200000A8` | float[3] |
+| `uwTick` | `0x200000A0` | HAL 毫秒计数器 |
 
 ### 5.3 复位并抓启动 trace 的标准姿势
 
@@ -233,7 +238,9 @@ python kuafu_balance_trace.py 60
 - **LQR 断链只锚定一次**，不每拍重置位置环；架空时重锚，落地不冲撞。
 - **无转向指令时 yaw 参考跟随实测**，避免 Mahony 无磁偏漂移导致的原地旋转。
 - **USART 噪声字节（NE/FE）由 ISR 预吞**（读 SR+DR 清标志），否则单次噪声会误杀整条 DMA；ORE 仍走中止-重臂路径，并有看门狗强制重臂防止永久失聪。
-- **LQR 控制截止期**由 `lqr_deadline_pending` 锁存，保证每拍恰好一次控制更新。
+- **250Hz 控制节**在墙上时钟期限执行（与 DRDY 无关），一次期限跑完一条线性序列：安全状态机 → 监督器判决 → `g_wheel_output_gate` 门控 → LQR → trace，随后才是总线派发。门控判决持久到下个期限，LQR 与派发同守一门；DRDY 停摆只冻结遥测，不冻结故障检测与取证。
+- **模式化指令契约**：`vx/wz` 仅在 ACTIVE 生效（STAND 是位置保持，CLIMB 只驱动腿高 `D0`）；residual 还要求链路新鲜。固件不信任发送方把非本模式字段清零。
+- **RX 环 overrun 计数**：servo/Pi 两环以"圈数×容量+位置"重构生产者（TC 中断为圈数真源，圈数先于 NDTR 读取），消费滞后一整圈时精确计数丢弃字节；重臂路径重置消费端。SWD 可读 `g_st3215_ring`/`g_pi_transport` 的 overrun 字段。
 
 ### 7.6 已知约束与待验证
 
@@ -242,6 +249,7 @@ python kuafu_balance_trace.py 60
 - **架空→落地过渡**：缓存的饱和 `x_int` 加轮速突变会触发爆冲，属测试场景副产物，非产品需求（产品是"上电就站在地上"）。
 - **左轮 RS485 通信最易掉线**（timeout 计数约为右轮 2.4×）；虽不再致命，仍建议检查左轮线缆。
 - **SWD 探针偶发掉线**（`Unexpected ACK '0'`）：长 trace 会中途断，降速至 200 kHz 更稳。
+- BMI088 加计配置 `ACC_CONF=0xAC` 已按 Bosch 官方 BMI08x_SensorAPI 位域核实：高半字节带宽 NORMAL、低半字节 ODR 1600Hz，均合法；1600Hz 采样覆盖 1kHz 轮询，每通道新鲜度时间戳语义成立（来源见 `bmi088.c` 注释）。
 - 无磁力计 → Mahony yaw 长期漂移，只能做角速度阻尼，无法绝对航向保持。
 - CPU MuJoCo harness 的轮接触解算有伪影，速度环仿真不可信（pitch 环可参考）。
 - 地面测试是破坏性的（撞、浪涌欠压重启、机械冲击），不能高频裸地迭代。
