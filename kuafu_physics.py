@@ -53,6 +53,28 @@ TAU_WHEEL_STALL = 1.1   # 单轮堵转扭矩 N·m（额定 2×）
 RPM_WHEEL_RATED = 200   # 额定转速 rpm（轮缘 0.82 m/s）
 RPM_WHEEL_NOLOAD = 315  # 空载转速 rpm（轮缘 1.29 m/s）
 
+# DDSM315 wire-protocol conversion is intentionally provisional.  The vendor
+# feedback/current-unit mapping still needs a bench calibration; keep that
+# uncertainty explicit and do not silently scale measured values.  This is the
+# only source used by firmware code generation for torque<->raw conversion.
+DDSM_TORQUE_CONSTANT_PROVISIONAL = 0.75       # N·m/A, historical datasheet assumption
+DDSM_CURRENT_COMMAND_FULL_SCALE_PROVISIONAL = 8.0  # A at raw ±32767
+DDSM_RAW_FULL_SCALE = 32767.0
+DDSM_TORQUE_TO_RAW_PROVISIONAL = (
+    DDSM_RAW_FULL_SCALE
+    / (DDSM_TORQUE_CONSTANT_PROVISIONAL * DDSM_CURRENT_COMMAND_FULL_SCALE_PROVISIONAL)
+)
+DDSM_RAW_TO_TORQUE_PROVISIONAL = 1.0 / DDSM_TORQUE_TO_RAW_PROVISIONAL
+
+# Safety/control timing contracts.  The protected bus remains 4 ms, while each
+# wheel is refreshed on alternating 8 ms slots.  Feedback is held between its
+# own valid replies; bounded jitter is modeled by verification, not hidden in
+# the nominal controller period.
+WHEEL_BUS_SLOT_DT = 0.004
+WHEEL_REFRESH_DT = 0.008
+LQR_ELAPSED_DT_MAX = 0.020
+LQI_INTEGRAL_CLAMP = 0.05
+
 # 髋关节舵机 ST3215 C018 ×4（位置控制）
 TAU_STALL = 2.94        # 堵转扭矩 N·m @12V（1:345 金属齿）
 TAU_CONT = 1.0          # 连续安全扭矩 N·m
@@ -112,6 +134,18 @@ ROLL_KD = 5.0
 D0_GATE_V_THRESH = 0.3   # |v| > 此值时限制 D0_max
 D0_GATE_W_THRESH = 0.6   # |ω| > 此值时限制 D0_max
 D0_GATE_MAX_HIGH = 120.0 # 高速时 D0 上限 mm (防抬 COM topple, 临界裕度 0.19kg)
+
+
+def d0_gate_max(vx: float, wz: float) -> float:
+    """Return the final safety ceiling for a D0 command."""
+    if abs(float(vx)) > D0_GATE_V_THRESH or abs(float(wz)) > D0_GATE_W_THRESH:
+        return D0_GATE_MAX_HIGH
+    return D0_MAX
+
+
+def apply_d0_gate(d0_mm: float, vx: float, wz: float) -> float:
+    """Clamp D0 after all command/residual composition."""
+    return float(np.clip(d0_mm, D0_MIN, d0_gate_max(vx, wz)))
 
 # ============================================================
 # 域随机化范围（design.md §2.4，供 RL env 注入）
@@ -527,6 +561,12 @@ def codegen_firmware_header() -> str:
         f"#define D0_GATE_V_THRESH {D0_GATE_V_THRESH:.6f}f",
         f"#define D0_GATE_W_THRESH {D0_GATE_W_THRESH:.6f}f",
         f"#define D0_GATE_MAX_HIGH {D0_GATE_MAX_HIGH:.1f}f",
+        f"#define DDSM_TORQUE_TO_RAW_PROVISIONAL {DDSM_TORQUE_TO_RAW_PROVISIONAL:.8f}f",
+        f"#define DDSM_RAW_TO_TORQUE_PROVISIONAL {DDSM_RAW_TO_TORQUE_PROVISIONAL:.12f}f",
+        f"#define WHEEL_BUS_SLOT_DT {WHEEL_BUS_SLOT_DT:.6f}f",
+        f"#define WHEEL_REFRESH_DT {WHEEL_REFRESH_DT:.6f}f",
+        f"#define LQR_ELAPSED_DT_MAX {LQR_ELAPSED_DT_MAX:.6f}f",
+        f"#define LQI_INTEGRAL_CLAMP {LQI_INTEGRAL_CLAMP:.6f}f",
         f"#define DDSM_MAX_TORQUE_NM {TAU_WHEEL_STALL:.6f}f",
         f"#define TAU_WHEEL_RATED {TAU_WHEEL_RATED:.6f}f",
         f"#define KUAFU_YAW_KP {YAW_KP:.6f}f",
@@ -573,6 +613,9 @@ def model_hash() -> str:
         RPM_WHEEL_NOLOAD, TAU_CONT, TAU_STALL, SERVO_KP, SERVO_KV,
         SERVO_MAX_SPEED, SERVO_MAX_ACCEL, QX_RESIDUAL_SCALE, D0_RESIDUAL_SCALE,
         D0_GATE_V_THRESH, D0_GATE_W_THRESH, D0_GATE_MAX_HIGH, IK_GENERATOR_VERSION,
+        DDSM_TORQUE_CONSTANT_PROVISIONAL, DDSM_CURRENT_COMMAND_FULL_SCALE_PROVISIONAL,
+        DDSM_RAW_FULL_SCALE, WHEEL_BUS_SLOT_DT, WHEEL_REFRESH_DT,
+        LQR_ELAPSED_DT_MAX, LQI_INTEGRAL_CLAMP,
         DR_MASS, DR_COM, DR_INERTIA, DR_FRICTION, DR_WHEEL_R, DR_TORQUE_CONST,
         DR_SERVO_PD, DR_DEADBAND, DR_DELAY_ACT, DR_DELAY_SENSE,
         YAW_KP, YAW_KD, ROLL_KP, ROLL_KD, PHYS_DT, BASE_DT, RL_DT,

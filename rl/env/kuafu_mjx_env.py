@@ -85,6 +85,8 @@ ACT_HIP_B_R = 5
 # 两个分量分别进入二维五杆 IK，禁止再相加后伪装成 D0 残差。
 D0_RESIDUAL_SCALE = P.D0_RESIDUAL_SCALE
 QX_RESIDUAL_SCALE = P.QX_RESIDUAL_SCALE
+LQI_INTEGRAL_CLAMP = P.LQI_INTEGRAL_CLAMP
+WHEEL_REFRESH_DT = P.WHEEL_REFRESH_DT
 
 # 观测维度
 # 35维实机可观测帧，四步因果历史。
@@ -199,6 +201,11 @@ class EnvState:
     v_accel: jax.Array
     w_ref: jax.Array
     w_accel: jax.Array
+    # Alternating 8 ms wheel refresh: each wheel holds its last command and
+    # receives a new feedback/controller update on its own 4 ms phase slot.
+    held_tau_l: jax.Array
+    held_tau_r: jax.Array
+    wheel_phase: jax.Array
     # 上一步实际施加的动作 (延迟后, 用于 obs prev_applied_action 和 action_rate reward)
     prev_action: jax.Array
     prev_prev_action: jax.Array
@@ -494,10 +501,12 @@ class KuafuMjxEnv(MjxEnv):
         w_cmd = jp.where(is_zero, 0.0, w_cmd)
         d0_cmd = jp.where(is_zero, P.D0_MIN, d0_cmd)
         # 部署 D0 高速门控: |v|>0.3 或 |w|>0.6 时 D0 上限 120mm
+        # Final gate is also repeated after residual/roll composition below;
+        # this early gate keeps the command observation itself contract-valid.
         d0_gate_max = jp.where(
             (jp.abs(v_cmd) > P.D0_GATE_V_THRESH) | (jp.abs(w_cmd) > P.D0_GATE_W_THRESH),
             P.D0_GATE_MAX_HIGH, P.D0_MAX)
-        d0_cmd = jp.minimum(d0_cmd, d0_gate_max)
+        d0_cmd = jp.clip(d0_cmd, P.D0_MIN, d0_gate_max)
         return rng, v_cmd, w_cmd, d0_cmd
 
     # ---- 规范基层控制器（pitch LQR/LQI + yaw 命令跟踪，三轴兜底）----
@@ -561,8 +570,15 @@ class KuafuMjxEnv(MjxEnv):
         # 每侧 D0: 命令 + roll 拆分 + 独立 D0 残差；Qx 独立投影，不能混入 D0。
         d0_left = d0_cmd + d_d0_mm / 2.0 + delayed_action[3] * D0_RESIDUAL_SCALE
         d0_right = d0_cmd - d_d0_mm / 2.0 + delayed_action[5] * D0_RESIDUAL_SCALE
-        d0_left = jp.clip(d0_left, P.D0_MIN, P.D0_MAX)
-        d0_right = jp.clip(d0_right, P.D0_MIN, P.D0_MAX)
+        # Safety ordering: compose command + roll + residual first, then apply
+        # the final speed/yaw D0 gate.  Residuals may never bypass the 120 mm
+        # high-speed ceiling.
+        d0_gate_max = jp.where(
+            (jp.abs(env_state.v_cmd) > P.D0_GATE_V_THRESH)
+            | (jp.abs(env_state.w_cmd) > P.D0_GATE_W_THRESH),
+            P.D0_GATE_MAX_HIGH, P.D0_MAX)
+        d0_left = jp.clip(d0_left, P.D0_MIN, d0_gate_max)
+        d0_right = jp.clip(d0_right, P.D0_MIN, d0_gate_max)
         qx_left = jp.clip(delayed_action[2] * QX_RESIDUAL_SCALE, self._ik_qx[0], self._ik_qx[-1])
         qx_right = jp.clip(delayed_action[4] * QX_RESIDUAL_SCALE, self._ik_qx[0], self._ik_qx[-1])
         qA_l, qB_l = self._interpolate_ik(qx_left, d0_left)
@@ -952,6 +968,9 @@ class KuafuMjxEnv(MjxEnv):
             v_accel=jp.float32(0.0),
             w_ref=jp.float32(0.0),
             w_accel=jp.float32(0.0),
+            held_tau_l=jp.float32(0.0),
+            held_tau_r=jp.float32(0.0),
+            wheel_phase=jp.int32(0),
         )
 
         # 生成有效首帧观测并预填充历史: [0, 0, 0, current]
@@ -1058,6 +1077,9 @@ class KuafuMjxEnv(MjxEnv):
         v_accel = env_state.v_accel
         w_ref = env_state.w_ref
         w_accel = env_state.w_accel
+        held_tau_l = env_state.held_tau_l
+        held_tau_r = env_state.held_tau_r
+        wheel_phase = env_state.wheel_phase
         for _ in range(BASE_STEPS_PER_RL):
             # Jerk-limited velocity/yaw references; as command reaches zero the
             # integrated position and heading references freeze for hold control.
@@ -1072,13 +1094,22 @@ class KuafuMjxEnv(MjxEnv):
             wheel_vel_avg_step = (data.qvel[QVEL_WHEEL_L] + data.qvel[QVEL_WHEEL_R]) * 0.5
             x_est = x_est + wheel_vel_avg_step * WHEEL_R * BASE_DT
             yaw_ref = yaw_ref + w_ref * BASE_DT
-            x_int = jp.clip(x_int + (x_est - x_ref) * BASE_DT, -0.25, 0.25)
-            tau_wheel_l, tau_wheel_r = self._wheel_torque(
+            x_int = jp.clip(x_int + (x_est - x_ref) * BASE_DT,
+                            -LQI_INTEGRAL_CLAMP, LQI_INTEGRAL_CLAMP)
+            candidate_tau_l, candidate_tau_r = self._wheel_torque(
                 data, x_ref, x_int, yaw_ref, v_ref, w_ref,
                 delayed_action, env_state.torque_scale, x_est)
+            # The DDSM bus remains a 4 ms scheduler, but left/right commands
+            # alternate on 8 ms per-wheel refresh slots.  Between valid slots
+            # both command and feedback are held; phase 0 refreshes left and
+            # phase 1 refreshes right, giving the real 4 ms phase offset.
+            update_left = wheel_phase == 0
+            held_tau_l = jp.where(update_left, candidate_tau_l, held_tau_l)
+            held_tau_r = jp.where(update_left, held_tau_r, candidate_tau_r)
+            wheel_phase = 1 - wheel_phase
             ctrl = jp.zeros(model.nu)
-            ctrl = ctrl.at[ACT_TAU_L].set(tau_wheel_l)
-            ctrl = ctrl.at[ACT_TAU_R].set(tau_wheel_r)
+            ctrl = ctrl.at[ACT_TAU_L].set(held_tau_l)
+            ctrl = ctrl.at[ACT_TAU_R].set(held_tau_r)
             ctrl = ctrl.at[ACT_HIP_A_L].set(hip_goal[0])
             ctrl = ctrl.at[ACT_HIP_A_R].set(hip_goal[1])
             ctrl = ctrl.at[ACT_HIP_B_L].set(hip_goal[2])
@@ -1145,6 +1176,9 @@ class KuafuMjxEnv(MjxEnv):
             v_accel=v_accel,
             w_ref=w_ref,
             w_accel=w_accel,
+            held_tau_l=held_tau_l,
+            held_tau_r=held_tau_r,
+            wheel_phase=wheel_phase,
             track_v_abs_sum=env_state.track_v_abs_sum + jp.abs(metric_lin_vel - env_state.v_cmd),
             track_w_abs_sum=env_state.track_w_abs_sum + jp.abs(metric_ang_vel[2] - env_state.w_cmd),
             track_d0_abs_sum=env_state.track_d0_abs_sum + jp.abs(metric_d0 - env_state.d0_cmd),

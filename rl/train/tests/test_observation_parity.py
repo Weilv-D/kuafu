@@ -35,8 +35,9 @@ def test_action_dim_is_6():
     assert C.ACTION_DIM == 6
 
 
-def test_schema_version_is_v1_1_0():
-    assert C.SCHEMA_VERSION == "v1.1.0"
+def test_schema_version_is_v1_2_0():
+    # v1.2.0: timing/sign/torque-gating changes invalidated v1.1.0 policies.
+    assert C.SCHEMA_VERSION == "v1.2.0"
 
 
 def test_prev_applied_action_in_obs_fields():

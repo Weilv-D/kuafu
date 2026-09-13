@@ -23,7 +23,10 @@ from typing import List, Tuple
 # 契约版本
 # ============================================================
 # 破坏性修改（维度/符号/单位/协议变化）时递增次版本号或主版本号。
-SCHEMA_VERSION = "v1.1.0"
+SCHEMA_VERSION = "v1.2.0"
+# Timing/sign/torque-gating behavior changed; existing policy artifacts are not
+# compatible and must be retrained or explicitly revalidated. No legacy-policy
+# adapter is provided.
 
 # ============================================================
 # 坐标系 / 符号约定（单一真源，禁止各层各自推导）
