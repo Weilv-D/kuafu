@@ -1,6 +1,6 @@
 # KUAFU 项目交接文档（给新 Agent）
 
-> 最后更新：2026-09-13。本文档面向**完全不了解本项目的工程师/Agent**，读完即可开始开发。
+> 最后更新：2026-09-16。本文档面向**完全不了解本项目的工程师/Agent**，读完即可开始开发。
 
 ---
 
@@ -157,7 +157,7 @@ for s in syms:
 EOF
 ```
 
-然后更新脚本里的 `ADDR` 字典（**本次基线的地址见下表，仅对当前 commit 有效**）：
+然后更新脚本里的 `ADDR` 字典（**本次基线的地址见下表，仅对当前 commit 有效**；2026-09-16 逻辑审查后已对照新构建复核，下表全部有效）：
 
 | 符号 | 地址 | 含义 |
 |------|------|------|
@@ -194,19 +194,43 @@ python kuafu_balance_trace.py 60
 
 ## 6. 安全状态机（必须理解）
 
-启动序列：`WAIT_POWER → IMU_DISCOVERY → GYRO_CALIBRATION → ACTUATOR_DISCOVERY → READY`
+启动序列：`WAIT_POWER → IMU_DISCOVERY → ACTUATOR_DISCOVERY → READY`（`STARTUP_GYRO_CALIBRATION` 枚举存在但不进入——陀螺零偏标定**不阻断启动**，在后台累积，见 §7.1）
 
 运行模式（`safety_state.h`）：`INIT → STAND → ACTIVE/CLIMB → FAULT`
 
 **关键门控：**
-- **轮子授权** `wheel_authorized = (phase==READY) && (mode != FAULT)`。未授权时 DDSM 力矩强制为 0。
-- **陀螺标定静止门**：仅当三轴角速度都 < 0.08 rad/s 才累加样本（移动样本**跳过但不重置**），需 2000 个有效样本。**上电时机器人必须在地面静止 ~2s。**
-- **FAULT 是锁存的**，唯一恢复方式是**整机断电重启**（启动失败 STARTUP_FAILED 同理锁存）。
-- 新鲜度故障（IMU/轮/舵机反馈超龄）经 8 拍（32ms）去抖后锁存。当前阈值：轮 250ms、舵机 500ms、IMU 见 `pin_config.h`。
+- **轮子授权** `wheel_authorized = (phase==READY) && (mode 为运行态 STAND/ACTIVE/CLIMB) && (mode != FAULT)`。INIT 期间轮子只收只读查询帧；未授权时 DDSM 力矩强制为 0。最终输出还叠加监督器判决与电流环补发完成（`g_wheel_output_gate`，见 §7.5）。
+- **陀螺标定静止门**：仅当三轴角速度都 < 0.08 rad/s 才累加样本（移动样本**跳过但不重置**），窗口累计 1000 个有效样本（~1s）并通过方差门。**不阻断启动**——上电无需保持静止。
+- **FAULT 是锁存的**，唯一恢复方式是**整机断电重启**（启动失败 STARTUP_FAILED 同理锁存）。例外：**轮/舵机新鲜度这类瞬态故障可自动恢复**（见 §7.2）。
+- 新鲜度故障（IMU/轮/舵机反馈超龄）经 8 拍（32ms）去抖后锁存。当前阈值：轮 250ms、舵机 1000ms、IMU 20ms（`pin_config.h`）。去抖另受 100ms 迁移宽限窗抑制，但**只有设备驱动的迁移**（INIT→STAND、FAULT→STAND 恢复）发放宽限窗并清零计数器——命令驱动的迁移（模式请求、断链降级）不清零，Pi 抖动模式请求无法抑制故障（2026-09-16 修复）。
 
 ---
 
-## 7. 当前状态（截至 2026-07-27）
+## 7. 当前状态（截至 2026-09-16）
+
+### 7.0 逻辑审查记录（最新在前）
+
+#### 2026-09-16 审查
+
+在 09-13 基线之上二次全库审查（固件 + Pi5 运行时），修复 11 项缺陷并全部验证；完整清单与证据见 `docs/validation/stm32-firmware-2026-09-16.md`。对新接手者行为相关的五条：
+
+1. **宽限窗抑制孔洞已封堵**：此前**所有**模式迁移都会重置四个新鲜度陈旧计数器并重开 100ms 宽限窗——Pi 以 >10Hz 抖动 `mode_request` 即可永久抑制轮/舵机失联故障。现在只有设备驱动的迁移（INIT→STAND、FAULT→STAND 恢复）享有宽限与清零；命令驱动迁移（STAND↔ACTIVE/CLIMB、断链降级）只记时间。
+2. **50Hz 舵机写改为忙重试**：总线忙不再丢弃整个 20ms 腿部写周期（此前连续 5 次丢失会让 `LEG_HOLD_MAX_AGE_MS` 过期、监督器降级、轮输出门关闭 ~100ms——自平衡机器人即跌倒风险；单舵机劣化时总线忙占比可达 ~50%，该场景会反复出现）。`servo_intent_allowed` 语义随之改为纯模式裁决（与轮意图对称），总线仲裁归队列层。
+3. **Pi 端 D0 动态门控镜像**：`teleop_single` 此前在腿抬高 + 快推杆（|v|>0.3 或 |w|>0.6 且 d0>120mm）时每拍触发 `ValueError`，**心跳整段静默**，200ms 看门狗恰在激烈机动中降级机器人。现已在编码前镜像 120mm 门控，且 except 路径回退为安全心跳（STAND/零指令），任何坏值都不再断流。
+4. **协议解码器支持对端重启重同步**：STM32 复位后 TX 序列从 0 重来，Pi 侧单调序列门会把所有 CRC 合法帧黑洞数分钟。现在连续 8 帧被序列门拒绝即判定对端重启并重同步（孤立重复帧仍被丢弃）。
+5. **遥测过期不再静默**：`serial_node` 在遥测过期时改为显式发 STAND/零指令心跳（保持链路契约），恢复后重置观测历史；ESTOP 退出路径补 `flush()`；武装状态下的阻塞 BLE 重连改为先强制安全态。
+
+另：link_probe 的 `FAULT_BITS` 表整体错位 1 位（如 SERVO 故障被标成 WHEEL_L_LOST）已对齐固件定义，并补 FAULT 帧计数/打印、`--mode` 校验、HEALTH 长度守卫与 deadline 钳位；诊断遥测负温度 uint8 铸型饱和化；死字段 `gyro_calibrated`（三处输入结构体，从未被消费）移除。Keil 0 错误 0 警告；SWD 符号表复核后地址不变。
+
+#### 2026-09-13 审查
+
+全库深度审查（架构 + 逐模块细节）修复了 6 项缺陷，全部有回归测试覆盖并通过红绿验证；完整清单见 `docs/validation/stm32-firmware-2026-09-13.md`。对新接手者行为相关的三条：
+
+1. **上电死锁已修复**：监督器 ops-less 使能重发阶段此前在"干净上电"（从未经过故障周期）时永远无法清除 `enable_reissue_needed`——因为调度器把 `startup_ready` 与 `servo_enable_verified` 耦合为同一变量，二者同拍翻 1，而早期返回路径从不记录"verified 观察到低"。轮输出门在冷启动时永不打开。修复：每步锁存低电平观察；撤销后的重挂（drop-requirement）仅在从 READY 被降级时重新武装。
+2. **INIT 模式不再物理使能轮子**：`wheel_authorized` 额外要求运行模式，对齐模式表（INIT = 只读查询）。此前 startup READY 后、安全模式仍为 INIT 的 ~20ms 窗口里轮子已使能。
+3. **LQR 估计授权叠加 imu_fresh**：DRDY 中断线死亡时 `g_imu_control_valid` 冻结为 1，旧代码在 ~52ms 去抖故障锁存前一直按冻结姿态出力矩；现在 20ms 新鲜度界即撤销。
+
+另：st3215 UART 错误处理从 ISR 延迟到主循环（消除对 target/phase/解析器/健康计数的并发修改）；RAM 顶部 64B 取证区从链接器布局排除（IRAM2 上界 0x2001FFBF）；移除 `firmware_runtime.clear_motion` 死代码。
 
 ### 7.1 运行模式与启动
 
@@ -239,6 +263,7 @@ python kuafu_balance_trace.py 60
 - **无转向指令时 yaw 参考跟随实测**，避免 Mahony 无磁偏漂移导致的原地旋转。
 - **USART 噪声字节（NE/FE）由 ISR 预吞**（读 SR+DR 清标志），否则单次噪声会误杀整条 DMA；ORE 仍走中止-重臂路径，并有看门狗强制重臂防止永久失聪。
 - **250Hz 控制节**在墙上时钟期限执行（与 DRDY 无关），一次期限跑完一条线性序列：安全状态机 → 监督器判决 → `g_wheel_output_gate` 门控 → LQR → trace，随后才是总线派发。门控判决持久到下个期限，LQR 与派发同守一门；DRDY 停摆只冻结遥测，不冻结故障检测与取证。
+- **50Hz 舵机期限是"忙重试"而非"忙丢弃"**：sync-write/FAULT 禁使能帧被总线拒绝时保留 pending，下个调度遍重试（与轮派发的 `next_wheel_tx_ms` 同型）。这是 `LEG_HOLD_MAX_AGE_MS`（100ms）腿保持窗口的可靠性前提——连续 5 个丢失周期即关闭轮输出门。
 - **模式化指令契约**：`vx/wz` 仅在 ACTIVE 生效（STAND 是位置保持，CLIMB 只驱动腿高 `D0`）；residual 还要求链路新鲜。固件不信任发送方把非本模式字段清零。
 - **RX 环 overrun 计数**：servo/Pi 两环以"圈数×容量+位置"重构生产者（TC 中断为圈数真源，圈数先于 NDTR 读取），消费滞后一整圈时精确计数丢弃字节；重臂路径重置消费端。SWD 可读 `g_st3215_ring`/`g_pi_transport` 的 overrun 字段。
 

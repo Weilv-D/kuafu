@@ -40,6 +40,13 @@ BMI088, two DDSM315 wheel motors, and four ST3215 servos powered together.
   the ST serial protocol. The Pi USART6 ring uses the same accounting in
   `pi_transport`, and both re-arm paths (post-error abort) reset their
   consumer state so pre-restart bytes are never re-parsed.
+- The 50 Hz leg-write deadline is retry-on-busy, not drop-on-busy: a
+  refused sync-write (or FAULT torque-disable) keeps its deadline pending
+  and is retried on the next scheduler pass until a frame is actually
+  queued. Five dropped periods would expire the 100 ms leg-hold window and
+  close the wheel gate on a balancing robot, which a degraded servo bus
+  made a recurring event. This is the same retry shape the 4 ms wheel
+  dispatch has always had.
 - An `ActuatorSupervisor` is the final output verdict: after any fault (or
   restart) recovery re-issues servo torque enable and requires a transmitted
   leg hold, fresh leg feedback, a safe posture, and verified enables before
@@ -65,10 +72,12 @@ writes a provenance sidecar (`*.meta.json`) plus build/model-hash metadata.
 
 Wheel power is a separately authorized domain. Startup and `INIT` use read-only
 DDSM feedback queries; they do not send a zero-current motion command and do not
-enable either wheel. Wheel enable requires both of the following:
+enable either wheel. Wheel enable requires all of the following:
 
-1. startup phase `READY`; and
-2. no latched safety fault.
+1. startup phase `READY`;
+2. an operational mode (`STAND`/`ACTIVE`/`CLIMB`) — `INIT` keeps the domain
+   locked to read-only queries; and
+3. no latched safety fault.
 
 Self-balancing is a baseline capability that works standalone: `INIT -> STAND`
 does not require a Pi link, so after startup the robot enables its wheels and
@@ -101,7 +110,11 @@ Gyro bias calibration only accumulates samples while all gyro axes read below
 0.08 rad/s; a moving robot never completes calibration. Temperature must remain
 above 65°C continuously for 100 ms before the over-temperature fault is
 latched, which rejects isolated telemetry spikes without weakening sustained
-over-temperature protection. The IWDG window is ~1 s.
+over-temperature protection. The freshness-fault debounce (8 ticks / 32 ms)
+is additionally suppressed for 100 ms after the two device-driven mode
+transitions (INIT→STAND, FAULT→STAND recovery) only — command-driven
+transitions grant no grace and reset no counters, so a Pi flapping mode
+requests cannot hold the suppression window open. The IWDG window is ~1 s.
 
 ## Calibrated Hardware Values
 

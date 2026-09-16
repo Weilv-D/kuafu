@@ -7,7 +7,7 @@ The repository is gate-driven. A policy is eligible for deployment only after it
 ## Architecture
 
 - `kuafu_physics.py`: canonical SI/mechanical parameters, discrete controller synthesis, five-bar geometry, generated-artifact hash.
-- `rl/env/contract.py`: versioned frames, units, signs, observation/action interface, and protocol ranges. Current schema: `v1.1.0`.
+- `rl/env/contract.py`: versioned frames, units, signs, observation/action interface, and protocol ranges. Current schema: `v1.2.0` (`v1.1.0` policy artifacts are invalidated for ACTIVE deployment).
 - `rl/env/kuafu_mjx_env.py`: 500 Hz physics, 250 Hz baseline controller, 50 Hz residual policy.
 - `rl/train/`: reparameterized tanh-squashed PPO, 8-axis independent curriculum, atomic schema-aware checkpoints with CPU-first loading.
 - `rl/verify/scenario_runner.py`: frozen S0-S7 evaluation and release-gate summary.
@@ -16,7 +16,7 @@ The repository is gate-driven. A policy is eligible for deployment only after it
 - `pi5_runtime/`: ONNX actor loop, versioned UART codec, and the teleop command arbiter.
 - `stm32_firmware/`: 250 Hz reference-tracking LQR/LQI, five-bar workspace projection, safety fallback, UART endpoint.
 
-## Schema v1.1.0
+## Schema v1.2.0
 
 The Actor observes a 140-dimensional input built from four causal frames of 35 proprioceptive values. Forward velocity and yaw rate come from wheel-odometry estimates, not simulation root truth. The `prev_applied_action` field is the delayed action actually sent to actuators, not the raw policy output. The first-frame history on reset is `[0, 0, 0, current]`. A high-speed D0 gate limits D0 to 120 mm when `|v| > 0.3 m/s` or `|w| > 0.6 rad/s`.
 

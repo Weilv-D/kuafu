@@ -58,6 +58,7 @@ logs/
 
 # ---- Firmware host tests ----
 stm32_firmware/tests/build-host-msvc/
+stm32_firmware/tests/build-host/
 
 # ---- Keil MDK-ARM ----
 stm32_firmware/**/Listings/

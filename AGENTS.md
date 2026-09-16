@@ -3,7 +3,7 @@
 ## Sources Of Truth
 
 - `kuafu_physics.py`: physical parameters, timing, LQR/LQI synthesis, five-bar geometry, roll/yaw gains, model hash, generated constants.
-- `rl/env/contract.py`: schema version, frame, units, signs, observation/action contract, protocol ranges. Current schema: `v1.1.0`.
+- `rl/env/contract.py`: schema version, frame, units, signs, observation/action contract, protocol ranges. Current schema: `v1.2.0` (policy artifacts from `v1.1.0` are invalidated for ACTIVE deployment — see `policy.onnx.manifest.json`).
 - `rl/train/curriculum.py`: 8-axis independent curriculum (`AXES`, `DIFF_INDICES`, `AXIS_CONFIG`) — the single source of truth for difficulty axis order, per-axis gates, and level state. `kuafu_mjx_env.py` and `train.py` import from it.
 - `rl/train/train_config.py`: PPO hyperparameters, network architecture, training scale.
 - `docs/contracts/interface.md`: readable contract; it must agree with the executable contract.
