@@ -57,6 +57,45 @@ def test_hello_starts_a_new_sequence_session():
     assert decoder.feed(hello_frame(1, 1, P.model_hash()).encode())
 
 
+def _telemetry_frame(sequence: int):
+    from pi5_runtime.protocol import Frame, TEL_IMU
+    return Frame(TEL_IMU, sequence & 0xFFFF, 0, struct.pack(">6h", *([0] * 6))).encode()
+
+
+def test_decoder_resyncs_after_peer_sequence_restart():
+    """An STM32 reboot restarts its TX sequence at 0.
+
+    The decoder's monotonic gate used to blackhole every CRC-valid telemetry
+    frame until the rebooted counter climbed back past the pre-reboot value
+    (minutes at telemetry rates).  After a burst of consecutive sequence
+    rejections the decoder must conclude the peer restarted and resync."""
+    decoder = StreamDecoder()
+    # Establish a high-water mark with normal telemetry-rate frames.
+    for sequence in (1000, 1001, 1002):
+        assert len(decoder.feed(_telemetry_frame(sequence))) == 1
+    # Peer reboots: sequence restarts near 0.  The first RESYNC_REJECTS
+    # frames are dropped (indistinguishable from replays), then the gate
+    # must re-open and delivery resumes.
+    accepted = []
+    for sequence in range(0, StreamDecoder.RESYNC_REJECTS + 5):
+        accepted += decoder.feed(_telemetry_frame(sequence))
+    assert len(accepted) == 5
+    # Normal monotonic delivery continues afterwards.
+    assert len(decoder.feed(_telemetry_frame(100))) == 1
+    assert len(decoder.feed(_telemetry_frame(101))) == 1
+
+
+def test_decoder_still_drops_isolated_duplicates():
+    """A lone duplicate (replay) must still be dropped: the resync logic only
+    fires on a sustained rejection streak, and any accepted frame clears it."""
+    decoder = StreamDecoder()
+    first = _telemetry_frame(50)
+    assert len(decoder.feed(first)) == 1
+    assert decoder.feed(first) == []          # replay dropped
+    assert len(decoder.feed(_telemetry_frame(51))) == 1
+    assert decoder.feed(first) == []          # still dropped afterwards
+
+
 def test_relative_fivebar_fk_matches_dwell_and_extension():
     dwell = P.fivebar_fk_relative(0.0, 0.0)
     extended = P.fivebar_fk_relative(*P.fivebar_ik_cmd(P.D0_MAX))

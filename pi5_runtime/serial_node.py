@@ -14,9 +14,12 @@ import time
 
 import numpy as np
 
+from rl.env.contract import ACTION_DIM
+
 import kuafu_physics as P
 from pi5_runtime.protocol import (
-    StreamDecoder, TEL_HEALTH, TEL_IMU, TEL_JOINTS, decode_health_payload,
+    StreamDecoder, TEL_HEALTH, TEL_IMU, TEL_JOINTS, command_frames,
+    decode_health_payload,
 )
 from pi5_runtime.runtime import PolicyRuntime, Telemetry
 
@@ -67,6 +70,7 @@ class SerialPolicyNode:
         self.joints = None
         self.health = None
         self.last_imu = self.last_joints = 0.0
+        self._had_telemetry = False
 
     def set_command(self, vx: float, wz: float, d0_mm: float, mode: int = 2) -> None:
         if mode != self.command[3]:
@@ -85,7 +89,10 @@ class SerialPolicyNode:
             elif frame.type == TEL_JOINTS and len(frame.payload) == 36:
                 self.joints = decode_joint_payload(frame.payload)
                 self.last_joints = now
-            elif frame.type == TEL_HEALTH:
+            elif frame.type == TEL_HEALTH and len(frame.payload) == 46:
+                # Length-guarded like the branches above: an odd-length HEALTH
+                # frame (firmware skew, truncation) must not raise out of the
+                # control loop and kill the node with no cleanup.
                 self.health = decode_health_payload(frame.payload)
 
     def _telemetry(self) -> Telemetry | None:
@@ -119,11 +126,35 @@ class SerialPolicyNode:
             sensor_age_ms=(imu_age, imu_age, imu_age, joint_age, joint_age, joint_age),
         )
 
+    def _send_safe_frames(self) -> None:
+        """STAND request with zero commands, reusing the runtime's sequence.
+
+        Keeps the ~50 Hz heartbeat contract alive while policy output is
+        impossible (stale telemetry).  Going silent instead trips the 200 ms
+        firmware heartbeat watchdog from ACTIVE down to STAND with a stale
+        link, and a transient stall (first ONNX inference, GC pause) would
+        hand control to the watchdog for no safety benefit -- the residual
+        must stop, the heartbeat must not."""
+        ts = int(time.monotonic() * 1000)
+        heartbeat, residual = command_frames(
+            self.runtime.sequence, ts, 1, 0.0, 0.0, P.D0_MIN,
+            np.zeros(ACTION_DIM, dtype=np.float32))
+        self.runtime.sequence = (self.runtime.sequence + 2) & 0xFFFF
+        self.serial.write(heartbeat.encode() + residual.encode())
+
     def tick(self) -> bool:
         self.poll()
         telemetry = self._telemetry()
         if telemetry is None:
+            self._send_safe_frames()
+            self._had_telemetry = False
             return False
+        if not self._had_telemetry:
+            # Observation history from before the gap no longer describes the
+            # present; start the causal window over instead of fusing across
+            # the outage.
+            self.runtime.reset()
+            self._had_telemetry = True
         vx, wz, d0, mode = self.command
         _action, heartbeat, residual = self.runtime.tick(telemetry, vx, wz, d0, mode)
         self.serial.write(heartbeat + residual)
@@ -157,6 +188,12 @@ def main() -> None:
                       f"telemetry={'OK' if telemetry_ok else 'waiting'}  "
                       f"cmd={node.command}")
             deadline += period
+            now = time.monotonic()
+            if deadline < now:
+                # A stall (first ONNX inference, blocking print) must not put
+                # the loop minutes in debt: without this clamp it free-runs
+                # with sleep(0) and bursts frames far above 50 Hz.
+                deadline = now
             time.sleep(max(0.0, deadline - time.monotonic()))
     except KeyboardInterrupt:
         pass

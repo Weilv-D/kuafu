@@ -84,9 +84,19 @@ def decode_health_payload(payload: bytes) -> FirmwareHealth:
 class StreamDecoder:
     """Loss-tolerant incremental decoder matching ``pi_link_parse_packet``."""
 
+    #: Consecutive CRC-valid frames rejected by the sequence gate before the
+    #: decoder concludes the peer restarted its counter (STM32 reboot: the
+    #: firmware TX sequence restarts at 0).  Without this resync the decoder
+    #: would blackhole every telemetry frame until the rebooted counter
+    #: climbed back past the pre-reboot value -- minutes at telemetry rates.
+    #: Genuine duplicates never reach the threshold because any accepted
+    #: frame clears the streak.
+    RESYNC_REJECTS = 8
+
     def __init__(self) -> None:
         self._buffer = bytearray()
         self._last_sequence: int | None = None
+        self._sequence_rejects = 0
 
     def feed(self, chunk: bytes) -> list[Frame]:
         self._buffer.extend(chunk)
@@ -110,12 +120,17 @@ class StreamDecoder:
                 continue
             del self._buffer[:total]
             sequence = struct.unpack(">H", raw[4:6])[0]
-            if (msg_type != CMD_HELLO and self._last_sequence is not None and
-                    not (0 < ((sequence - self._last_sequence) & 0xFFFF) < 0x8000)):
-                continue
-            self._last_sequence = sequence
-            timestamp_ms = struct.unpack(">I", raw[6:10])[0]
-            frames.append(Frame(msg_type, sequence, timestamp_ms, raw[10:-2]))
+            if self._sequence_rejects >= self.RESYNC_REJECTS:
+                self._sequence_rejects = 0
+                self._last_sequence = None
+            if (msg_type == CMD_HELLO or self._last_sequence is None or
+                    0 < ((sequence - self._last_sequence) & 0xFFFF) < 0x8000):
+                self._last_sequence = sequence
+                self._sequence_rejects = 0
+                timestamp_ms = struct.unpack(">I", raw[6:10])[0]
+                frames.append(Frame(msg_type, sequence, timestamp_ms, raw[10:-2]))
+            else:
+                self._sequence_rejects += 1
         return frames
 
 

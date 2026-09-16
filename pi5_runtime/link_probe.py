@@ -44,6 +44,7 @@ from pi5_runtime.protocol import (
     Frame,
     StreamDecoder,
     TEL_DIAG,
+    TEL_FAULT,
     TEL_HEALTH,
     TEL_IMU,
     TEL_JOINTS,
@@ -60,18 +61,20 @@ MODE_CLIMB = 3
 MODE_FAULT = 4
 MODE_NAMES = {0: "INIT", 1: "STAND", 2: "ACTIVE", 3: "CLIMB", 4: "FAULT"}
 
-# 固件 fault_mask 位定义 (见 safety_state.c, docs/architecture/system.md 十类故障)
+# 固件 fault_mask 位定义 (见 safety_state.h, docs/architecture/system.md 十类故障)
+# bit1 (FAULT_HEARTBEAT) 在固件中保留未用, 此处同样保留占位以保证对齐。
 FAULT_BITS = {
     0: "OVER_TILT",
-    1: "OVER_PITCH_RATE",
+    1: "HEARTBEAT(unused)",
     2: "OVER_TEMP",
-    3: "IMU_LOST",
-    4: "WHEEL_L_LOST",
-    5: "WHEEL_R_LOST",
-    6: "SERVO_LOST",
-    7: "ESTOP",
-    8: "INIT_FAILED",
-    9: "INTERNAL",
+    3: "ESTOP",
+    4: "SERVO_LOST",
+    5: "IMU_LOST",
+    6: "WHEEL_L_LOST",
+    7: "WHEEL_R_LOST",
+    8: "OVER_PITCH_RATE",
+    9: "INIT_FAILED",
+    10: "INTERNAL",
 }
 
 
@@ -139,7 +142,7 @@ def main() -> None:
     parser.add_argument("--port", default="/dev/ttyAMA10",
                         help="串口设备 (Pi5 JST 调试口 = /dev/ttyAMA10)")
     parser.add_argument("--baudrate", type=int, default=921600)
-    parser.add_argument("--mode", type=int, default=MODE_STAND,
+    parser.add_argument("--mode", type=int, default=MODE_STAND, choices=range(5),
                         help="请求的固件模式: 0=INIT 1=STAND 2=ACTIVE 3=CLIMB 4=FAULT(ESTOP)")
     parser.add_argument("--duration", type=float, default=0.0,
                         help="运行秒数, 0=无限 (Ctrl-C 退出)")
@@ -187,7 +190,7 @@ def main() -> None:
     start = time.monotonic()
 
     # 统计
-    counts = {TEL_IMU: 0, TEL_JOINTS: 0, TEL_HEALTH: 0, TEL_DIAG: 0}
+    counts = {TEL_IMU: 0, TEL_JOINTS: 0, TEL_HEALTH: 0, TEL_DIAG: 0, TEL_FAULT: 0}
     last_health = None
     last_print = 0.0
     last_mode_seen = None
@@ -224,6 +227,8 @@ def main() -> None:
 
                 # 记录并检测模式变化
                 if frame.type == TEL_HEALTH:
+                    if len(frame.payload) != 46:
+                        continue
                     h = decode_health_payload(frame.payload)
                     last_health = h
                     if h.mode != last_mode_seen:
@@ -244,6 +249,11 @@ def main() -> None:
                     last_print = now
 
             deadline += period
+            now = time.monotonic()
+            if deadline < now:
+                # 任何停顿 (打印阻塞等) 不得让循环背上时间债后以 sleep(0) 空转
+                # 连发帧, 钳位到当前时刻恢复 50 Hz 节奏。
+                deadline = now
             time.sleep(max(0.0, deadline - time.monotonic()))
 
     except KeyboardInterrupt:
@@ -255,6 +265,9 @@ def main() -> None:
             hb, act = make_heartbeat_action_frames(sequence, ts, MODE_FAULT)
             try:
                 ser.write(hb.encode() + act.encode())
+                # 排空 OS 缓冲: close() 不保证缓冲中的字节真的上了线,
+                # 安全关键的 ESTOP 帧必须显式 flush。
+                ser.flush()
                 print(f"[ESTOP] 已发送 mode=FAULT(4) 帧")
             except Exception:
                 pass
@@ -300,12 +313,22 @@ def _handle_frame(frame: Frame, quiet: bool, elapsed: float) -> None:
         bat_mv, temp_c, legacy = struct.unpack(">HBB", frame.payload)
         print(f"[{elapsed:6.2f}s] RX DIAG battery={bat_mv}mV temp={temp_c}C "
               f"(bat=0 表示未接线)")
+    elif frame.type == TEL_FAULT and len(frame.payload) == 1:
+        # FAULT 帧 = 固件正在主动报告锁存故障, 探针必须显式打出来而不是
+        # 静默忽略。payload 是 8 位 legacy 掩码 (低 8 位 + 高位故障折叠为 0x80)。
+        legacy = frame.payload[0]
+        low_bits = [name for bit, name in FAULT_BITS.items()
+                    if bit < 8 and legacy & (1 << bit)]
+        folded = " |HIGH(serious)" if legacy & 0x80 and len(low_bits) == 0 else ""
+        names = ",".join(low_bits) if low_bits else "none"
+        print(f"[{elapsed:6.2f}s] RX FAULT legacy=0x{legacy:02X} ({names}{folded})")
 
 
 def _print_summary(counts: dict, health, elapsed: float) -> None:
     print(f"\n--- 摘要 @{elapsed:.1f}s ---")
     print(f"  收到帧数: IMU={counts[TEL_IMU]} Joints={counts[TEL_JOINTS]} "
-          f"Health={counts[TEL_HEALTH]} Diag={counts[TEL_DIAG]}")
+          f"Health={counts[TEL_HEALTH]} Diag={counts[TEL_DIAG]} "
+          f"Fault={counts[TEL_FAULT]}")
     if health is not None:
         print(f"  当前模式: {MODE_NAMES.get(health.mode, health.mode)}")
         print(f"  故障掩码: {fault_str(health.fault_mask)}")
@@ -321,7 +344,9 @@ def _print_verdict(counts: dict, health, last_mode: int | None) -> None:
         print("     Pi5 UART 是否启用、STM32 是否上电并烧录了固件")
         return
     print(f"  ✅ 收到 {total_rx} 帧 (IMU={counts[TEL_IMU]} Joints={counts[TEL_JOINTS]} "
-          f"Health={counts[TEL_HEALTH]} Diag={counts[TEL_DIAG]})")
+          f"Health={counts[TEL_HEALTH]} Diag={counts[TEL_DIAG]} Fault={counts[TEL_FAULT]})")
+    if counts[TEL_FAULT] > 0 and health is None:
+        print("  ⚠️  收到 FAULT 帧但无 HEALTH 帧: 固件已锁存故障, 详见上方 FAULT 行")
     if health is not None:
         if health.fault_mask == 0:
             print(f"  ✅ 无故障锁存 (fault_mask=0)")

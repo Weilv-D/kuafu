@@ -17,12 +17,14 @@ carry ``(mode, v, ω, D0)`` and a zero residual (baseline LQR only).
 
 Two-state arm/disarm model
 --------------------------
+Default buttons (Xbox-style js0 numbering, override via ``KUAFU_BTN_*``):
+
 ==============  ==============  ==================  ====================
 State           Button         Wire mode           Firmware behaviour
 ==============  ==============  ==================  ====================
-DISARMED (def)  Back / btn8    IDLE → STAND(1)     LQR holds balance,
+DISARMED (def)  Back / btn6    IDLE → STAND(1)     LQR holds balance,
                                                   wheels do not track
-ARMED           START / btn9   MANUAL → ACTIVE(2)  LQR tracks v/ω commands
+ARMED           START / btn7   MANUAL → ACTIVE(2)  LQR tracks v/ω commands
 ESTOP           A / btn0       ESTOP → FAULT(4)    Latched stop
 ==============  ==============  ==================  ====================
 
@@ -173,7 +175,8 @@ def main() -> None:
     last_poll = start
     tick = 0
     last_mode = None
-    last_report = 0.0
+    last_report = 0.0        # STM32 status printer (health frames)
+    last_idle_note = 0.0     # "still idle" reminder (independent cadence)
     last_reconnect = 0.0
     was_idle = False
     zero_action = np.zeros(ACTION_DIM, dtype=np.float32)
@@ -201,6 +204,9 @@ def main() -> None:
                         last_reconnect = now
                 if not joy.connected:
                     mode = 4  # ESTOP if no gamepad
+                    # A lost gamepad must not keep replaying its last stick
+                    # values alongside the FAULT request.
+                    v_cmd = w_cmd = 0.0
             else:
                 joy.poll()
 
@@ -209,11 +215,22 @@ def main() -> None:
                     if not was_idle:
                         print("[teleop] ⚠️  gamepad idle — push a stick to wake")
                         was_idle = True
-                    elif int(now) % 5 == 0 and now - last_report > 4.5:
+                    elif int(now) % 5 == 0 and now - last_idle_note > 4.5:
                         print(f"[teleop] still idle ({joy.idle_seconds:.0f}s)")
-                        last_report = now
+                        last_idle_note = now
                     if (bt_mac and joy.idle_seconds > idle_reconnect
                             and now - last_reconnect > 15.0):
+                        if armed:
+                            # The BLE reconnect below blocks for seconds
+                            # (bluetoothctl + evdev reopen).  It must never
+                            # stall the 50 Hz heartbeat while the robot could
+                            # be tracking commands, so force the safe state
+                            # first; the sticks are centered anyway (idle).
+                            armed = False
+                            v_cmd = w_cmd = 0.0
+                            mode = 1
+                            print("[teleop] idle while ARMED -> DISARMED "
+                                  "before BLE reconnect", flush=True)
                         print(f"[teleop] idle {joy.idle_seconds:.0f}s, "
                               f"reconnecting {bt_mac} ...")
                         from rl.teleop.bt_wakeup import bt_reconnect
@@ -274,23 +291,41 @@ def main() -> None:
             # --- send command (50 Hz) ---
             if tick % 2 == 0:
                 ts = int(now * 1000)
+                # Mirror the firmware's dynamic D0 gate before encoding: with
+                # D0 raised above 120 mm, pushing the stick past 0.3 m/s (or
+                # 0.6 rad/s) used to make command_frames raise every tick, and
+                # the except path below sent NOTHING -- the heartbeat went
+                # silent exactly during aggressive motion and the firmware's
+                # 200 ms watchdog demoted the robot mid-command.
+                d0_tx = d0
+                if abs(v_cmd) > P.D0_GATE_V_THRESH or abs(w_cmd) > P.D0_GATE_W_THRESH:
+                    d0_tx = min(d0_tx, P.D0_GATE_MAX_HIGH)
                 try:
                     hb, res = command_frames(seq, ts, mode, v_cmd, w_cmd,
-                                             d0, zero_action)
+                                             d0_tx, zero_action)
                     seq = (seq + 2) & 0xFFFF
                     sent = hb.encode() + res.encode()
                     ser.write(sent)
                     # Debug: print first heartbeat of each mode
                     if last_cmd_mode != mode:
                         print(f"[teleop] TX hb mode={mode} v={v_cmd:.2f} w={w_cmd:.2f} "
-                              f"d0={d0:.1f} seq={seq-2:04X} {sent[:8].hex()}...")
+                              f"d0={d0_tx:.1f} seq={seq-2:04X} {sent[:8].hex()}...")
                         last_cmd_mode = mode
                 except (ValueError, OSError) as exc:
                     print(f"[teleop] TX FAILED: {exc}", flush=True)
+                    # Defense in depth: never let a bad value silence the
+                    # heartbeat -- fall back to the safest valid request.
+                    try:
+                        hb, res = command_frames(seq, ts, 1, 0.0, 0.0,
+                                                 P.D0_MIN, zero_action)
+                        seq = (seq + 2) & 0xFFFF
+                        ser.write(hb.encode() + res.encode())
+                    except (ValueError, OSError):
+                        pass
 
             # --- read telemetry ---
             for frame in decoder.feed(ser.read(256)):
-                if frame.type == TEL_HEALTH:
+                if frame.type == TEL_HEALTH and len(frame.payload) == 46:
                     h = decode_health_payload(frame.payload)
                     labels = {0: "STARTUP", 1: "STAND", 2: "ACTIVE",
                               3: "CLIMB", 4: "FAULT"}
@@ -316,6 +351,9 @@ def main() -> None:
             hb, res = command_frames(seq, ts, 4, 0.0, 0.0,
                                      P.D0_MIN, zero_action)
             ser.write(hb.encode() + res.encode())
+            # Drain the OS buffer: close() alone gives no guarantee that the
+            # final safety-critical frame ever reaches the wire.
+            ser.flush()
         except (ValueError, OSError):
             pass
         ser.close()
