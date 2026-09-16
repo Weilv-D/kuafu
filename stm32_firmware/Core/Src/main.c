@@ -106,15 +106,6 @@ static uint8_t g_imu_control_valid = 0U;
 static uint32_t g_leg_hold_tx_ms = 0U;
 #define LEG_HOLD_MAX_AGE_MS 100U
 
-/* Balance-trace validity bits (balance_trace.h keeps fields raw uint32). */
-#define TRACE_VALID_IMU        (1u << 0)
-#define TRACE_VALID_WHEEL_L    (1u << 1)
-#define TRACE_VALID_WHEEL_R    (1u << 2)
-#define TRACE_VALID_TARGET     (1u << 3)
-#define TRACE_VALID_SENT       (1u << 4)
-#define TRACE_VALID_FEEDBACK   (1u << 5)
-#define TRACE_SENT_MAX_AGE_MS  10U
-
 /* Max consecutive servo failures before a fatal FAULT lockdown */
 #define SERVO_FAIL_LIMIT         3
 
@@ -361,10 +352,14 @@ int main(void) {
         Actuator_Feedback_Snapshot(&left_feedback, &right_feedback, servo_feedback);
         /* Wheel torque authorization for the LQR self-balance loop.
          * Self-balancing is a baseline capability that must work standalone
-         * (no Pi), so it is gated only on startup completion + no fault + a
-         * sane operating mode. Pi link freshness only gates the ACTIVE-mode
-         * motion commands, not the balance loop itself. */
+         * (no Pi), so it is gated only on startup completion + an operational
+         * mode + no fault.  INIT is deliberately excluded: the documented
+         * state contract keeps the wheel power domain locked (read-only
+         * queries) until the safety machine reaches STAND.  Pi link freshness
+         * only gates the ACTIVE-mode motion commands, not the balance loop
+         * itself. */
         wheel_authorized = (uint8_t)(g_startup_manager.phase == STARTUP_READY &&
+                                     g_safety_state.current_mode != STATE_INIT &&
                                      g_safety_state.current_mode != STATE_FAULT);
 
         runtime_inputs.now_ms = startup_now;
@@ -394,7 +389,6 @@ int main(void) {
         }
         startup_inputs.now_ms = startup_now;
         startup_inputs.imu_initialized = g_imu.initialized;
-        startup_inputs.gyro_calibrated = g_safety_state.is_gyro_calibrated;
         /* Per-channel IMU validity: a dead accelerometer must not be masked by
          * a live gyro (or vice versa) through the legacy aggregate health. */
         startup_inputs.accel_valid = bmi088_accel_healthy(&g_imu, startup_now,
@@ -474,12 +468,12 @@ int main(void) {
 
     /* Wheel power is a separately armed safety domain.  Discovery and
      * zero-current polling run while disabled.  Arming is authorized by the
-     * standalone balance conditions only — startup READY and no latched
-     * fault — because self-balancing is a baseline capability that must not
-     * depend on the Pi link; Pi link freshness gates ACTIVE-mode commands
-     * (residuals, velocity), never the balance loop itself.  Authorization
-     * is revoked whenever either condition drops, which queues the physical
-     * disable frames below. */
+     * standalone balance conditions only — startup READY, an operational
+     * (non-INIT) mode, and no latched fault — because self-balancing is a
+     * baseline capability that must not depend on the Pi link; Pi link
+     * freshness gates ACTIVE-mode commands (residuals, velocity), never the
+     * balance loop itself.  Authorization is revoked whenever any condition
+     * drops, which queues the physical disable frames below. */
         if (wheel_authorized && wheel_enable_mask != 0x03U && ddsm_bus_is_idle(&g_ddsm_bus)) {
             if ((wheel_enable_mask & 0x01U) == 0U) {
                 if (ddsm_bus_queue_enable(&g_ddsm_bus, &g_ddsm_left, 1U, startup_now) == 0) {
@@ -575,7 +569,6 @@ int main(void) {
                                                          SAFETY_WHEEL_MAX_AGE_MS);
             cs_in.servos_fresh = servos_fresh;
             cs_in.requested_mode = g_pi_cmd_heartbeat.mode_request;
-            cs_in.gyro_calibrated = g_safety_state.is_gyro_calibrated;
             cs_in.startup_ready = servos_enabled;
             cs_in.actuator_configured = g_actuator_configured;
             cs_in.wheel_authorized = wheel_authorized;
@@ -801,8 +794,15 @@ int main(void) {
             /* --- Slot 3: Diagnostic packages & main controller logic --- */
             else if (slot == 3) {
                 /* Battery sensing is not populated on this hardware.  Zero is
-                 * the protocol sentinel for unavailable, not an undervoltage. */
-                pi_link_send_diag(&huart6, 0U, (uint8_t)g_imu.temperature,
+                 * the protocol sentinel for unavailable, not an undervoltage.
+                 * The BMI088 covers -40..85 degC; saturate before the uint8
+                 * field because a negative float-to-unsigned cast is UB and
+                 * would wrap (e.g. -5 degC -> 251) on a cold bench. */
+                uint8_t diag_temp_c =
+                    (g_imu.temperature < 0.0f) ? 0U :
+                    ((g_imu.temperature > 255.0f) ? 255U
+                                                  : (uint8_t)g_imu.temperature);
+                pi_link_send_diag(&huart6, 0U, diag_temp_c,
                                   safety_state_legacy_fault_mask());
 
                 if (++health_telemetry_divider >= 25U) {
@@ -842,17 +842,28 @@ int main(void) {
         /* --- 50 Hz Background Loop: ST3215 Servo Control --- */
         uint32_t current_time = HAL_GetTick();
         if (g_actuator_configured && servo_deadline_pending) {
-            servo_deadline_pending = 0U;
-
             uint8_t ids[4] = {SERVO_LF_ID, SERVO_RF_ID, SERVO_LB_ID, SERVO_RB_ID};
+            /* A servo deadline is "served" once a frame was actually queued,
+             * the mode has nothing to transmit (INIT), or the request is
+             * statically unsolvable (IK rejected its already-clamped inputs —
+             * deterministic, so an immediate retry cannot help).  A BUSY servo
+             * bus keeps the deadline pending so the write is retried on the
+             * next scheduler pass instead of being dropped for a whole 20 ms
+             * period.  Five dropped periods would expire LEG_HOLD_MAX_AGE_MS,
+             * demote the actuator supervisor, and close the wheel gate for
+             * ~100 ms on a balancing robot — with one degraded servo timing
+             * out ~10 ms of every 24 ms poll cycle that happened often enough
+             * to matter.  The wheel dispatch layer already had this retry
+             * shape (next_wheel_tx_ms only advances on success). */
+            uint8_t servo_deadline_served = 0U;
 
 #if SERVO_ZERO_CALIBRATION_MODE
             /* Position commands are intentionally suppressed. System setup
              * has already disabled torque; feedback polling below still runs. */
             (void)ids;
+            servo_deadline_served = 1U;
 #else
-            if (g_safety_state.current_mode == STATE_ACTIVE &&
-                runtime_outputs.servo_intent_allowed) {
+            if (g_safety_state.current_mode == STATE_ACTIVE) {
                 /* Pi supplies bounded workspace residuals.  Project them through
                  * the same dwell-relative (Qx,D0) five-bar IK as the simulator. */
                 Pi_Command_Heartbeat_t hb;
@@ -885,12 +896,14 @@ int main(void) {
                     if (st3215_bus_queue_sync_write(&g_st3215_bus, ids, 4U,
                                                     pos_ticks, speed_ticks, accels) == 0) {
                         g_leg_hold_tx_ms = current_time;
+                        servo_deadline_served = 1U;
                     }
+                } else {
+                    servo_deadline_served = 1U; /* unsolvable request: skip */
                 }
             }
-            else if ((g_safety_state.current_mode == STATE_STAND ||
-                      g_safety_state.current_mode == STATE_CLIMB) &&
-                     runtime_outputs.servo_intent_allowed) {
+            else if (g_safety_state.current_mode == STATE_STAND ||
+                     g_safety_state.current_mode == STATE_CLIMB) {
                 /* Standing/Climbing virtual height mode */
                 Pi_Command_Heartbeat_t hb;
                 Pi_Command_Action_t act;
@@ -914,21 +927,36 @@ int main(void) {
                     if (st3215_bus_queue_sync_write(&g_st3215_bus, ids, 4U,
                                                     pos_ticks, speed_ticks, accels) == 0) {
                         g_leg_hold_tx_ms = current_time;
+                        servo_deadline_served = 1U;
                     }
+                } else {
+                    servo_deadline_served = 1U; /* unsolvable request: skip */
                 }
             }
             else if (g_safety_state.current_mode == STATE_FAULT) {
                 /* Lockdown: disable servo torque once to allow gravity lock.
                  * Sending the disable every 50 Hz cycle floods the full-duplex
                  * bus with echo bytes that desync subsequent read queries, so a
-                 * one-shot flag is used instead of repeated transmission. */
-                if (fault_servo_disable_idx < 4U &&
-                    st3215_bus_queue_torque(&g_st3215_bus,
-                                            ids[fault_servo_disable_idx], 0U) == 0) {
+                 * one-shot flag is used instead of repeated transmission.
+                 * A busy bus leaves the deadline pending so the (single next)
+                 * disable frame is retried on the following pass. */
+                if (fault_servo_disable_idx >= 4U) {
+                    servo_deadline_served = 1U; /* one-shot complete */
+                } else if (st3215_bus_queue_torque(&g_st3215_bus,
+                                                   ids[fault_servo_disable_idx],
+                                                   0U) == 0) {
                     ++fault_servo_disable_idx;
+                    servo_deadline_served = 1U;
                 }
             }
+            else {
+                /* INIT: no leg command on the wire; the deadline is served. */
+                servo_deadline_served = 1U;
+            }
 #endif
+            if (servo_deadline_served) {
+                servo_deadline_pending = 0U;
+            }
         }
 
         /* Poll every servo round-robin, including offline devices, so a valid

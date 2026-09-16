@@ -24,7 +24,8 @@ typedef struct {
     uint8_t imu_initialized;
     uint8_t accel_valid;
     uint8_t gyro_valid;
-    uint8_t gyro_calibrated;
+    /* Gyro bias calibration is deliberately absent: it accumulates in the
+     * background (safety_state_gyro_calib_update) and never gates startup. */
     uint8_t wheel_l_online;
     uint8_t wheel_r_online;
     uint8_t servos_online;

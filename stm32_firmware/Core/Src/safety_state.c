@@ -126,6 +126,31 @@ static uint8_t freshness_under_grace(uint32_t now_ms) {
             (uint32_t)(now_ms - g_safety_state.mode_grace_until_ms) > (uint32_t)(1UL << 31));
 }
 
+/* Device-driven transitions (INIT->STAND, FAULT->STAND recovery) genuinely
+ * change what the buses and the mode machine are asking of the devices, so
+ * they earn the freshness-fault grace window and a stale-counter reset.
+ * Command-driven transitions (Pi mode requests, link-loss demotion to STAND)
+ * change no device state: granting them the same reset would let a Pi that
+ * flaps mode_request at >10 Hz keep the four stale counters cleared and the
+ * grace window permanently open, suppressing freshness faults (wheel loss,
+ * servo loss) indefinitely while the wheels stay enabled.  Those transitions
+ * therefore only record the time. */
+static void enter_mode_with_grace(RobotMode_t mode, const SafetyInputs_t *inputs) {
+    g_safety_state.current_mode = mode;
+    g_safety_state.mode_timer_ms = inputs->now_ms;
+    g_safety_state.mode_grace_until_ms =
+        inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
+    imu_stale_ticks = 0U;
+    wheel_l_stale_ticks = 0U;
+    wheel_r_stale_ticks = 0U;
+    servo_stale_ticks = 0U;
+}
+
+static void enter_mode_command_driven(RobotMode_t mode, const SafetyInputs_t *inputs) {
+    g_safety_state.current_mode = mode;
+    g_safety_state.mode_timer_ms = inputs->now_ms;
+}
+
 static FaultMask_t runtime_faults(const SafetyInputs_t *inputs) {
     FaultMask_t faults = FAULT_NONE;
     if (!isfinite(inputs->pitch_rad)) faults |= FAULT_TILT;
@@ -235,14 +260,7 @@ SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs) {
             g_safety_state.fault_mask &= ~((FaultMask_t)FAULT_SERVO);
         }
         if (g_safety_state.fault_mask == 0U) {
-            g_safety_state.current_mode = STATE_STAND;
-            g_safety_state.mode_timer_ms = inputs->now_ms;
-            g_safety_state.mode_grace_until_ms =
-                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
-            imu_stale_ticks = 0U;
-            wheel_l_stale_ticks = 0U;
-            wheel_r_stale_ticks = 0U;
-            servo_stale_ticks = 0U;
+            enter_mode_with_grace(STATE_STAND, inputs);
         }
         return decision;
     }
@@ -256,14 +274,7 @@ SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs) {
         }
         if (inputs->startup_ready && inputs->imu_fresh &&
             inputs->wheel_l_fresh && inputs->wheel_r_fresh && inputs->servos_fresh) {
-            g_safety_state.current_mode = STATE_STAND;
-            g_safety_state.mode_timer_ms = inputs->now_ms;
-            g_safety_state.mode_grace_until_ms =
-                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
-            imu_stale_ticks = 0U;
-            wheel_l_stale_ticks = 0U;
-            wheel_r_stale_ticks = 0U;
-            servo_stale_ticks = 0U;
+            enter_mode_with_grace(STATE_STAND, inputs);
         }
         return decision;
     }
@@ -278,44 +289,16 @@ SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs) {
     if (g_safety_state.current_mode == STATE_STAND) {
         if (inputs->requested_mode == (uint8_t)STATE_ACTIVE &&
             inputs->link_compatible && inputs->heartbeat_fresh) {
-            g_safety_state.current_mode = STATE_ACTIVE;
-            g_safety_state.mode_timer_ms = inputs->now_ms;
-            g_safety_state.mode_grace_until_ms =
-                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
-            imu_stale_ticks = 0U;
-            wheel_l_stale_ticks = 0U;
-            wheel_r_stale_ticks = 0U;
-            servo_stale_ticks = 0U;
+            enter_mode_command_driven(STATE_ACTIVE, inputs);
         }
     } else if (g_safety_state.current_mode == STATE_ACTIVE) {
         if (!inputs->link_compatible || !inputs->heartbeat_fresh) {
             decision.enter_hold = 1U;
-            g_safety_state.current_mode = STATE_STAND;
-            g_safety_state.mode_timer_ms = inputs->now_ms;
-            g_safety_state.mode_grace_until_ms =
-                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
-            imu_stale_ticks = 0U;
-            wheel_l_stale_ticks = 0U;
-            wheel_r_stale_ticks = 0U;
-            servo_stale_ticks = 0U;
+            enter_mode_command_driven(STATE_STAND, inputs);
         } else if (inputs->requested_mode == (uint8_t)STATE_STAND) {
-            g_safety_state.current_mode = STATE_STAND;
-            g_safety_state.mode_timer_ms = inputs->now_ms;
-            g_safety_state.mode_grace_until_ms =
-                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
-            imu_stale_ticks = 0U;
-            wheel_l_stale_ticks = 0U;
-            wheel_r_stale_ticks = 0U;
-            servo_stale_ticks = 0U;
+            enter_mode_command_driven(STATE_STAND, inputs);
         } else if (inputs->requested_mode == (uint8_t)STATE_CLIMB) {
-            g_safety_state.current_mode = STATE_CLIMB;
-            g_safety_state.mode_timer_ms = inputs->now_ms;
-            g_safety_state.mode_grace_until_ms =
-                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
-            imu_stale_ticks = 0U;
-            wheel_l_stale_ticks = 0U;
-            wheel_r_stale_ticks = 0U;
-            servo_stale_ticks = 0U;
+            enter_mode_command_driven(STATE_CLIMB, inputs);
         }
         if (!inputs->action_fresh) {
             decision.clear_action = 1U;
@@ -323,32 +306,11 @@ SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs) {
     } else if (g_safety_state.current_mode == STATE_CLIMB) {
         if (!inputs->link_compatible || !inputs->heartbeat_fresh) {
             decision.enter_hold = 1U;
-            g_safety_state.current_mode = STATE_STAND;
-            g_safety_state.mode_timer_ms = inputs->now_ms;
-            g_safety_state.mode_grace_until_ms =
-                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
-            imu_stale_ticks = 0U;
-            wheel_l_stale_ticks = 0U;
-            wheel_r_stale_ticks = 0U;
-            servo_stale_ticks = 0U;
+            enter_mode_command_driven(STATE_STAND, inputs);
         } else if (inputs->requested_mode == (uint8_t)STATE_ACTIVE) {
-            g_safety_state.current_mode = STATE_ACTIVE;
-            g_safety_state.mode_timer_ms = inputs->now_ms;
-            g_safety_state.mode_grace_until_ms =
-                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
-            imu_stale_ticks = 0U;
-            wheel_l_stale_ticks = 0U;
-            wheel_r_stale_ticks = 0U;
-            servo_stale_ticks = 0U;
+            enter_mode_command_driven(STATE_ACTIVE, inputs);
         } else if (inputs->requested_mode == (uint8_t)STATE_STAND) {
-            g_safety_state.current_mode = STATE_STAND;
-            g_safety_state.mode_timer_ms = inputs->now_ms;
-            g_safety_state.mode_grace_until_ms =
-                inputs->now_ms + SAFETY_MODE_TRANSITION_GRACE_MS;
-            imu_stale_ticks = 0U;
-            wheel_l_stale_ticks = 0U;
-            wheel_r_stale_ticks = 0U;
-            servo_stale_ticks = 0U;
+            enter_mode_command_driven(STATE_STAND, inputs);
         }
     } else {
         safety_state_trigger_fault(FAULT_INTERNAL);

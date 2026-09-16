@@ -203,6 +203,59 @@ static void test_pitch_fade_limits_fallen_robot_torque(void) {
     TEST_NEAR(0.0f, out.torque_left_nm, 1e-6f);
 }
 
+static void test_boot_reaches_gate_with_coupled_enable_flags(void) {
+    /* main.c feeds the section with startup_ready and servo_enable_verified
+     * driven by the SAME sequencer variable (servos_enabled): they flip
+     * 0->1 TOGETHER at the deadline the servo enable sequence completes, so
+     * servo_enable_verified is never observed low while startup_ready is 1.
+     * The supervisor must still clear its enable-reissue stage from the
+     * low observations made during the pre-READY phase, or the gate stays
+     * closed for the whole power-on session. */
+    ControlSectionOutputs_t out;
+    int i;
+    reset_world();
+    base_inputs.startup_ready = 0U;
+    base_inputs.servo_enable_verified = 0U;
+    base_inputs.leg_hold_tx_recent = 0U;
+    base_inputs.leg_feedback_fresh = 0U;
+    /* Pre-READY deadlines: supervisor parked in the revocation/STARTUP
+     * branches while the sequencer is still enabling the servos. */
+    run_deadline(1000U, 0.0f);
+    run_deadline(1004U, 0.0f);
+    /* servos_enabled flips: safety INIT->STAND, both coupled inputs 1. */
+    base_inputs.startup_ready = 1U;
+    base_inputs.servo_enable_verified = 1U;
+    out = run_deadline(1008U, 0.0f);
+    TEST_TRUE(!out.wheel_output_gate); /* no leg hold on the wire yet */
+    base_inputs.leg_hold_tx_recent = 1U;
+    base_inputs.leg_feedback_fresh = 1U;
+    for (i = 0; i < 6; ++i) {          /* bounded: must not need a fault */
+        out = run_deadline(1012U + 4U * (uint32_t)i, 0.0f);
+    }
+    TEST_TRUE(out.wheel_output_gate);
+}
+
+static void test_stale_imu_freshness_revokes_torque(void) {
+    /* DRDY-line death freezes g_imu_control_valid at its last value while
+     * the published attitude is frozen with it; the section must also
+     * require pair freshness before computing torque.  A nonzero pitch
+     * makes the stale computation produce nonzero torque, so the assertion
+     * has discriminating power against the old filter-verdict-only gate. */
+    ControlSectionOutputs_t out;
+    float stale_torque = 0.0f;
+    reset_world();
+    bring_to_stand();
+    base_inputs.imu_fresh = 1U;        /* control case: fresh pair */
+    out = run_deadline(1200U, 0.05f);
+    stale_torque = out.torque_left_nm;
+    TEST_TRUE(fabsf(stale_torque) > 1e-3f); /* leaning body -> real torque */
+    base_inputs.imu_fresh = 0U;        /* now the pair goes stale */
+    out = run_deadline(1204U, 0.05f);
+    TEST_TRUE(out.wheel_output_gate);  /* gate open: devices fine */
+    TEST_NEAR(0.0f, out.torque_left_nm, 1e-6f); /* but no stale-authority torque */
+    TEST_NEAR(0.0f, out.torque_right_nm, 1e-6f);
+}
+
 void run_control_section_tests(void) {
     test_gate_closed_until_all_verdicts_open();
     test_supervisor_denial_blocks_torque_every_deadline();
@@ -210,4 +263,6 @@ void run_control_section_tests(void) {
     test_fault_entry_pulses_once_and_latches();
     test_imu_invalid_revokes_torque_but_keeps_tracing();
     test_pitch_fade_limits_fallen_robot_torque();
+    test_boot_reaches_gate_with_coupled_enable_flags();
+    test_stale_imu_freshness_revokes_torque();
 }

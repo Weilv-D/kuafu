@@ -9,7 +9,6 @@ static SafetyInputs_t healthy_inputs(void) {
     SafetyInputs_t inputs;
     memset(&inputs, 0, sizeof(inputs));
     inputs.now_ms = 100U;
-    inputs.gyro_calibrated = 1U;
     inputs.startup_ready = 1U;
     inputs.imu_fresh = 1U;
     inputs.wheel_l_fresh = 1U;
@@ -239,4 +238,27 @@ void run_safety_state_tests(void) {
     (void)safety_state_update(&inputs);
     TEST_EQ_INT(STATE_FAULT, g_safety_state.current_mode);
     TEST_TRUE((g_safety_state.fault_mask & FAULT_TILT) != 0U);
+
+    /* A Pi flapping mode requests must not suppress freshness faults: only
+     * the device-driven transitions (INIT->STAND, FAULT->STAND) reset the
+     * stale counters and re-open the grace window.  Command-driven
+     * transitions (STAND<->ACTIVE, link-loss demotion) change no device
+     * state, so before this rule a >10 Hz mode flap kept the grace window
+     * permanently open and wheel/servo loss faults never latched. */
+    safety_state_init();
+    inputs = healthy_inputs();
+    enter_stand(&inputs);                          /* INIT->STAND: grace granted */
+    inputs.now_ms = g_safety_state.mode_grace_until_ms + 1U; /* grace expired */
+    inputs.wheel_l_fresh = 0U;
+    for (uint8_t i = 0U; i < SAFETY_FRESHNESS_DEBOUNCE_TICKS - 1U; ++i) {
+        inputs.now_ms += 4U;
+        inputs.requested_mode = (i & 1U) ? (uint8_t)STATE_ACTIVE
+                                         : (uint8_t)STATE_STAND;
+        (void)safety_state_update(&inputs);
+    }
+    inputs.now_ms += 4U;
+    inputs.requested_mode = (uint8_t)STATE_STAND;
+    (void)safety_state_update(&inputs);
+    TEST_EQ_INT(STATE_FAULT, g_safety_state.current_mode);
+    TEST_TRUE((g_safety_state.fault_mask & FAULT_WHEEL_LEFT) != 0U);
 }

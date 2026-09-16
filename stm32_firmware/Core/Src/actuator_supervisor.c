@@ -39,6 +39,16 @@ ActuatorSupervisorOutputs_t actuator_supervisor_step(
      * internal flags mirror verified state, never a merely queued command. */
     supervisor->servos_enabled = inputs->servo_enable_verified;
     supervisor->wheel_enabled = inputs->wheel_enable_verified;
+    /* Record "verified observed low" on EVERY step, including the early-return
+     * paths below.  The scheduler couples startup_ready and servo_enable_verified
+     * to the same sequencer variable, so at boot the flag is low exactly while
+     * the pre-READY HOLDING/STARTUP branches return early; without this latch
+     * those observations are lost and enable_reissue_needed can never clear
+     * (the gate would stay closed until some fault happens to reset the
+     * sequencer). */
+    if (!inputs->servo_enable_verified) {
+        supervisor->enable_verified_observed_low = 1U;
+    }
     if (severe || inputs->tx_failed) {
         supervisor->phase = ACTUATOR_SUPERVISOR_LATCHED;
     }
@@ -70,11 +80,20 @@ ActuatorSupervisorOutputs_t actuator_supervisor_step(
      * immediately. Recovery is permitted only after a fresh hold is observed;
      * a wheel command or enable must never survive the fault transition. */
     if (faulted || !inputs->wheel_authorized || motion_link_bad) {
+        /* The drop-requirement is armed only when a REVOCATION follows an
+         * authorized state (READY): that is the case where physical enables
+         * may have been lost and a stale "verified" must not be trusted.
+         * Boot-time entries (STARTUP/HOLDING before first authorization) have
+         * nothing to revoke -- clearing there would discard the low-state
+         * observations the boot coupling produced and deadlock the re-issue
+         * stage (see the latch at the top of this function). */
+        if (supervisor->phase == ACTUATOR_SUPERVISOR_READY) {
+            supervisor->enable_verified_observed_low = 0U;
+        }
         supervisor->phase = ACTUATOR_SUPERVISOR_HOLDING;
         supervisor->hold_requested = 0U;
         supervisor->zero_requested = 0U;
         supervisor->enable_reissue_needed = 1U;
-        supervisor->enable_verified_observed_low = 0U;
         out.clear_motion = 1U;
         out.request_hold = 1U;
         out.request_wheel_disable = 1U;
@@ -97,9 +116,13 @@ ActuatorSupervisorOutputs_t actuator_supervisor_step(
     }
 
     if (!inputs->startup_ready || !inputs->actuator_configured) {
+        if (supervisor->phase == ACTUATOR_SUPERVISOR_READY) {
+            /* Demotion from READY re-arms the drop-requirement (a real
+             * post-authorization revocation); boot-time entries do not. */
+            supervisor->enable_verified_observed_low = 0U;
+        }
         supervisor->phase = ACTUATOR_SUPERVISOR_STARTUP;
         supervisor->enable_reissue_needed = 1U;
-        supervisor->enable_verified_observed_low = 0U;
         out.clear_motion = 1U;
         out.request_hold = 1U;
         out.phase = supervisor->phase;
@@ -165,9 +188,14 @@ ActuatorSupervisorOutputs_t actuator_supervisor_step(
     if (supervisor->phase == ACTUATOR_SUPERVISOR_READY) {
         if (!legs_ready || !inputs->leg_feedback_fresh || !inputs->leg_posture_safe ||
             !inputs->servo_enable_verified) {
+            /* A transient readiness gap (e.g. one missed leg-hold window) is
+             * NOT an enable-lifecycle restart: the physical torque enables
+             * never dropped, so the verified flag is still trustworthy and the
+             * re-issue stage must not wait for a drop that will never come.
+             * Persistent gaps escalate to a latched FAULT in the safety layer,
+             * which is the path that re-arms the drop-requirement. */
             supervisor->phase = ACTUATOR_SUPERVISOR_HOLDING;
             supervisor->enable_reissue_needed = 1U;
-            supervisor->enable_verified_observed_low = 0U;
             out.request_hold = 1U;
             out.clear_motion = 1U;
             out.phase = supervisor->phase;

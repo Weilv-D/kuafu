@@ -46,7 +46,6 @@ typedef struct {
     uint8_t wheel_r_fresh;
     uint8_t servos_fresh;
     uint8_t requested_mode;
-    uint8_t gyro_calibrated;
     uint8_t startup_ready;
 
     /* Actuator-supervisor inputs (physical lifecycle bookkeeping). */

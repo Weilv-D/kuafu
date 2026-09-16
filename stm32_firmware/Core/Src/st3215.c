@@ -253,6 +253,21 @@ int st3215_bus_queue_read(ST3215_Bus_t *bus, ST3215_State_t *target,
 
 void st3215_bus_step(ST3215_Bus_t *bus, uint32_t now_ms) {
     if (bus == NULL) return;
+    /* UART errors are recorded by the ISR (st3215_bus_on_uart_error) and
+     * applied HERE, in main-loop context: the failure path mutates
+     * bus->target/phase/parser and the target's health counters, all of which
+     * the main loop also touches while draining the DMA ring.  Applying them
+     * from the error ISR raced that drain (unlike the DDSM driver, this bus
+     * has no per-field locking); deferral makes every mutation single-
+     * contexted. */
+    if (bus->error_pending) {
+        bus->error_pending = 0U;
+        if (bus->phase == ST_BUS_TX_READ || bus->phase == ST_BUS_WAIT_REPLY) {
+            finish_read_failure(bus, DEVICE_FAILURE_PROTOCOL);
+        } else if (bus->phase == ST_BUS_TX_ONLY) {
+            bus->phase = ST_BUS_IDLE;
+        }
+    }
     if ((bus->phase == ST_BUS_TX_READ || bus->phase == ST_BUS_WAIT_REPLY) &&
         (int32_t)(now_ms - bus->deadline_ms) >= 0) {
         finish_read_failure(bus, DEVICE_FAILURE_TIMEOUT);
@@ -273,11 +288,10 @@ void st3215_bus_on_rx_byte(ST3215_Bus_t *bus, uint32_t now_ms) {
 }
 
 void st3215_bus_on_uart_error(ST3215_Bus_t *bus) {
+    /* ISR context: record only.  The failure is applied by st3215_bus_step
+     * in main-loop context on the next scheduler pass (see the deferral note
+     * there). */
     if (bus == NULL) return;
-    if (bus->phase == ST_BUS_TX_READ || bus->phase == ST_BUS_WAIT_REPLY) {
-        finish_read_failure(bus, DEVICE_FAILURE_PROTOCOL);
-    } else if (bus->phase == ST_BUS_TX_ONLY) {
-        bus->phase = ST_BUS_IDLE;
-    }
+    bus->error_pending = 1U;
     /* DMA reception is not affected by UART error flags and needs no re-arm. */
 }

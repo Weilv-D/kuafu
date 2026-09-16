@@ -132,4 +132,17 @@ void run_st3215_tests(void) {
     st3215_bus_step(&bus, 131U);            /* 11 ms elapsed -> timeout latched */
     TEST_TRUE(st3215_bus_is_idle(&bus));
     TEST_EQ_INT(1, (int)state.health.timeout_count);
+
+    /* UART errors are recorded by the ISR (on_uart_error) and applied by the
+     * main-loop step only: the callback itself must not mutate transaction,
+     * parser, or health state from interrupt context. */
+    TEST_EQ_INT(0, st3215_bus_queue_read(&bus, &state, 3U, 200U));
+    st3215_bus_on_tx_complete(&bus);
+    TEST_EQ_INT(ST_BUS_WAIT_REPLY, bus.phase);
+    st3215_bus_on_uart_error(&bus);
+    TEST_EQ_INT(ST_BUS_WAIT_REPLY, bus.phase);  /* deferred: nothing applied yet */
+    TEST_EQ_INT(0, (int)state.health.protocol_count);
+    st3215_bus_step(&bus, 201U);                /* applied in main-loop context */
+    TEST_TRUE(st3215_bus_is_idle(&bus));
+    TEST_EQ_INT(1, (int)state.health.protocol_count);
 }

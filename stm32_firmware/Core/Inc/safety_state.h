@@ -40,7 +40,6 @@ typedef struct {
     float pitch_rad;
     float pitch_rate_rads;
     float max_temp_c;
-    uint8_t gyro_calibrated;
     uint8_t startup_ready;
     uint8_t imu_fresh;
     uint8_t wheel_l_fresh;

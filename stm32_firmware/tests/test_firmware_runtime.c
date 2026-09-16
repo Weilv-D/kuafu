@@ -41,7 +41,8 @@ void run_firmware_runtime_tests(void) {
     inputs.action_fresh = 0U;
     outputs = firmware_runtime_step(&runtime, &inputs);
     TEST_TRUE(!outputs.residual_allowed);
-    TEST_TRUE(outputs.clear_motion);
+    /* Stale-action motion clearing is owned by the safety state machine
+     * (clear_action/enter_hold); the runtime exports no duplicate verdict. */
     TEST_TRUE(outputs.wheel_intent_allowed);
 
     inputs.wheel_authorized = 0U;
@@ -55,10 +56,12 @@ void run_firmware_runtime_tests(void) {
     outputs = firmware_runtime_step(&runtime, &inputs);
     TEST_TRUE(outputs.control_due);
     TEST_TRUE(outputs.servo_due);
-    /* wheel_intent_allowed no longer gates on bus idle (the LQR must compute
-     * every deadline; the dispatch layer skips sending when busy). */
+    /* Neither intent gates on bus idle: the LQR must compute every deadline
+     * and the leg writer must keep its deadline pending so a busy bus defers
+     * (not drops) the 20 ms write — bus arbitration belongs to the queue
+     * layer's retry, not to the mode-level intent. */
     TEST_TRUE(outputs.wheel_intent_allowed);
-    TEST_TRUE(!outputs.servo_intent_allowed);
+    TEST_TRUE(outputs.servo_intent_allowed);
     TEST_EQ_INT(1, runtime.wheel_busy_cycles);
     TEST_EQ_INT(1, runtime.servo_busy_cycles);
 

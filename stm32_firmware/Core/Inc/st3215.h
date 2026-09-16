@@ -54,6 +54,10 @@ typedef struct {
     uint8_t expected_frame_len;
     uint8_t rx_byte;
     uint8_t offline_after;
+    /* Set by st3215_bus_on_uart_error (ISR); consumed by st3215_bus_step in
+     * main-loop context, so the failure path never mutates shared state from
+     * an interrupt. */
+    volatile uint8_t error_pending;
     uint32_t deadline_ms;
     ST3215_BusPhase_t phase;
 } ST3215_Bus_t;

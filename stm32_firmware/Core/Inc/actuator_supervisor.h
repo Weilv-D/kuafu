@@ -69,10 +69,13 @@ typedef struct {
      * the integration's verified flag on a LATER step) before any wheel
      * output, even when the verified input still reads true. */
     uint8_t enable_reissue_needed;
-    /* ops-less integration support: records that the servo-enable verified
-     * flag dropped since the re-issue became due.  Physical enables do not
-     * survive a fault/restart, so the flag MUST drop; authorizing on a flag
-     * that never dropped would trust a stale "verified". */
+    /* Latched on every step where the integration's servo-enable verified
+     * flag reads low, and cleared only when a REVOCATION follows an
+     * authorized (READY) state.  Boot-time low observations therefore satisfy
+     * the re-issue stage (servo enables were genuinely never issued yet),
+     * while a fault that interrupts an authorized state re-arms the
+     * requirement: the flag MUST drop again before authorization proceeds,
+     * so a stale "verified" can never shortcut the stage. */
     uint8_t enable_verified_observed_low;
 } ActuatorSupervisor_t;
 

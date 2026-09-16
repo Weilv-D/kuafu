@@ -30,6 +30,7 @@ ControlSectionOutputs_t control_section_step(ControlSection_t *section,
     SafetyDecision_t safety_decision;
     ActuatorSupervisorInputs_t actuator_inputs;
     ActuatorSupervisorOutputs_t actuator_outputs;
+    uint8_t estimation_ok;
     uint32_t mode_now;
     uint32_t trace_now;
     BalanceTraceInput_t trace_in;
@@ -44,7 +45,6 @@ ControlSectionOutputs_t control_section_step(ControlSection_t *section,
     safety_inputs.pitch_rad = in->pitch_rad;
     safety_inputs.pitch_rate_rads = in->pitch_rate_rad_s;
     safety_inputs.max_temp_c = in->max_temp_c;
-    safety_inputs.gyro_calibrated = in->gyro_calibrated;
     safety_inputs.startup_ready = in->startup_ready;
     safety_inputs.imu_fresh = in->imu_fresh;
     safety_inputs.wheel_l_fresh = in->wheel_l_fresh;
@@ -101,8 +101,17 @@ ControlSectionOutputs_t control_section_step(ControlSection_t *section,
         actuator_outputs.wheel_output_allowed &&
         in->wheel_mode_complete);
 
+    /* Estimation authority needs BOTH the filter's own validity verdict and
+     * the freshness age.  g_imu_control_valid is refreshed only inside the
+     * DRDY-driven fusion block: if the data-ready interrupt itself dies, that
+     * flag freezes at its last value while the attitude is frozen with it.
+     * Requiring imu_fresh here (already a safety input, 20 ms pair age) cuts
+     * the stale-authority window from the freshness-fault debounce (~52 ms)
+     * to the freshness bound itself. */
+    estimation_ok = (uint8_t)(in->imu_control_valid && in->imu_fresh);
+
     /* 4. LQR/LQI computation under the gate. */
-    if (out.wheel_output_gate && in->imu_control_valid) {
+    if (out.wheel_output_gate && estimation_ok) {
         /* Velocity/yaw references are an ACTIVE-mode contract
          * (firmware_runtime.velocity_command_active): STAND is a position
          * hold, CLIMB is height-only, and the heartbeat fields are not
@@ -206,10 +215,10 @@ ControlSectionOutputs_t control_section_step(ControlSection_t *section,
     trace_in.feedback_torque_left_nm = in->feedback_torque_left_nm;
     trace_in.feedback_torque_right_nm = in->feedback_torque_right_nm;
     trace_in.validity =
-        (in->imu_control_valid ? TRACE_VALID_IMU : 0U) |
+        (estimation_ok ? TRACE_VALID_IMU : 0U) |
         (in->wheel_l_fresh ? TRACE_VALID_WHEEL_L : 0U) |
         (in->wheel_r_fresh ? TRACE_VALID_WHEEL_R : 0U) |
-        ((out.wheel_output_gate && in->imu_control_valid)
+        ((out.wheel_output_gate && estimation_ok)
             ? TRACE_VALID_TARGET : 0U) |
         ((in->wheel_sent_age_ms <= TRACE_SENT_MAX_AGE_MS)
             ? TRACE_VALID_SENT : 0U) |
