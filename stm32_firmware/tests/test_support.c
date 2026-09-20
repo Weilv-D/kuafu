@@ -104,6 +104,12 @@ HAL_StatusTypeDef HAL_UART_Abort(UART_HandleTypeDef *huart) {
     return HAL_OK;
 }
 
+HAL_StatusTypeDef HAL_UART_AbortTransmit(UART_HandleTypeDef *huart) {
+    (void)huart;
+    ++g_uart_abort_count;
+    return HAL_OK;
+}
+
 HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *huart,
                                    uint8_t *data,
                                    uint16_t size,

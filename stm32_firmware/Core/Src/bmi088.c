@@ -397,6 +397,10 @@ uint8_t bmi088_gyro_healthy(const BMI088_t *imu, uint32_t now_ms, uint32_t max_a
 int bmi088_read_temp(BMI088_t *imu) {
     uint8_t buffer[2];
 
+    /* Same handle guard as the accel/gyro readers: a NULL handle would fault
+     * inside HAL_I2C_Mem_Read before any caller-side check could run. */
+    if (imu == NULL || imu->hi2c == NULL) return -1;
+
     /* Temperature lives on the accelerometer die (TEMP_MSB:0x22, TEMP_LSB:0x23) */
     if (HAL_I2C_Mem_Read(imu->hi2c, BMI088_ACCEL_ADDR << 1, BMI088_ACC_TEMP_MSB, I2C_MEMADD_SIZE_8BIT, buffer, 2, 2) != HAL_OK) {
         device_health_mark_failure(&imu->health, DEVICE_FAILURE_TIMEOUT, 3U);

@@ -6,7 +6,11 @@
 typedef enum {
     STARTUP_WAIT_POWER = 0,
     STARTUP_IMU_DISCOVERY = 1,
-    STARTUP_GYRO_CALIBRATION = 2,
+    /* Value 2 is retired (the old gyro-calibration gate; calibration now
+     * accumulates in the background and never gates startup).  The numeric
+     * gap is kept deliberately so ACTUATOR_DISCOVERY/READY/FAILED retain the
+     * values the balance trace's startup_state encoding and the SWD dump
+     * tools were built against. */
     STARTUP_ACTUATOR_DISCOVERY = 3,
     STARTUP_READY = 4,
     STARTUP_FAILED = 5

@@ -21,6 +21,11 @@
    * write slot (S3), tripping the freshness fault on ground vibration.  10 ms
    * absorbs the worst measured delay while remaining far below the 1 s servo
    * freshness latch. */
+#define ST_TX_ONLY_TIMEOUT_MS        20U  /* Write frames (sync-write, torque) elicit no reply, so their only
+   * completion event is the TX-complete interrupt.  If that interrupt is
+   * lost, the bus would otherwise stay busy until the 1 s freshness fault;
+   * this deadline bounds the wedged write phase (a 40-byte sync-write
+   * occupies the 1 Mbaud line for ~0.4 ms, so 20 ms is generous). */
 
 typedef struct {
     uint8_t id;

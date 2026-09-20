@@ -221,7 +221,12 @@ int main(void) {
         uint8_t id_packet[DDSM_FRAME_SIZE];
         uint8_t repeat;
         ddsm_build_set_id(id_packet, DDSM_ID_CALIBRATION_TARGET);
-        safety_state_trigger_fault(FAULT_WHEEL_LEFT | FAULT_WHEEL_RIGHT);
+        /* FAULT_INIT (serious) is the latch: wheel-freshness faults are
+         * TRANSIENT and would auto-recover to STAND once the freshly
+         * re-IDed motor answers polls — re-enabling wheel authorization on
+         * a bench image that must never actuate.  The transient bits stay
+         * in the mask for diagnostic telemetry. */
+        safety_state_trigger_fault(FAULT_INIT | FAULT_WHEEL_LEFT | FAULT_WHEEL_RIGHT);
         HAL_Delay(250U);
         for (repeat = 0U; repeat < 5U; ++repeat) {
             (void)HAL_UART_Transmit(&huart2, id_packet, DDSM_FRAME_SIZE, 20U);
@@ -233,7 +238,13 @@ int main(void) {
     for (int i = 0; i < 4; i++) {
         g_servos[i].id = i + 1; /* IDs: 1, 2, 3, 4 */
         device_health_init(&g_servos[i].health);
-        g_servos[i].health.online = 1U; /* optimistic discovery; first valid read timestamps it */
+        /* Freshness requires a real first valid frame: an optimistic online
+         * flag here would make a servo that never replied look "fresh" for
+         * the first SAFETY_SERVO_MAX_AGE_MS after boot, which — given the
+         * ~800 ms power-wait + IMU + discovery sequence — could carry INIT
+         * into STAND and briefly open the wheel gate on legs whose feedback
+         * has never been seen.  The round-robin poll below restores online
+         * state on the first valid frame. */
     }
     st3215_bus_init(&g_st3215_bus, &huart3);
 
@@ -247,9 +258,13 @@ int main(void) {
 
 #if SERVO_ZERO_CALIBRATION_MODE
     /* A calibration image must never leave INIT and start commanding the
-     * placeholder center ticks. FAULT keeps wheel commands at zero while the
-     * background servo feedback poll remains active. */
-    safety_state_trigger_fault(FAULT_SERVO);
+     * placeholder center ticks.  FAULT_INIT (serious) is the latch: a bare
+     * FAULT_SERVO is TRANSIENT and auto-recovers to STAND as soon as the
+     * polled servos report fresh — re-arming the enable sequencer and wheel
+     * authorization on an image that must stay torque-free.  The transient
+     * bit stays in the mask for diagnostic telemetry; the wheel commands
+     * stay at zero and the background feedback poll keeps running. */
+    safety_state_trigger_fault(FAULT_INIT | FAULT_SERVO);
 #endif
 
     uint32_t last_tick = 0;
@@ -447,7 +462,21 @@ int main(void) {
             g_actuator_configured = (uint8_t)(g_actuator_discovery_step >= 7U);
         }
 
+        /* Mode gate: the enable sequencer must never run while the machine
+         * is in FAULT.  The fault-entry edge resets servos_enabled so the
+         * software stops claiming "verified", and the 50 Hz FAULT branch
+         * physically disables servo torque; a mode-blind sequencer would
+         * immediately re-send the enable frames, fight the disable one-shot,
+         * and re-set servos_enabled to 1 while the joints are physically
+         * torque-free.  A transient fault (wheel/servo freshness) then
+         * recovers with that stale flag, the supervisor clears its re-issue
+         * stage on the racing 0->1 observation, and the wheel gate re-opens
+         * on limp legs.  Re-issue is for RECOVERY only: the sequencer re-runs
+         * once the safety machine has left FAULT.  INIT stays allowed because
+         * at boot the sequencer must complete before INIT can exit to STAND
+         * (startup_ready == servos_enabled feeds the transition). */
         if (startup_outputs.enable_actuators && !servos_enabled &&
+            g_safety_state.current_mode != STATE_FAULT &&
             (int32_t)(startup_now - next_actuator_enable_ms) >= 0) {
             int enable_result = -1;
             if (servo_enable_step < 4U) {
@@ -673,168 +702,173 @@ int main(void) {
             if (fusion_dt > 0.02f) fusion_dt = 0.02f;
 
             /* DRDY can arrive while the BMI088 register sequence is still in
-             * progress.  Do not read or calibrate from an uninitialized IMU. */
-            if (!g_imu.initialized) {
-                continue;
-            }
+             * progress.  Do not read or calibrate from an uninitialized IMU.
+             * A guarded block (not `continue`): a continue here would also skip
+             * every scheduler stage after this tick block -- the 50 Hz leg
+             * writer and the servo round-robin poll -- silently coupling their
+             * execution to the IMU init state.  Those stages are independently
+             * guarded (actuator_configured / startup phase) and must not depend
+             * on where this block decides to bail out. */
+            if (g_imu.initialized) {
 
-            /* 1. Read IMU sensors (safe to do here in the main loop background).
-             * Return codes matter: a failed channel keeps its previous sample
-             * and must not be fused as if it were fresh. */
-            (void)bmi088_read_accel(&g_imu);
-            (void)bmi088_read_gyro(&g_imu);
+                /* 1. Read IMU sensors (safe to do here in the main loop background).
+                 * Return codes matter: a failed channel keeps its previous sample
+                 * and must not be fused as if it were fresh. */
+                (void)bmi088_read_accel(&g_imu);
+                (void)bmi088_read_gyro(&g_imu);
 
-            /* Refresh chip temperature at low rate (~10 Hz) for safety/telemetry */
-            if (++temp_refresh_counter >= 100) {
-                temp_refresh_counter = 0;
-                bmi088_read_temp(&g_imu);
-            }
-
-            BMI088SampleValidity_t imu_validity;
-            bmi088_get_sample_validity(&g_imu, HAL_GetTick(),
-                                       BMI088_DEFAULT_MAX_AGE_MS, &imu_validity);
-            uint8_t accel_ok = (uint8_t)(imu_validity.accel_valid &&
-                                         imu_validity.accel_fresh);
-            uint8_t gyro_ok = (uint8_t)(imu_validity.gyro_valid &&
-                                        imu_validity.gyro_fresh);
-
-            float gx = g_imu.gyro[0];
-            float gy = g_imu.gyro[1];
-            float gz = g_imu.gyro[2];
-
-            /* 2. Run sensor fusion update with per-channel validity. */
-            if (g_safety_state.is_gyro_calibrated) {
-                gx -= g_safety_state.gyro_calib_offset[0];
-                gy -= g_safety_state.gyro_calib_offset[1];
-                gz -= g_safety_state.gyro_calib_offset[2];
-            }
-            /* Always attempt the fusion update.  Mahony is accel-referenced, so
-             * running with a zero gyro offset at start is safe; the bias
-             * estimate is refined in the background (below) once the robot
-             * settles.  An invalid gyro is rejected inside the filter and
-             * revokes control validity instead of integrating garbage. */
-            MahonyUpdateStatus_t fuse_status = mahony_update_validated(
-                &g_mahony,
-                g_imu.accel[0], g_imu.accel[1], g_imu.accel[2],
-                gx, gy, gz, fusion_dt, accel_ok, gyro_ok);
-            g_imu_control_valid = (uint8_t)(
-                fuse_status == MAHONY_UPDATE_FULL ||
-                (fuse_status == MAHONY_UPDATE_GYRO_ONLY && g_mahony.control_valid));
-
-            if (!g_imu_control_valid) {
-                /* Attitude no longer trustworthy: drop balance authority now.
-                 * The ms-deadline safety block latches FAULT_IMU via freshness
-                 * once the failure outlives its debounce window.  Telemetry
-                 * slots below still run on the last published attitude. */
-                g_ctrl_tau_l = 0.0f;
-                g_ctrl_tau_r = 0.0f;
-            }
-
-            if (g_imu_control_valid) {
-                if (!g_safety_state.is_gyro_calibrated && gyro_ok) {
-                    safety_state_gyro_calib_update(gx, gy, gz, HAL_GetTick());
-                }
-                g_body_gyro[0] = gx;
-                g_body_gyro[1] = gy;
-                g_body_gyro[2] = gz;
-
-                /* Balance-relevant tilt & rate mapped to the physical IMU
-                 * mounting.  Pitch rate uses the bias-corrected gyro (offset is
-                 * 0 until calibrated). */
-                float body_pitch = ATT_PITCH(&g_mahony);
-                float body_pitch_rate = ATT_PITCH_RATE_SIGN *
-                    (g_imu.gyro[ATT_PITCH_RATE_IDX] - g_safety_state.gyro_calib_offset[ATT_PITCH_RATE_IDX]);
-                /* Low-pass filter pitch rate: the raw gyro Y has broadband noise
-                 * that K3 amplifies into torque chatter.  A 35 Hz one-pole filter
-                 * preserves the balance-relevant dynamics while cutting noise. */
-                g_pitch_rate_filt += PITCH_RATE_FILTER_ALPHA *
-                    (body_pitch_rate - g_pitch_rate_filt);
-                body_pitch_rate = g_pitch_rate_filt;
-
-                /* Publish the latest attitude for the ms-deadline safety block. */
-                g_body_pitch = body_pitch;
-                g_body_pitch_rate = body_pitch_rate;
-            }
-
-            /* 3. Telemetry slots on the 1 kHz tick cadence.  Control and
-             * trace live in the 250 Hz control section above; this block only
-             * publishes fusion results and streams telemetry, so a stopped
-             * DRDY freezes telemetry but never fault detection or tracing. */
-            uint8_t slot = last_tick % 4;
-
-            /* --- Slot 2: Queue telemetry data to Raspberry Pi 5 --- */
-            if (slot == 2) {
-                pi_link_send_imu(&huart6, 
-                                 g_mahony.roll, 
-                                 g_mahony.pitch, 
-                                 g_mahony.yaw, 
-                                  g_body_gyro[0],
-                                  g_body_gyro[1],
-                                  g_body_gyro[2]);
-
-                /* Report joint feedback in the shared sim/body frame so it is
-                 * symmetric with the command contract (mirror + zero applied). */
-                float servo_pos[4], servo_vel[4], servo_cur[4];
-                for (int i = 0; i < 4; i++) {
-                    servo_pos[i] = servo_tick_to_angle(servo_feedback[i].position_tick, (uint8_t)i);
-                    servo_vel[i] = (float)servo_direction((uint8_t)i) * servo_feedback[i].velocity_rads;
-                    servo_cur[i] = servo_feedback[i].current_a;
+                /* Refresh chip temperature at low rate (~10 Hz) for safety/telemetry */
+                if (++temp_refresh_counter >= 100) {
+                    temp_refresh_counter = 0;
+                    bmi088_read_temp(&g_imu);
                 }
 
-                /* Single-turn wheel angle (raw); velocity/torque mapped to body frame */
-                float wheel_l_pos = left_feedback.position_rad;
-                float wheel_r_pos = right_feedback.position_rad;
+                BMI088SampleValidity_t imu_validity;
+                bmi088_get_sample_validity(&g_imu, HAL_GetTick(),
+                                           BMI088_DEFAULT_MAX_AGE_MS, &imu_validity);
+                uint8_t accel_ok = (uint8_t)(imu_validity.accel_valid &&
+                                             imu_validity.accel_fresh);
+                uint8_t gyro_ok = (uint8_t)(imu_validity.gyro_valid &&
+                                            imu_validity.gyro_fresh);
 
-                pi_link_send_joints(&huart6,
-                                    wheel_l_pos, WHEEL_DIR_L * left_feedback.velocity_rads, WHEEL_DIR_L * left_feedback.torque,
-                                    wheel_r_pos, WHEEL_DIR_R * right_feedback.velocity_rads, WHEEL_DIR_R * right_feedback.torque,
-                                    servo_pos, servo_vel, servo_cur);
-            }
+                float gx = g_imu.gyro[0];
+                float gy = g_imu.gyro[1];
+                float gz = g_imu.gyro[2];
 
-            /* --- Slot 3: Diagnostic packages & main controller logic --- */
-            else if (slot == 3) {
-                /* Battery sensing is not populated on this hardware.  Zero is
-                 * the protocol sentinel for unavailable, not an undervoltage.
-                 * The BMI088 covers -40..85 degC; saturate before the uint8
-                 * field because a negative float-to-unsigned cast is UB and
-                 * would wrap (e.g. -5 degC -> 251) on a cold bench. */
-                uint8_t diag_temp_c =
-                    (g_imu.temperature < 0.0f) ? 0U :
-                    ((g_imu.temperature > 255.0f) ? 255U
-                                                  : (uint8_t)g_imu.temperature);
-                pi_link_send_diag(&huart6, 0U, diag_temp_c,
-                                  safety_state_legacy_fault_mask());
+                /* 2. Run sensor fusion update with per-channel validity. */
+                if (g_safety_state.is_gyro_calibrated) {
+                    gx -= g_safety_state.gyro_calib_offset[0];
+                    gy -= g_safety_state.gyro_calib_offset[1];
+                    gz -= g_safety_state.gyro_calib_offset[2];
+                }
+                /* Always attempt the fusion update.  Mahony is accel-referenced, so
+                 * running with a zero gyro offset at start is safe; the bias
+                 * estimate is refined in the background (below) once the robot
+                 * settles.  An invalid gyro is rejected inside the filter and
+                 * revokes control validity instead of integrating garbage. */
+                MahonyUpdateStatus_t fuse_status = mahony_update_validated(
+                    &g_mahony,
+                    g_imu.accel[0], g_imu.accel[1], g_imu.accel[2],
+                    gx, gy, gz, fusion_dt, accel_ok, gyro_ok);
+                g_imu_control_valid = (uint8_t)(
+                    fuse_status == MAHONY_UPDATE_FULL ||
+                    (fuse_status == MAHONY_UPDATE_GYRO_ONLY && g_mahony.control_valid));
 
-                if (++health_telemetry_divider >= 25U) {
-                    Pi_HealthTelemetry_t health;
-                    int i;
-                    uint32_t health_now = HAL_GetTick();
-                    health_telemetry_divider = 0U;
-                    health.fault_mask = g_safety_state.fault_mask;
-                    health.mode = (uint8_t)g_safety_state.current_mode;
-                    health.reset_cause = g_reset_cause;
-                    health.imu_age_ms = Device_Age_Ms(&g_imu.health, health_now);
-                    health.wheel_l_age_ms = Device_Age_Ms(&left_feedback.health, health_now);
-                    health.wheel_r_age_ms = Device_Age_Ms(&right_feedback.health, health_now);
-                    health.imu_errors = Device_Error_Count(&g_imu.health);
-                    health.wheel_l_errors = Device_Error_Count(&left_feedback.health);
-                    health.wheel_r_errors = Device_Error_Count(&right_feedback.health);
-                    health.wheel_l_timeout_errors = Device_Timeout_Count(&left_feedback.health);
-                    health.wheel_l_checksum_errors = Device_Checksum_Count(&left_feedback.health);
-                    health.wheel_l_protocol_errors = Device_Protocol_Count(&left_feedback.health);
-                    health.wheel_r_timeout_errors = Device_Timeout_Count(&right_feedback.health);
-                    health.wheel_r_checksum_errors = Device_Checksum_Count(&right_feedback.health);
-                    health.wheel_r_protocol_errors = Device_Protocol_Count(&right_feedback.health);
-                    for (i = 0; i < 4; ++i) {
-                        health.servo_age_ms[i] = Device_Age_Ms(&servo_feedback[i].health,
-                                                               health_now);
-                        health.servo_errors[i] = Device_Error_Count(&servo_feedback[i].health);
+                if (!g_imu_control_valid) {
+                    /* Attitude no longer trustworthy: drop balance authority now.
+                     * The ms-deadline safety block latches FAULT_IMU via freshness
+                     * once the failure outlives its debounce window.  Telemetry
+                     * slots below still run on the last published attitude. */
+                    g_ctrl_tau_l = 0.0f;
+                    g_ctrl_tau_r = 0.0f;
+                }
+
+                if (g_imu_control_valid) {
+                    if (!g_safety_state.is_gyro_calibrated && gyro_ok) {
+                        safety_state_gyro_calib_update(gx, gy, gz, HAL_GetTick());
                     }
-                    (void)pi_link_send_health(&huart6, &health);
+                    g_body_gyro[0] = gx;
+                    g_body_gyro[1] = gy;
+                    g_body_gyro[2] = gz;
+
+                    /* Balance-relevant tilt & rate mapped to the physical IMU
+                     * mounting.  Pitch rate uses the bias-corrected gyro (offset is
+                     * 0 until calibrated). */
+                    float body_pitch = ATT_PITCH(&g_mahony);
+                    float body_pitch_rate = ATT_PITCH_RATE_SIGN *
+                        (g_imu.gyro[ATT_PITCH_RATE_IDX] - g_safety_state.gyro_calib_offset[ATT_PITCH_RATE_IDX]);
+                    /* Low-pass filter pitch rate: the raw gyro Y has broadband noise
+                     * that K3 amplifies into torque chatter.  A 35 Hz one-pole filter
+                     * preserves the balance-relevant dynamics while cutting noise. */
+                    g_pitch_rate_filt += PITCH_RATE_FILTER_ALPHA *
+                        (body_pitch_rate - g_pitch_rate_filt);
+                    body_pitch_rate = g_pitch_rate_filt;
+
+                    /* Publish the latest attitude for the ms-deadline safety block. */
+                    g_body_pitch = body_pitch;
+                    g_body_pitch_rate = body_pitch_rate;
                 }
 
-                if (g_safety_state.current_mode == STATE_FAULT) {
-                    pi_link_send_fault(&huart6, safety_state_legacy_fault_mask());
+                /* 3. Telemetry slots on the 1 kHz tick cadence.  Control and
+                 * trace live in the 250 Hz control section above; this block only
+                 * publishes fusion results and streams telemetry, so a stopped
+                 * DRDY freezes telemetry but never fault detection or tracing. */
+                uint8_t slot = last_tick % 4;
+
+                /* --- Slot 2: Queue telemetry data to Raspberry Pi 5 --- */
+                if (slot == 2) {
+                    pi_link_send_imu(&huart6, 
+                                     g_mahony.roll, 
+                                     g_mahony.pitch, 
+                                     g_mahony.yaw, 
+                                      g_body_gyro[0],
+                                      g_body_gyro[1],
+                                      g_body_gyro[2]);
+
+                    /* Report joint feedback in the shared sim/body frame so it is
+                     * symmetric with the command contract (mirror + zero applied). */
+                    float servo_pos[4], servo_vel[4], servo_cur[4];
+                    for (int i = 0; i < 4; i++) {
+                        servo_pos[i] = servo_tick_to_angle(servo_feedback[i].position_tick, (uint8_t)i);
+                        servo_vel[i] = (float)servo_direction((uint8_t)i) * servo_feedback[i].velocity_rads;
+                        servo_cur[i] = servo_feedback[i].current_a;
+                    }
+
+                    /* Single-turn wheel angle (raw); velocity/torque mapped to body frame */
+                    float wheel_l_pos = left_feedback.position_rad;
+                    float wheel_r_pos = right_feedback.position_rad;
+
+                    pi_link_send_joints(&huart6,
+                                        wheel_l_pos, WHEEL_DIR_L * left_feedback.velocity_rads, WHEEL_DIR_L * left_feedback.torque,
+                                        wheel_r_pos, WHEEL_DIR_R * right_feedback.velocity_rads, WHEEL_DIR_R * right_feedback.torque,
+                                        servo_pos, servo_vel, servo_cur);
+                }
+
+                /* --- Slot 3: Diagnostic packages & main controller logic --- */
+                else if (slot == 3) {
+                    /* Battery sensing is not populated on this hardware.  Zero is
+                     * the protocol sentinel for unavailable, not an undervoltage.
+                     * The BMI088 covers -40..85 degC; saturate before the uint8
+                     * field because a negative float-to-unsigned cast is UB and
+                     * would wrap (e.g. -5 degC -> 251) on a cold bench. */
+                    uint8_t diag_temp_c =
+                        (g_imu.temperature < 0.0f) ? 0U :
+                        ((g_imu.temperature > 255.0f) ? 255U
+                                                      : (uint8_t)g_imu.temperature);
+                    pi_link_send_diag(&huart6, 0U, diag_temp_c,
+                                      safety_state_legacy_fault_mask());
+
+                    if (++health_telemetry_divider >= 25U) {
+                        Pi_HealthTelemetry_t health;
+                        int i;
+                        uint32_t health_now = HAL_GetTick();
+                        health_telemetry_divider = 0U;
+                        health.fault_mask = g_safety_state.fault_mask;
+                        health.mode = (uint8_t)g_safety_state.current_mode;
+                        health.reset_cause = g_reset_cause;
+                        health.imu_age_ms = Device_Age_Ms(&g_imu.health, health_now);
+                        health.wheel_l_age_ms = Device_Age_Ms(&left_feedback.health, health_now);
+                        health.wheel_r_age_ms = Device_Age_Ms(&right_feedback.health, health_now);
+                        health.imu_errors = Device_Error_Count(&g_imu.health);
+                        health.wheel_l_errors = Device_Error_Count(&left_feedback.health);
+                        health.wheel_r_errors = Device_Error_Count(&right_feedback.health);
+                        health.wheel_l_timeout_errors = Device_Timeout_Count(&left_feedback.health);
+                        health.wheel_l_checksum_errors = Device_Checksum_Count(&left_feedback.health);
+                        health.wheel_l_protocol_errors = Device_Protocol_Count(&left_feedback.health);
+                        health.wheel_r_timeout_errors = Device_Timeout_Count(&right_feedback.health);
+                        health.wheel_r_checksum_errors = Device_Checksum_Count(&right_feedback.health);
+                        health.wheel_r_protocol_errors = Device_Protocol_Count(&right_feedback.health);
+                        for (i = 0; i < 4; ++i) {
+                            health.servo_age_ms[i] = Device_Age_Ms(&servo_feedback[i].health,
+                                                                   health_now);
+                            health.servo_errors[i] = Device_Error_Count(&servo_feedback[i].health);
+                        }
+                        (void)pi_link_send_health(&huart6, &health);
+                    }
+
+                    if (g_safety_state.current_mode == STATE_FAULT) {
+                        pi_link_send_fault(&huart6, safety_state_legacy_fault_mask());
+                    }
                 }
             }
         }

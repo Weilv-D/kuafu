@@ -29,6 +29,19 @@ static int16_t read_i16_be(const uint8_t *bytes) {
     return (int16_t)(((uint16_t)bytes[0] << 8) | bytes[1]);
 }
 
+/* Nestable critical section, same idiom as ddsm315.c: restore the saved
+ * PRIMASK instead of unconditionally enabling, so a future ISR-side caller
+ * cannot accidentally unmask interrupts mid-handler. */
+static inline uint32_t link_lock_irqs(void) {
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    return primask;
+}
+
+static inline void link_unlock_irqs(uint32_t primask) {
+    __set_PRIMASK(primask);
+}
+
 static void write_i16_be(uint8_t *bytes, int16_t value) {
     bytes[0] = (uint8_t)((value >> 8) & 0xff);
     bytes[1] = (uint8_t)(value & 0xff);
@@ -62,17 +75,17 @@ void pi_link_init(void) {
 }
 
 void pi_link_clear_action(void) {
-    __disable_irq();
+    uint32_t primask = link_lock_irqs();
     memset(&g_pi_cmd_action, 0, sizeof(g_pi_cmd_action));
-    __enable_irq();
+    link_unlock_irqs(primask);
 }
 
 void pi_link_enter_hold(void) {
-    __disable_irq();
+    uint32_t primask = link_lock_irqs();
     memset(&g_pi_cmd_action, 0, sizeof(g_pi_cmd_action));
     g_pi_cmd_heartbeat.target_velocity = 0.0f;
     g_pi_cmd_heartbeat.target_yaw_rate = 0.0f;
-    __enable_irq();
+    link_unlock_irqs(primask);
 }
 
 uint8_t pi_link_is_compatible(void) { return link_compatible; }
@@ -251,23 +264,25 @@ static int pi_link_transmit(UART_HandleTypeDef *huart, uint8_t type,
     if (payload_len > 0) memcpy(&frame[10], payload, payload_len);
     frame[10 + payload_len] = crc8_calculate(&frame[1], (uint16_t)(9u + payload_len));
     frame[11 + payload_len] = PI_FRAME_FOOTER;
-    __disable_irq();
-    if (tx_count >= PI_TX_QUEUE_DEPTH) {
-        __enable_irq();
-        return -1;
+    {
+        uint32_t primask = link_lock_irqs();
+        if (tx_count >= PI_TX_QUEUE_DEPTH) {
+            link_unlock_irqs(primask);
+            return -1;
+        }
+        memcpy(tx_frames[tx_tail], frame, (uint16_t)(12U + payload_len));
+        tx_lengths[tx_tail] = (uint8_t)(12U + payload_len);
+        tx_tail = (uint8_t)((tx_tail + 1U) % PI_TX_QUEUE_DEPTH);
+        ++tx_count;
+        tx_uart = huart;
+        if (start_next_tx() != 0) {
+            tx_tail = (uint8_t)((tx_tail + PI_TX_QUEUE_DEPTH - 1U) % PI_TX_QUEUE_DEPTH);
+            --tx_count;
+            link_unlock_irqs(primask);
+            return -1;
+        }
+        link_unlock_irqs(primask);
     }
-    memcpy(tx_frames[tx_tail], frame, (uint16_t)(12U + payload_len));
-    tx_lengths[tx_tail] = (uint8_t)(12U + payload_len);
-    tx_tail = (uint8_t)((tx_tail + 1U) % PI_TX_QUEUE_DEPTH);
-    ++tx_count;
-    tx_uart = huart;
-    if (start_next_tx() != 0) {
-        tx_tail = (uint8_t)((tx_tail + PI_TX_QUEUE_DEPTH - 1U) % PI_TX_QUEUE_DEPTH);
-        --tx_count;
-        __enable_irq();
-        return -1;
-    }
-    __enable_irq();
     return 0;
 }
 

@@ -195,6 +195,12 @@ static int start_tx(ST3215_Bus_t *bus, uint8_t len, ST3215_BusPhase_t phase) {
     bus->tx_len = len;
     bus->echo_len = 0U;
     bus->phase = phase;
+    if (phase == ST_BUS_TX_ONLY) {
+        /* No reply will ever close a write transaction; the deadline is the
+         * backstop for a lost TX-complete interrupt (see st3215_bus_step).
+         * Read transactions keep the reply deadline their queue call set. */
+        bus->deadline_ms = HAL_GetTick() + ST_TX_ONLY_TIMEOUT_MS;
+    }
     if (HAL_UART_Transmit_IT(bus->huart, bus->tx, len) != HAL_OK) {
         bus->phase = ST_BUS_IDLE;
         return -2;
@@ -271,6 +277,20 @@ void st3215_bus_step(ST3215_Bus_t *bus, uint32_t now_ms) {
     if ((bus->phase == ST_BUS_TX_READ || bus->phase == ST_BUS_WAIT_REPLY) &&
         (int32_t)(now_ms - bus->deadline_ms) >= 0) {
         finish_read_failure(bus, DEVICE_FAILURE_TIMEOUT);
+    }
+    if (bus->phase == ST_BUS_TX_ONLY &&
+        (int32_t)(now_ms - bus->deadline_ms) >= 0) {
+        /* Lost or wedged TX-complete: a deadline alone is not enough, the
+         * HAL transmit state must be explicitly cleared or every later
+         * start_tx fails against a BUSY UART.  AbortTransmit is a no-op
+         * when the transfer already finished (gState back to READY); a
+         * late TxCplt then finds the bus IDLE and is ignored, and a
+         * truncated frame is dropped by the servo's own checksum. */
+        if (bus->huart != NULL) {
+            (void)HAL_UART_AbortTransmit(bus->huart);
+        }
+        bus->phase = ST_BUS_IDLE;
+        reset_parser(bus);
     }
 }
 

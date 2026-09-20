@@ -61,6 +61,7 @@ HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *huart,
                                      uint8_t *data,
                                      uint16_t size);
 HAL_StatusTypeDef HAL_UART_Abort(UART_HandleTypeDef *huart);
+HAL_StatusTypeDef HAL_UART_AbortTransmit(UART_HandleTypeDef *huart);
 HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *huart,
                                    uint8_t *data,
                                    uint16_t size,

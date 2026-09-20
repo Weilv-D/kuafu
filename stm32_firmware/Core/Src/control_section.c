@@ -69,6 +69,14 @@ ControlSectionOutputs_t control_section_step(ControlSection_t *section,
 
     /* 2. Actuator-supervisor verdict over the physical enable lifecycle. */
     memset(&actuator_inputs, 0, sizeof(actuator_inputs));
+    /* tx_failed stays 0 here by contract: it exists for ops-wired
+     * integrations whose executor reports hard queue failures.  In this
+     * scheduler integration the equivalent protection is structural -- a
+     * refused leg write keeps its deadline pending (retry-on-busy), and a
+     * genuinely dead servo path shows up as leg_hold_tx_recent expiry
+     * (supervisor demotion) plus freshness faults (safety latch) -- so
+     * feeding it from the busy-retry path would re-introduce drop-on-busy
+     * verdicts the retry design removed. */
     actuator_inputs.now_ms = in->now_ms;
     actuator_inputs.mode = g_safety_state.current_mode;
     actuator_inputs.fault_mask = g_safety_state.fault_mask;

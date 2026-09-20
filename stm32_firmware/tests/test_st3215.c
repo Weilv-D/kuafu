@@ -145,4 +145,19 @@ void run_st3215_tests(void) {
     st3215_bus_step(&bus, 201U);                /* applied in main-loop context */
     TEST_TRUE(st3215_bus_is_idle(&bus));
     TEST_EQ_INT(1, (int)state.health.protocol_count);
+
+    /* A lost TX-complete interrupt must not wedge the bus: write frames
+     * carry their own deadline and recover through an explicit transmit
+     * abort, after which the bus accepts new work immediately. */
+    test_set_time_ms(300U);
+    TEST_EQ_INT(0, st3215_bus_queue_torque(&bus, 1U, 1U));
+    TEST_EQ_INT(ST_BUS_TX_ONLY, bus.phase);
+    st3215_bus_step(&bus, 305U);
+    TEST_EQ_INT(ST_BUS_TX_ONLY, bus.phase);     /* inside the write budget */
+    st3215_bus_step(&bus, 321U);                /* deadline passed: recover */
+    TEST_TRUE(st3215_bus_is_idle(&bus));
+    TEST_EQ_INT(0, st3215_bus_queue_torque(&bus, 1U, 1U));
+    TEST_EQ_INT(ST_BUS_TX_ONLY, bus.phase);
+    st3215_bus_on_tx_complete(&bus);            /* normal close still works */
+    TEST_TRUE(st3215_bus_is_idle(&bus));
 }

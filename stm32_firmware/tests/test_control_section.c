@@ -256,6 +256,59 @@ static void test_stale_imu_freshness_revokes_torque(void) {
     TEST_NEAR(0.0f, out.torque_right_nm, 1e-6f);
 }
 
+static void test_transient_fault_recovery_reruns_enable_sequencer(void) {
+    /* Scheduler contract for transient faults (wheel/servo freshness):
+     * FAULT auto-recovers, and the servo enable sequencer in main.c is gated
+     * by mode != FAULT, so the coupled servo_enable_verified/startup_ready
+     * inputs DROP for the whole FAULT sojourn and rise again only after
+     * recovery has physically re-run the enable frames.  The supervisor must
+     * clear its re-issue stage from that genuine drop-and-return, and the
+     * gate must reopen -- never on a stale verified flag that stayed high
+     * while the FAULT one-shot was disabling the physical torque. */
+    ControlSectionOutputs_t out;
+    int i;
+    reset_world();
+    bring_to_stand();
+    out = run_deadline(1200U, 0.0f);
+    TEST_TRUE(out.wheel_output_gate);
+
+    /* Wheel-feedback glitch: the 8-tick freshness debounce (32 ms) lets the
+     * gate ride through the first stale deadlines by design -- wheel
+     * staleness is a safety-machine input, not a supervisor input -- and
+     * then latches a transient FAULT_WHEEL_LEFT. */
+    base_inputs.wheel_l_fresh = 0U;
+    for (i = 0; i < 10; ++i) {
+        out = run_deadline(1204U + 4U * (uint32_t)i, 0.0f);
+    }
+    TEST_EQ_INT((uint32_t)STATE_FAULT, (uint32_t)g_safety_state.current_mode);
+    TEST_TRUE(!out.wheel_output_gate);
+
+    /* Feedback returns: the transient fault clears and the machine recovers
+     * to STAND while the (gated) sequencer still reports verified = 0 --
+     * startup_ready and leg_hold_tx_recent are coupled to the same state. */
+    base_inputs.wheel_l_fresh = 1U;
+    base_inputs.servo_enable_verified = 0U;
+    base_inputs.startup_ready = 0U;
+    base_inputs.leg_hold_tx_recent = 0U;
+    for (i = 0; i < 6; ++i) {
+        out = run_deadline(1300U + 4U * (uint32_t)i, 0.0f);
+        TEST_TRUE(!out.wheel_output_gate);
+    }
+    TEST_EQ_INT((uint32_t)STATE_STAND, (uint32_t)g_safety_state.current_mode);
+
+    /* Recovery re-runs the sequencer: enables complete, hold writes return,
+     * and the gate reopens through the supervisor's re-issue stage within a
+     * bounded number of deadlines. */
+    base_inputs.servo_enable_verified = 1U;
+    base_inputs.startup_ready = 1U;
+    base_inputs.leg_hold_tx_recent = 1U;
+    for (i = 0; i < 8; ++i) {
+        out = run_deadline(1400U + 4U * (uint32_t)i, 0.0f);
+    }
+    TEST_TRUE(out.wheel_output_gate);
+    TEST_TRUE(fabsf(out.torque_left_nm) < 1e-6f); /* balanced: no torque */
+}
+
 void run_control_section_tests(void) {
     test_gate_closed_until_all_verdicts_open();
     test_supervisor_denial_blocks_torque_every_deadline();
@@ -265,4 +318,5 @@ void run_control_section_tests(void) {
     test_pitch_fade_limits_fallen_robot_torque();
     test_boot_reaches_gate_with_coupled_enable_flags();
     test_stale_imu_freshness_revokes_torque();
+    test_transient_fault_recovery_reruns_enable_sequencer();
 }

@@ -207,7 +207,10 @@ int ddsm_bus_submit(DDSM_Bus_t *bus,
     uint8_t mode;
     if (bus == NULL || target == NULL || packet == NULL || bus->huart == NULL) return -1;
     expect_reply = packet[1] == 0xA0U ? 0U : 1U;
-    mode = (packet[1] == 0xA0U) ? packet[9] : 0U;
+    /* Only genuine mode frames carry a mode in byte[9]: their sub-command
+     * slot byte[2] is zero.  Enable frames (byte[2] = 0x08/0x09) put a CRC
+     * there, which must not be recorded as a control mode. */
+    mode = (packet[1] == 0xA0U && packet[2] == 0x00U) ? packet[9] : 0U;
     if (bus->phase != DDSM_BUS_IDLE || bus->pending_count != 0U) {
         /* Enqueue under the same IRQ mask discipline as start_pending: the
          * completion ISR pops this queue from interrupt context, so the
@@ -291,16 +294,30 @@ void ddsm_bus_step(DDSM_Bus_t *bus, uint32_t now_ms) {
         return;
     }
     if (deadline_reached(now_ms, bus->deadline_ms)) {
-        if (bus->expect_reply) {
-            finish_failure(bus, DEVICE_FAILURE_TIMEOUT);
-        } else {
-            /* No-reply mode/enable is complete only as TX completion plus
-             * quiet expiry; it is never reported as feedback/ACK. */
-            bus->status = DDSM_TX_STATUS_TX_COMPLETE;
-            bus->last_tx.status = DDSM_TX_STATUS_TX_COMPLETE;
-            finish_idle(bus, now_ms);
+        /* Re-validate under the IRQ mask: between the outer check and the
+         * finish, the completion ISR can legally finish THIS transaction and
+         * start the next one (fresh target, fresh deadline).  A stale timeout
+         * verdict would then kill the new transaction -- penalise the wrong
+         * target's health and leave the bus IDLE while its frame is still
+         * mid-transmission.  This is the one main-context phase transition
+         * the header's "IDLE exits only via start_pending" contract did not
+         * cover; both re-checks together close the window. */
+        uint32_t primask = bus_lock_irqs();
+        if (bus->phase != DDSM_BUS_IDLE &&
+            deadline_reached(now_ms, bus->deadline_ms)) {
+            if (bus->expect_reply) {
+                bus->last_tx.finished_ms = now_ms;
+                finish_failure(bus, DEVICE_FAILURE_TIMEOUT);
+            } else {
+                /* No-reply mode/enable is complete only as TX completion plus
+                 * quiet expiry; it is never reported as feedback/ACK. */
+                bus->status = DDSM_TX_STATUS_TX_COMPLETE;
+                bus->last_tx.status = DDSM_TX_STATUS_TX_COMPLETE;
+                finish_idle(bus, now_ms);
+            }
+            bus->rx_len = 0U;
         }
-        bus->rx_len = 0U;
+        bus_unlock_irqs(primask);
     }
 }
 
