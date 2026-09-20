@@ -12,12 +12,19 @@
  * as dma_rx_ring.h): the caller reads transport->lap_count BEFORE sampling
  * NDTR; every interrupt interleaving of that order is exact or a bounded
  * undercount, never an overcount, so a race can never fabricate an overrun.
+ * poll() additionally derives the parse span from the absolute cursors
+ * (producer - consumed, clamped to one ring) rather than from a
+ * read_index-vs-write_index comparison, so an undercount sample can only
+ * defer parsing by one poll and consumed_count can never overshoot
+ * producer_count.
  *
  * When the consumer falls a full ring behind, the overwritten prefix is
- * dropped and counted in overrun_count; the streaming decoder resynchronizes
- * on the A5 header.  Frame-level integrity is independently guaranteed by
- * the CRC-8 and the monotonic sequence check in pi_link, so dropped bytes
- * can never replay a stale command. */
+ * dropped and counted in overrun_count and the still-valid remainder of the
+ * ring is parsed in the same poll, so the consumer always catches back up;
+ * the streaming decoder resynchronizes on the A5 header.  Frame-level
+ * integrity is independently guaranteed by the CRC-8 and the monotonic
+ * sequence check in pi_link, so dropped bytes can never replay a stale
+ * command. */
 typedef struct {
     uint8_t *buffer;
     uint16_t size;

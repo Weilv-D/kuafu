@@ -227,15 +227,22 @@ void run_pi_transport_tests(void) {
                                      (uint16_t)(sizeof(ring) - len)));
     TEST_TRUE(pi_link_is_compatible());
 
-    /* Place a complete heartbeat across the physical end of the DMA ring. */
+    /* Place a complete heartbeat across the physical end of the DMA ring.
+     * The consumer has drained to absolute 60; the producer then completed
+     * one more lap and sits at position 15, so the 19-byte frame straddles
+     * the physical end (read_index == consumed % size invariant). */
     make_heartbeat(heartbeat, 1U, 50, 0, 58);
     len = build_frame(frame, PI_PROTOCOL_VERSION, PI_CMD_HEARTBEAT, 201U,
                       heartbeat, sizeof(heartbeat));
+    transport.consumed_count = 60U;
     transport.read_index = 60U;
+    transport.producer_count = 60U;
     memcpy(&ring[60], frame, 4U);
     memcpy(ring, &frame[4], (size_t)(len - 4U));
-    TEST_EQ_INT(1, pi_transport_poll(&transport, 0U,
+    TEST_EQ_INT(1, pi_transport_poll(&transport, 1U,
                                      (uint16_t)(sizeof(ring) - (len - 4U))));
+    TEST_EQ_INT((int)(sizeof(ring) + (len - 4U)), (int)transport.consumed_count);
+    TEST_EQ_INT((int)(len - 4U), (int)transport.read_index);
     TEST_NEAR(0.05f, g_pi_cmd_heartbeat.target_velocity, 0.0001f);
 
     /* A single chunk larger than the decoder's internal holding buffer must

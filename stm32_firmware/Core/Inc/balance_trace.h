@@ -3,7 +3,13 @@
 
 #include <stdint.h>
 
-/* 256 samples at 250 Hz = 1.024 s; post-fault tail is 64 samples = 256 ms. */
+/* 256 samples at 250 Hz = 1.024 s; post-fault tail is 64 samples = 256 ms.
+ * A fault arms the bounded tail and freezes the ring so the post-fault window
+ * survives for the SWD dump; the freeze is released when a new fault arrives
+ * after a fault-free period, or once the system has been fault-free for a
+ * full tail, so an auto-recovered transient fault cannot blind the rest of
+ * the session.  A latched (serious) fault keeps the ring frozen by design:
+ * the robot is locked down and there is nothing further to record. */
 #define BALANCE_TRACE_LEN 256U
 #define BALANCE_TRACE_POST_FAULT_SAMPLES 64U
 #define BALANCE_TRACE_VERSION 2U

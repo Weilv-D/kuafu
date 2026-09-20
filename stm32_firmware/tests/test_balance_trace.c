@@ -110,9 +110,89 @@ static void test_metadata_and_size_budget(void) {
     TEST_EQ_INT(20480, (int)sizeof(g_bt_buf));
 }
 
+/* Regression: the post-fault freeze must be releasable.  Previously the first
+ * fault froze the ring for the rest of the session, so an auto-recovered
+ * transient fault early on blinded every later dump — including the window of
+ * a subsequent real crash. */
+static void test_freeze_releases_after_health_or_new_fault(void) {
+    BalanceTraceSnapshot_t snap;
+    BalanceTraceInput_t in = sample_input(1000U, 0.5f);
+
+    /* --- release after a full fault-free tail --- */
+    balance_trace_init();
+    in.fault_mask = 0x80000004UL;
+    in.mode = 4U;
+    balance_trace_note_event(BALANCE_TRACE_EVENT_FAULT, 1000U);
+    balance_trace_record(&in);
+    for (uint32_t i = 0U; i < BALANCE_TRACE_POST_FAULT_SAMPLES; ++i) {
+        balance_trace_record(&in);
+    }
+    TEST_TRUE(balance_trace_snapshot(&snap));
+    TEST_TRUE(snap.frozen);
+
+    /* Fault clears: after one full fault-free tail the ring records again.
+     * The 64th fault-free sample is the one that releases the freeze, so it
+     * is recorded itself: 1 (fault) + 64 (tail) + 1 (release) records. */
+    in.fault_mask = 0U;
+    in.mode = 1U;
+    for (uint32_t i = 0U; i < BALANCE_TRACE_POST_FAULT_SAMPLES; ++i) {
+        balance_trace_record(&in);
+    }
+    TEST_TRUE(balance_trace_snapshot(&snap));
+    TEST_TRUE(!snap.frozen);
+    TEST_EQ_INT(1U + BALANCE_TRACE_POST_FAULT_SAMPLES + 1U,
+                (int)snap.total_records);
+
+    /* --- a new fault after a healthy period supersedes the frozen window --- */
+    balance_trace_init();
+    in = sample_input(2000U, 0.5f);
+    in.fault_mask = 0x80000004UL;
+    in.mode = 4U;
+    balance_trace_note_event(BALANCE_TRACE_EVENT_FAULT, 2000U);
+    balance_trace_record(&in);
+    for (uint32_t i = 0U; i < BALANCE_TRACE_POST_FAULT_SAMPLES + 5U; ++i) {
+        balance_trace_record(&in);
+    }
+    TEST_TRUE(balance_trace_snapshot(&snap));
+    TEST_TRUE(snap.frozen);
+
+    /* Healthy for a while, then a NEW fault: the freeze releases immediately
+     * and the new fault's own tail is armed. */
+    in.fault_mask = 0U;
+    in.mode = 1U;
+    for (uint32_t i = 0U; i < 10U; ++i) {
+        balance_trace_record(&in);
+    }
+    in.fault_mask = 0x80000004UL;
+    in.mode = 4U;
+    balance_trace_note_event(BALANCE_TRACE_EVENT_FAULT, 3000U);
+    balance_trace_record(&in);
+    TEST_TRUE(balance_trace_snapshot(&snap));
+    TEST_TRUE(!snap.frozen);
+    TEST_EQ_INT(BALANCE_TRACE_EVENT_FAULT,
+                (int)snap.samples[snap.count - 1U].event);
+    for (uint32_t i = 0U; i < BALANCE_TRACE_POST_FAULT_SAMPLES; ++i) {
+        balance_trace_record(&in);
+    }
+    TEST_TRUE(balance_trace_snapshot(&snap));
+    TEST_TRUE(snap.frozen);
+
+    /* --- a latched fault keeps the ring frozen (nothing more to record) --- */
+    for (uint32_t i = 0U; i < 5U; ++i) {
+        balance_trace_record(&in); /* mask stays non-zero: no release */
+    }
+    TEST_TRUE(balance_trace_snapshot(&snap));
+    TEST_TRUE(snap.frozen);
+    /* 1 (first fault) + 64 (tail) + 1 (new fault) + 64 (its tail); the
+     * healthy samples and the trailing five stayed frozen out. */
+    TEST_EQ_INT(2U * (1U + BALANCE_TRACE_POST_FAULT_SAMPLES),
+                (int)snap.total_records);
+}
+
 void run_balance_trace_tests(void) {
     test_empty_and_partial_snapshot();
     test_ring_wraps_and_keeps_chronological_window();
     test_init_and_fault_event_freeze_are_bounded();
     test_metadata_and_size_budget();
+    test_freeze_releases_after_health_or_new_fault();
 }

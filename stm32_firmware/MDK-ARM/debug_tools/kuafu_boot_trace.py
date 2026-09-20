@@ -19,12 +19,12 @@ ADDR = {
     "body_pitch_rate": 0x20000018,
     "tau_l": 0x2000001c,
     "tau_r": 0x20000020,
-    "mahony": 0x200003cc,
-    "lqr": 0x20000718,
-    "ddsm_l": 0x20000404,
-    "ddsm_r": 0x2000042c,
-    "startup": 0x20000524,
-    "safety": 0x20000888,
+    "mahony": 0x200003d0,
+    "lqr": 0x2000071c,
+    "ddsm_l": 0x20000408,
+    "ddsm_r": 0x20000430,
+    "startup": 0x20000528,
+    "safety": 0x2000088c,
 }
 
 MODES = ["INIT", "STAND", "ACTIVE", "CLIMB", "FAULT"]

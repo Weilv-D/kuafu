@@ -10,11 +10,6 @@ static uint16_t write_index_from_remaining(uint16_t size, uint16_t dma_remaining
     return dma_remaining == 0U ? size : (uint16_t)(size - dma_remaining);
 }
 
-/* Forward modular distance from a to b for cursors living in [0, size]. */
-static uint16_t ring_delta(uint16_t size, uint16_t a, uint16_t b) {
-    return b >= a ? (uint16_t)(b - a) : (uint16_t)(size - a + b);
-}
-
 void pi_transport_init(PiTransport_t *transport, uint8_t *buffer, uint16_t size) {
     if (transport == NULL) return;
     transport->buffer = buffer;
@@ -48,43 +43,63 @@ int pi_transport_poll(PiTransport_t *transport,
                       uint16_t dma_remaining) {
     uint16_t write_index;
     uint16_t span;
-    uint32_t candidate;
+    uint32_t pending;
     int parsed = 0;
     if (transport == NULL || transport->buffer == NULL || transport->size == 0U ||
         dma_remaining > transport->size) return -1;
 
     write_index = write_index_from_remaining(transport->size, dma_remaining);
-    candidate = laps * (uint32_t)transport->size + write_index;
-    if (candidate > transport->producer_count) {
-        transport->producer_count = candidate;
+    {
+        uint32_t candidate = laps * (uint32_t)transport->size + write_index;
+        if (candidate > transport->producer_count) {
+            transport->producer_count = candidate;
+        }
     }
 
-    if ((uint32_t)(transport->producer_count - transport->consumed_count) >
-        transport->size) {
+    /* The parse span is derived from the absolute cursors, never from a
+     * read_index-vs-write_index comparison.  After an overrun the two indices
+     * coincide while a FULL ring is still pending, and a cursor comparison
+     * reports that as "nothing to do": the consumer would then sit exactly one
+     * ring behind the producer forever, billing every freshly arrived byte as
+     * another overrun and parsing nothing — permanent link deafness until
+     * reboot.  Cursor-derived spans also make the laps/NDTR sampling race
+     * harmless by construction: a stale sample can only under-advance the
+     * producer for one poll (the monotonic max absorbs it next poll), and
+     * consumed_count can never overshoot producer_count. */
+    pending = transport->producer_count - transport->consumed_count;
+    if (pending > (uint32_t)transport->size) {
         /* The DMA lapped the parser: the oldest pending bytes are already
-         * overwritten.  Drop exactly the lost prefix and count it. */
-        uint16_t lost = (uint16_t)((transport->producer_count -
-                                    transport->consumed_count) - transport->size);
+         * overwritten.  Drop exactly the lost prefix and count it; the rest of
+         * the ring is still valid and is parsed below, so the consumer catches
+         * up in this same poll instead of stalling one ring behind. */
+        uint16_t lost = (uint16_t)(pending - (uint32_t)transport->size);
         transport->overrun_count += lost;
         transport->consumed_count += lost;
         transport->read_index = (uint16_t)(transport->producer_count %
                                            (uint32_t)transport->size);
+        pending = transport->producer_count - transport->consumed_count;
     }
+    if (pending == 0U) return 0;
+    span = (uint16_t)(pending > (uint32_t)transport->size
+                          ? (uint32_t)transport->size
+                          : pending);
 
-    if (write_index == transport->read_index) return 0;
-    span = ring_delta(transport->size, transport->read_index, write_index);
-
-    if (write_index > transport->read_index) {
+    if ((uint32_t)transport->read_index + (uint32_t)span <=
+        (uint32_t)transport->size) {
         parsed += pi_link_parse_packet(&transport->buffer[transport->read_index],
-                                       (uint16_t)(write_index - transport->read_index));
+                                       span);
+        transport->read_index =
+            ((uint32_t)transport->read_index + span == (uint32_t)transport->size)
+                ? 0U
+                : (uint16_t)(transport->read_index + span);
     } else {
+        uint16_t first = (uint16_t)(transport->size - transport->read_index);
         parsed += pi_link_parse_packet(&transport->buffer[transport->read_index],
-                                       (uint16_t)(transport->size - transport->read_index));
-        if (write_index > 0U) {
-            parsed += pi_link_parse_packet(transport->buffer, write_index);
-        }
+                                       first);
+        parsed += pi_link_parse_packet(transport->buffer,
+                                       (uint16_t)(span - first));
+        transport->read_index = (uint16_t)(span - first);
     }
-    transport->read_index = write_index == transport->size ? 0U : write_index;
     transport->consumed_count += span;
     return parsed;
 }

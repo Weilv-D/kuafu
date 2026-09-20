@@ -64,7 +64,28 @@ float lqr_update_elapsed_dt(LQRController_t *controller,
                             float delta_tau_yaw,
                             float *out_tau_l,
                             float *out_tau_r) {
-    float dt = clamp_float(elapsed_dt_s, 0.0f, LQR_ELAPSED_DT_MAX);
+    float dt;
+    /* Non-finite defense: a NaN compares false against every clamp bound, so
+     * one would propagate silently through the gains into the torque output
+     * (and past the dispatch clamps, which only bound magnitude).  Every
+     * input is validated upstream today (attitude by the Mahony gate, wheel
+     * feedback by the bus parsers, commands by the link decoder), so this
+     * guard is for future callers — the safe sentinel is coast, never a
+     * saturated command.  Same policy as ddsm_build_torque / quantize_i16 /
+     * servo_angle_to_tick. */
+    if (controller == NULL || out_tau_l == NULL || out_tau_r == NULL) {
+        return 0.0f;
+    }
+    if (!isfinite(elapsed_dt_s) || !isfinite(pitch_rad) ||
+        !isfinite(pitch_rate_rads) || !isfinite(wheel_vel_l_rads) ||
+        !isfinite(wheel_vel_r_rads) || !isfinite(yaw_rad) ||
+        !isfinite(yaw_rate_rads) || !isfinite(vx_cmd) || !isfinite(wz_cmd) ||
+        !isfinite(delta_tau_common) || !isfinite(delta_tau_yaw)) {
+        *out_tau_l = 0.0f;
+        *out_tau_r = 0.0f;
+        return 0.0f;
+    }
+    dt = clamp_float(elapsed_dt_s, 0.0f, LQR_ELAPSED_DT_MAX);
     if (dt <= 0.0f) {
         *out_tau_l = 0.0f;
         *out_tau_r = 0.0f;

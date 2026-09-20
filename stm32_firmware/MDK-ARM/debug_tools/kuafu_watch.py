@@ -27,14 +27,14 @@ ADDR = {
     "tau_l": 0x2000001c,
     "tau_r": 0x20000020,
     "body_gyro": 0x200000a8,      # float[3]
-    "imu": 0x2000033c,            # +4 accel[3] +16 gyro[3] +28 temp +32 health.last_valid
-    "mahony": 0x200003cc,         # +36 roll +40 pitch +44 yaw
-    "lqr": 0x20000718,            # +20 x_est +24 x_ref +28 x_int +32 v_ref
-    "ddsm_l": 0x20000404,         # +4 torque +8 vel +12 pos +16 err +20 health.last_valid
-    "ddsm_r": 0x2000042c,
-    "startup": 0x20000524,        # +0 phase
-    "safety": 0x20000888,         # +0 mode +12 fault_mask +16 gyro_calib[3] +28 calibrated
-    "hb": 0x200009a8,             # +0 mode_request +4 vx +8 wz +12 d0 +16 last_hb_ms
+    "imu": 0x20000340,            # +4 accel[3] +16 gyro[3] +28 temp +32 health.last_valid
+    "mahony": 0x200003d0,         # +36 roll +40 pitch +44 yaw
+    "lqr": 0x2000071c,            # +20 x_est +24 x_ref +28 x_int +32 v_ref
+    "ddsm_l": 0x20000408,         # +4 torque +8 vel +12 pos +16 err +20 health.last_valid
+    "ddsm_r": 0x20000430,
+    "startup": 0x20000528,        # +0 phase
+    "safety": 0x2000088c,         # +0 mode +12 fault_mask +16 gyro_calib[3] +28 calibrated
+    "hb": 0x200009ac,             # +0 mode_request +4 vx +8 wz +12 d0 +16 last_hb_ms
 }
 
 MODES = ["INIT", "STAND", "ACTIVE", "CLIMB", "FAULT"]

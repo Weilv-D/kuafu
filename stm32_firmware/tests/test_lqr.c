@@ -201,6 +201,40 @@ static void test_lqr_integral_cleared_when_fallen(void) {
     TEST_NEAR(0.0f, c.x_int, 1.0e-6f);
 }
 
+/* Non-finite inputs coast instead of propagating NaN through the gains into
+ * the torque output (NaN compares false against every clamp bound, so the
+ * magnitude-only dispatch clamps would not stop it). */
+static void test_lqr_non_finite_input_coasts(void) {
+    LQRController_t c;
+    float tau_l = 1.0f, tau_r = 1.0f;
+    lqr_init(&c);
+    lqr_update_elapsed_dt(&c, 0.004f, (float)NAN, 0.0f, 0.0f, 0.0f,
+                          0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                          &tau_l, &tau_r);
+    TEST_TRUE(isfinite(tau_l));
+    TEST_NEAR(0.0f, tau_l, 1.0e-6f);
+    TEST_TRUE(isfinite(tau_r));
+    TEST_NEAR(0.0f, tau_r, 1.0e-6f);
+
+    tau_l = 1.0f; tau_r = 1.0f;
+    lqr_update_elapsed_dt(&c, (float)NAN, 0.0f, 0.0f, 0.0f, 0.0f,
+                          0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                          &tau_l, &tau_r);
+    TEST_TRUE(isfinite(tau_l));
+    TEST_NEAR(0.0f, tau_l, 1.0e-6f);
+    TEST_TRUE(isfinite(tau_r));
+    TEST_NEAR(0.0f, tau_r, 1.0e-6f);
+
+    tau_l = 1.0f; tau_r = 1.0f;
+    lqr_update_elapsed_dt(&c, 0.004f, 0.0f, 0.0f, 0.0f, 0.0f,
+                          0.0f, 0.0f, 0.0f, 0.0f, (float)INFINITY, 0.0f,
+                          &tau_l, &tau_r);
+    TEST_TRUE(isfinite(tau_l));
+    TEST_NEAR(0.0f, tau_l, 1.0e-6f);
+    TEST_TRUE(isfinite(tau_r));
+    TEST_NEAR(0.0f, tau_r, 1.0e-6f);
+}
+
 void run_lqr_tests(void) {
     test_lqr_zero_state_zero_output();
     test_lqr_torque_envelope_saturation();
@@ -212,4 +246,5 @@ void run_lqr_tests(void) {
     test_lqr_elapsed_dt_api();
     test_wheel_dir_raw_contract();
     test_lqr_integral_cleared_when_fallen();
+    test_lqr_non_finite_input_coasts();
 }

@@ -26,6 +26,14 @@ char g_bt_build_id[BALANCE_TRACE_TEXT_LEN];
 const uint32_t g_bt_trace_version = BALANCE_TRACE_VERSION;
 
 static uint8_t g_bt_pending_event;
+/* Freeze-release bookkeeping (file-scope statics: the SWD-visible symbol
+ * layout of the ring itself is unchanged).  A freeze preserves the bounded
+ * post-fault window; it is released when a NEW fault arrives after a
+ * fault-free period (the newer evidence supersedes the preserved one) or
+ * once the system has been fault-free for a full tail, so one auto-recovered
+ * transient fault early in a session cannot blind every later dump. */
+static uint16_t g_bt_healthy_ticks;
+static uint8_t g_bt_fault_active;
 
 static void copy_text(char *dst, const char *src) {
     size_t i;
@@ -48,6 +56,8 @@ void balance_trace_init(void) {
     g_bt_seq = 0U;
     g_bt_frozen = 0U;
     g_bt_post_fault_remaining = 0U;
+    g_bt_healthy_ticks = 0U;
+    g_bt_fault_active = 0U;
     /* The first recorded sample carries the INIT marker so a dump shows the
      * boot boundary without correlating timestamps against the reset cause. */
     g_bt_pending_event = BALANCE_TRACE_EVENT_INIT;
@@ -76,9 +86,35 @@ void balance_trace_record(const BalanceTraceInput_t *input) {
     BalanceTraceSample_t *sample;
     uint8_t event;
 
-    if (input == NULL || g_bt_frozen != 0U) {
-        return;
+    if (input == NULL) return;
+
+    /* Health tracking runs even while frozen: the preserved post-fault window
+     * is released once the system has been fault-free for a full tail, or
+     * immediately when a NEW fault arrives after a fault-free period (the
+     * newer evidence supersedes the preserved one).  Without the release a
+     * single auto-recovered transient fault freezes the ring for the rest of
+     * the session and every later crash goes unrecorded. */
+    if (input->fault_mask == 0U) {
+        if (g_bt_healthy_ticks < UINT16_MAX) {
+            ++g_bt_healthy_ticks;
+        }
+    } else {
+        g_bt_healthy_ticks = 0U;
     }
+
+    if (g_bt_frozen != 0U) {
+        uint8_t new_fault = (uint8_t)(input->fault_mask != 0U &&
+                                      !g_bt_fault_active);
+        if (new_fault ||
+            g_bt_healthy_ticks >= BALANCE_TRACE_POST_FAULT_SAMPLES) {
+            g_bt_frozen = 0U;
+            g_bt_post_fault_remaining = 0U;
+        } else {
+            g_bt_fault_active = (uint8_t)(input->fault_mask != 0U);
+            return;
+        }
+    }
+    g_bt_fault_active = (uint8_t)(input->fault_mask != 0U);
 
     /* Publish odd before writes and even only after the complete sample. */
     g_bt_snapshot_seq++;
