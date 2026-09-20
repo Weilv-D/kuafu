@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Firmware logic review, fourth record (2026-09-20)
+
+An independent sixth-pass, whole-repository review performed from source
+alone (the five prior records consulted only afterwards to cross-check;
+nothing in them was stale). Three findings, all closed in this round.
+Record: `docs/validation/stm32-firmware-2026-09-20-4.md`.
+
+- (Medium) The firmware receive sequence gate now resynchronizes after a
+  peer restart, mirroring the Pi-side decoder's 8-frame resync: eight
+  consecutive CRC-valid, non-HELLO frames rejected by the monotonic gate
+  alone clear the baseline and the next frame starts a new session. Every
+  Pi-side program sends HELLO exactly once at startup, so a single
+  corrupted HELLO previously locked a rebooted Pi out of `ACTIVE` until
+  its counter climbed back past the previous session's high-water mark —
+  minutes at 50 Hz, clearing only on an STM32 power cycle. Payload-invalid
+  frames never count (noise cannot open the gate), and any accepted frame
+  clears the streak, so isolated duplicates are still dropped. The reject
+  counter is packed into the existing `have_rx_sequence` state byte, so
+  the SWD debug-symbol table is unchanged. Regression in `test_pi_link.c`.
+- (Low) `ddsm_build_torque`/`ddsm_build_speed` decode a non-finite command
+  as zero (coast) instead of reaching an undefined float→int cast — a NaN
+  compares false against every clamp bound. Unreachable through the
+  current call chain (finiteness is validated upstream in the same control
+  deadline); the guard is for future callers of the public encoders, the
+  same latent-trap class as `quantize_i16`. Regression in
+  `test_ddsm315.c`.
+- (Low) `servo_angle_to_tick` maps a non-finite angle to the calibrated
+  dwell tick instead of the same undefined cast — never a mechanical
+  extreme, which a clamp would command. Regression in
+  `test_servo_mapping.c`.
+
 ### Firmware logic review, third record (2026-09-20)
 
 An independent fifth-pass review performed from source alone (prior

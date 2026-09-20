@@ -82,6 +82,16 @@ BMI088, two DDSM315 wheel motors, and four ST3215 servos powered together.
   device faults (wheel/servo freshness) auto-recover through that same
   re-issue stage.
 - The Pi bridge uses USART6 at 921600 baud with circular DMA reception.
+  The receive sequence gate is restart-tolerant in both directions: a
+  validated HELLO starts a new session, and eight consecutive CRC-valid,
+  non-HELLO frames rejected by the monotonic gate alone are judged a Pi
+  restart (the firmware mirror of the Pi-side decoder resync), so a
+  rebooted Pi whose single startup HELLO was corrupted on the wire is not
+  locked out of `ACTIVE` until the STM32 is power-cycled. Payload-invalid
+  frames never count toward the resync and isolated duplicates are still
+  dropped. Frame encoders decode non-finite values as their safe
+  sentinels (zero torque, dwell tick) rather than undefined float→int
+  casts.
 
 ## Balance Trace
 
@@ -169,8 +179,9 @@ powershell -ExecutionPolicy Bypass -File stm32_firmware\tools\build_keil.ps1
 
 The target project is `MDK-ARM/stm32_firmware.uvprojx`. The accepted build has
 zero compiler errors and zero warnings. Flash and inspect it with the tools under
-`MDK-ARM/debug_tools`. The final evidence is recorded in
-`../docs/validation/stm32-firmware-2026-07-16.md`.
+`MDK-ARM/debug_tools`. The most recent logic-review evidence is recorded in
+`../docs/validation/` (latest record: `stm32-firmware-2026-09-20-4.md`; the
+electronics bring-up acceptance remains `stm32-firmware-2026-07-16.md`).
 
 The electronics gate does not replace mechanical motion acceptance. Wheel
 direction, yaw sign, tethered balance, and the five-bar range sweep remain ordered
