@@ -237,4 +237,26 @@ void run_pi_transport_tests(void) {
     TEST_EQ_INT(1, pi_transport_poll(&transport, 0U,
                                      (uint16_t)(sizeof(ring) - (len - 4U))));
     TEST_NEAR(0.05f, g_pi_cmd_heartbeat.target_velocity, 0.0001f);
+
+    /* A single chunk larger than the decoder's internal holding buffer must
+     * be decoded, not dropped: after a main-loop stall the transport can
+     * hand over a whole ring of bytes at once.  Ten heartbeats exceed the
+     * buffer, so the sliced append path is exercised end to end. */
+    {
+        uint8_t burst[10 * 32];
+        uint16_t burst_len = 0U;
+        int burst_parsed;
+        int j;
+        for (j = 0; j < 10; ++j) {
+            make_heartbeat(heartbeat, 1U, (int16_t)(10 * (j + 1)), 0, 58);
+            burst_len = (uint16_t)(burst_len + build_frame(&burst[burst_len],
+                                    PI_PROTOCOL_VERSION, PI_CMD_HEARTBEAT,
+                                    (uint16_t)(400U + j), heartbeat,
+                                    sizeof(heartbeat)));
+        }
+        burst_parsed = pi_link_parse_packet(burst, burst_len);
+        TEST_EQ_INT(10, burst_parsed);
+        TEST_NEAR(0.1f, g_pi_cmd_heartbeat.target_velocity, 0.0001f);
+        TEST_TRUE(pi_link_heartbeat_fresh());
+    }
 }

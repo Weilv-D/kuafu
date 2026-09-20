@@ -287,6 +287,9 @@ SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs) {
     }
 
     if (g_safety_state.current_mode == STATE_STAND) {
+        /* CLIMB is deliberately reachable only through ACTIVE (the arming
+         * step), see docs/architecture/system.md operating-modes table; an
+         * INIT request has no inbound transition at all and is ignored. */
         if (inputs->requested_mode == (uint8_t)STATE_ACTIVE &&
             inputs->link_compatible && inputs->heartbeat_fresh) {
             enter_mode_command_driven(STATE_ACTIVE, inputs);
@@ -295,7 +298,13 @@ SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs) {
         if (!inputs->link_compatible || !inputs->heartbeat_fresh) {
             decision.enter_hold = 1U;
             enter_mode_command_driven(STATE_STAND, inputs);
-        } else if (inputs->requested_mode == (uint8_t)STATE_STAND) {
+        } else if (inputs->requested_mode == (uint8_t)STATE_STAND ||
+                   inputs->requested_mode == (uint8_t)STATE_INIT) {
+            /* STAND and "leave the motion mode": INIT is a boot state with no
+             * inbound transition, so a sender that asks for it while the robot
+             * walks is asking to stop.  Honouring it as STAND keeps the mode
+             * consistent with the request; ignoring it would leave the robot
+             * driving while the sender believes it was obeyed. */
             enter_mode_command_driven(STATE_STAND, inputs);
         } else if (inputs->requested_mode == (uint8_t)STATE_CLIMB) {
             enter_mode_command_driven(STATE_CLIMB, inputs);
@@ -309,7 +318,8 @@ SafetyDecision_t safety_state_update(const SafetyInputs_t *inputs) {
             enter_mode_command_driven(STATE_STAND, inputs);
         } else if (inputs->requested_mode == (uint8_t)STATE_ACTIVE) {
             enter_mode_command_driven(STATE_ACTIVE, inputs);
-        } else if (inputs->requested_mode == (uint8_t)STATE_STAND) {
+        } else if (inputs->requested_mode == (uint8_t)STATE_STAND ||
+                   inputs->requested_mode == (uint8_t)STATE_INIT) {
             enter_mode_command_driven(STATE_STAND, inputs);
         }
     } else {

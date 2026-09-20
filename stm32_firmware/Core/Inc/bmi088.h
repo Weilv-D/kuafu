@@ -73,8 +73,20 @@ typedef struct {
 void bmi088_begin_init(BMI088_t *imu, I2C_HandleTypeDef *hi2c, uint32_t now_ms);
 void bmi088_recover_bus(BMI088_t *imu);
 int bmi088_init_step(BMI088_t *imu, uint32_t now_ms);
-int bmi088_read_accel(BMI088_t *imu);
-int bmi088_read_gyro(BMI088_t *imu);
+/* Per-channel readers take the caller's timestamp so that one fusion cycle
+ * stamps BOTH channels with a single instant (see bmi088_read_pair).  The
+ * legacy aggregate health is only refreshed when the accel and gyro samples
+ * of the same cycle both validate; stamping each read with its own
+ * HAL_GetTick() would drop the pair whenever the two I2C transactions
+ * straddle a millisecond boundary, which can starve the aggregate health
+ * (and with it imu_fresh) for as long as the main loop stays phase-locked
+ * to that boundary. */
+int bmi088_read_accel(BMI088_t *imu, uint32_t now_ms);
+int bmi088_read_gyro(BMI088_t *imu, uint32_t now_ms);
+/* One fusion cycle: accel then gyro under a single timestamp.  A successful
+ * pair always marks the aggregate health valid; a failed channel leaves it
+ * untouched so the surviving channel can never mask the dead one. */
+int bmi088_read_pair(BMI088_t *imu, uint32_t now_ms);
 int bmi088_read_temp(BMI088_t *imu);
 
 void bmi088_set_accel_calibration(BMI088_t *imu,

@@ -615,8 +615,12 @@ int main(void) {
             cs_in.startup_ready = servos_enabled;
             cs_in.actuator_configured = g_actuator_configured;
             cs_in.wheel_authorized = wheel_authorized;
-            cs_in.wheel_bus_idle = runtime_inputs.wheel_bus_idle;
-            cs_in.servo_bus_idle = runtime_inputs.servo_bus_idle;
+            /* Bus-idle verdicts are sampled HERE, not at the top of the loop:
+             * the discovery/enable/dispatch passes in between can start a
+             * transaction, and the supervisor must see the bus state that is
+             * actually current at this deadline. */
+            cs_in.wheel_bus_idle = ddsm_bus_is_idle(&g_ddsm_bus);
+            cs_in.servo_bus_idle = st3215_bus_is_idle(&g_st3215_bus);
             cs_in.link_compatible = pi_link_is_compatible();
             cs_in.heartbeat_fresh = pi_link_heartbeat_fresh();
             cs_in.action_fresh = pi_link_action_fresh();
@@ -739,9 +743,11 @@ int main(void) {
 
                 /* 1. Read IMU sensors (safe to do here in the main loop background).
                  * Return codes matter: a failed channel keeps its previous sample
-                 * and must not be fused as if it were fresh. */
-                (void)bmi088_read_accel(&g_imu);
-                (void)bmi088_read_gyro(&g_imu);
+                 * and must not be fused as if it were fresh.  Both channels are
+                 * stamped with ONE timestamp captured before the I2C burst so the
+                 * aggregate health pair-validity cannot be skipped by the two
+                 * transactions straddling a millisecond boundary. */
+                (void)bmi088_read_pair(&g_imu, HAL_GetTick());
 
                 /* Refresh chip temperature at low rate (~10 Hz) for safety/telemetry */
                 if (++temp_refresh_counter >= 100) {

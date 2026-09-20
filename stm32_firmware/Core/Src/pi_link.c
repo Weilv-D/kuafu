@@ -186,17 +186,16 @@ static int parse_payload(uint8_t type, const uint8_t *payload, uint8_t payload_l
     return 0;
 }
 
-int pi_link_parse_packet(const uint8_t *buf, uint16_t len) {
-    if (len == 0) return 0;
-    if (len > sizeof(rx_stream) - rx_stream_len) {
-        rx_stream_len = 0;  /* Lost framing: resynchronize at the next header. */
-        if (len > sizeof(rx_stream)) return 0;
-    }
+/* Append a bounded slice (len <= sizeof(rx_stream) - rx_stream_len) and
+ * decode every complete frame it completes.  Retains at most one incomplete
+ * frame fragment, so the free space is never smaller than
+ * sizeof(rx_stream) - PI_MAX_FRAME_SIZE + 1. */
+static int parse_append(const uint8_t *buf, uint16_t len) {
+    int parsed = 0;
+    uint16_t offset = 0;
     memcpy(&rx_stream[rx_stream_len], buf, len);
     rx_stream_len += len;
 
-    int parsed = 0;
-    uint16_t offset = 0;
     while ((uint32_t)(rx_stream_len - offset) >= 12u) {
         if (rx_stream[offset] != PI_FRAME_HEADER) {
             ++offset;
@@ -243,6 +242,30 @@ int pi_link_parse_packet(const uint8_t *buf, uint16_t len) {
     if (offset > 0) {
         memmove(rx_stream, &rx_stream[offset], rx_stream_len - offset);
         rx_stream_len -= offset;
+    }
+    return parsed;
+}
+
+int pi_link_parse_packet(const uint8_t *buf, uint16_t len) {
+    if (len == 0) return 0;
+    /* The DMA consumer may hand over a whole ring of bytes at once (after a
+     * main-loop stall lapped the parser).  Feed the stream in bounded slices
+     * so a large chunk is decoded instead of dropped: each slice fills the
+     * free space, the decoder drains every complete frame and retains only
+     * the trailing fragment, and the next slice continues behind it.  Only a
+     * retained fragment that can never complete inside the buffer — which
+     * the frame-length validation makes impossible — is discarded. */
+    int parsed = 0;
+    while (len > 0) {
+        uint16_t capacity = (uint16_t)(sizeof(rx_stream) - rx_stream_len);
+        uint16_t take = len < capacity ? len : capacity;
+        if (take == 0) {
+            rx_stream_len = 0;  /* Unreachable via valid frames; stay safe. */
+            continue;
+        }
+        parsed += parse_append(buf, take);
+        buf += take;
+        len -= take;
     }
     return parsed;
 }

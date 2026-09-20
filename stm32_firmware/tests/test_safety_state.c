@@ -261,4 +261,48 @@ void run_safety_state_tests(void) {
     (void)safety_state_update(&inputs);
     TEST_EQ_INT(STATE_FAULT, g_safety_state.current_mode);
     TEST_TRUE((g_safety_state.fault_mask & FAULT_WHEEL_LEFT) != 0U);
+
+    /* A request to leave the motion modes is honoured even when it names
+     * INIT: INIT is a boot state with no inbound transition, so the only
+     * consistent reading of "stop" from a walking robot is STAND.  Before
+     * this rule an INIT request was silently ignored and the robot kept
+     * driving while the sender believed it had been obeyed. */
+    safety_state_init();
+    inputs = healthy_inputs();
+    enter_stand(&inputs);
+    inputs.requested_mode = STATE_ACTIVE;
+    (void)safety_state_update(&inputs);
+    TEST_EQ_INT(STATE_ACTIVE, g_safety_state.current_mode);
+    inputs.requested_mode = STATE_INIT;
+    (void)safety_state_update(&inputs);
+    TEST_EQ_INT(STATE_STAND, g_safety_state.current_mode);
+    /* STAND ignores both INIT (no inbound transition) and CLIMB (reachable
+     * only through the ACTIVE arming step): the robot keeps holding. */
+    inputs.requested_mode = STATE_INIT;
+    (void)safety_state_update(&inputs);
+    TEST_EQ_INT(STATE_STAND, g_safety_state.current_mode);
+    inputs.requested_mode = STATE_CLIMB;
+    (void)safety_state_update(&inputs);
+    TEST_EQ_INT(STATE_STAND, g_safety_state.current_mode);
+    /* The same demotion applies from CLIMB. */
+    inputs.requested_mode = STATE_ACTIVE;
+    (void)safety_state_update(&inputs);
+    TEST_EQ_INT(STATE_ACTIVE, g_safety_state.current_mode);
+    inputs.requested_mode = STATE_CLIMB;
+    (void)safety_state_update(&inputs);
+    TEST_EQ_INT(STATE_CLIMB, g_safety_state.current_mode);
+    inputs.requested_mode = STATE_INIT;
+    (void)safety_state_update(&inputs);
+    TEST_EQ_INT(STATE_STAND, g_safety_state.current_mode);
+    /* An ACTIVE request from CLIMB is still honoured, and CLIMB remains
+     * reachable only through the ACTIVE arming step. */
+    inputs.requested_mode = STATE_ACTIVE;
+    (void)safety_state_update(&inputs);
+    TEST_EQ_INT(STATE_ACTIVE, g_safety_state.current_mode);
+    inputs.requested_mode = STATE_CLIMB;
+    (void)safety_state_update(&inputs);
+    TEST_EQ_INT(STATE_CLIMB, g_safety_state.current_mode);
+    inputs.requested_mode = STATE_ACTIVE;
+    (void)safety_state_update(&inputs);
+    TEST_EQ_INT(STATE_ACTIVE, g_safety_state.current_mode);
 }

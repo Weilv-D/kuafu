@@ -232,11 +232,14 @@ int bmi088_init_step(BMI088_t *imu, uint32_t now_ms) {
             return bmi_init_write(imu, BMI088_GYRO_ADDR, BMI088_GYRO_INT3_INT4_IO_CONF, 0x01,
                                   BMI_INIT_GYRO_MAP, now_ms, 1U);
         case BMI_INIT_GYRO_MAP:
-            if (bmi_init_write(imu, BMI088_GYRO_ADDR, BMI088_GYRO_INT3_INT4_IO_MAP, 0x01,
-                               BMI_INIT_DONE, now_ms, 1U) != 0) {
-                return -1;
-            }
-            return 0;
+            /* Same retry semantics as every other init state: a retryable
+             * failure restarts the sequence with a fresh deadline (return 0),
+             * only the exhausted attempt budget fails the round (return -1).
+             * Returning -1 on a retryable failure here (as this case once
+             * did) kills the init round on the first hiccup and forces the
+             * startup manager to re-issue the whole 5-attempt budget. */
+            return bmi_init_write(imu, BMI088_GYRO_ADDR, BMI088_GYRO_INT3_INT4_IO_MAP, 0x01,
+                                  BMI_INIT_DONE, now_ms, 1U);
         case BMI_INIT_DONE:
             imu->initialized = 1U;
             return 1;
@@ -260,16 +263,21 @@ static uint8_t bmi_vector_finite_and_bounded(const float value[3], float limit) 
 }
 
 static void bmi_try_mark_pair_valid(BMI088_t *imu, uint32_t now_ms) {
+    /* The pair is identified by the shared timestamp the caller passed to
+     * both channel readers of one fusion cycle (bmi088_read_pair), not by an
+     * equality of two independently sampled HAL_GetTick() values.  Both
+     * channels must have validated within that single instant for the
+     * aggregate health to refresh, so a dead accel can never be masked by a
+     * live gyro (or vice versa). */
     if (imu->accel_sample_valid && imu->gyro_sample_valid &&
         imu->accel_last_valid_ms == now_ms && imu->gyro_last_valid_ms == now_ms) {
         device_health_mark_valid(&imu->health, now_ms);
     }
 }
 
-int bmi088_read_accel(BMI088_t *imu) {
+int bmi088_read_accel(BMI088_t *imu, uint32_t now_ms) {
     uint8_t buffer[6];
     float sample[3];
-    uint32_t now_ms;
     int16_t raw_x;
     int16_t raw_y;
     int16_t raw_z;
@@ -298,7 +306,6 @@ int bmi088_read_accel(BMI088_t *imu) {
     imu->accel[0] = sample[0];
     imu->accel[1] = sample[1];
     imu->accel[2] = sample[2];
-    now_ms = HAL_GetTick();
     imu->accel_last_valid_ms = now_ms;
     if (imu->accel_sequence != UINT32_MAX) ++imu->accel_sequence;
     imu->accel_sample_valid = 1U;
@@ -307,10 +314,9 @@ int bmi088_read_accel(BMI088_t *imu) {
     return 0;
 }
 
-int bmi088_read_gyro(BMI088_t *imu) {
+int bmi088_read_gyro(BMI088_t *imu, uint32_t now_ms) {
     uint8_t buffer[6];
     float sample[3];
-    uint32_t now_ms;
     int16_t raw_x;
     int16_t raw_y;
     int16_t raw_z;
@@ -336,12 +342,24 @@ int bmi088_read_gyro(BMI088_t *imu) {
     imu->gyro[0] = sample[0];
     imu->gyro[1] = sample[1];
     imu->gyro[2] = sample[2];
-    now_ms = HAL_GetTick();
     imu->gyro_last_valid_ms = now_ms;
     if (imu->gyro_sequence != UINT32_MAX) ++imu->gyro_sequence;
     imu->gyro_sample_valid = 1U;
     device_health_mark_valid(&imu->gyro_health, now_ms);
     bmi_try_mark_pair_valid(imu, now_ms);
+    return 0;
+}
+
+int bmi088_read_pair(BMI088_t *imu, uint32_t now_ms) {
+    int accel_result;
+    int gyro_result;
+    if (imu == NULL || imu->hi2c == NULL) return -1;
+    /* One fusion cycle, one timestamp: the aggregate health refreshes exactly
+     * when both channels of THIS cycle validate, independent of how the two
+     * I2C transactions interleave with the millisecond tick. */
+    accel_result = bmi088_read_accel(imu, now_ms);
+    gyro_result = bmi088_read_gyro(imu, now_ms);
+    if (accel_result != 0 || gyro_result != 0) return -1;
     return 0;
 }
 
