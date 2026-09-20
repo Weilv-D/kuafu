@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+### Firmware logic review, fifth record (2026-09-20)
+
+An independent eighth-pass, whole-repository review performed from source
+alone (the seven prior records consulted only afterwards to cross-check;
+their invariants held, and one encoded test expectation was found to pin a
+defect). Three findings, all closed in this round.
+Record: `docs/validation/stm32-firmware-2026-09-20-5.md`.
+
+- (High) The Pi RX transport recovers from a ring overrun instead of
+  stalling one ring behind the producer forever. `pi_transport_poll` derived
+  its parse span from a read-index-vs-write-index comparison; after the
+  overrun drop the two indices coincide while a full ring is still pending,
+  so the poll parsed nothing and every later byte was billed as a fresh
+  overrun — the receive side of the Pi link stayed deaf until reboot after
+  any main-loop stall longer than one ring (~2.2 ms at 921600 baud). The
+  span now comes from the absolute produced/consumed cursors (clamped to one
+  ring), the still-valid remainder is parsed in the same poll, and the
+  laps/NDTR sampling race is harmless by construction (a stale sample can
+  only under-advance the producer for one poll; `consumed` can never
+  overshoot `producer`). Regressions in `test_pi_transport.c` (new overrun-
+  recovery suite) and one corrected wrap-case expectation in
+  `test_pi_link.c`.
+- (Medium) The balance trace's post-fault freeze is releasable. Previously
+  the first fault — including an auto-recovered transient wheel/servo
+  freshness blip — froze the 256-sample ring for the rest of the session, so
+  a later crash's window was never recorded. The freeze now releases when a
+  new fault arrives after a fault-free period (the newer evidence supersedes
+  the preserved window) or once the system has been fault-free for a full
+  64-sample tail; a latched serious fault keeps the ring frozen by design.
+  Two new file-scope statics (+4 bytes RW) shifted 11 SWD symbol addresses
+  by a uniform +4; the `HANDOFF.md` §5.2 table and the three hardcoded
+  debug-script ADDR dictionaries were rebased. Regression in
+  `test_balance_trace.c`.
+- (Low) `lqr_update_elapsed_dt` coasts on any non-finite input instead of
+  propagating NaN through the gains into the torque output (NaN compares
+  false against every clamp bound, and the dispatch clamps only bound
+  magnitude). Unreachable through the current call chain; the guard is for
+  future callers, matching `ddsm_build_torque`/`quantize_i16`/
+  `servo_angle_to_tick`. Regression in `test_lqr.c`.
+
 ### Firmware logic review, fourth record (2026-09-20)
 
 An independent sixth-pass, whole-repository review performed from source

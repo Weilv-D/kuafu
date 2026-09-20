@@ -157,7 +157,7 @@ for s in syms:
 EOF
 ```
 
-然后更新脚本里的 `ADDR` 字典（**本次基线的地址见下表，仅对当前 commit 有效**；2026-09-20 第四次逻辑审查后已对照新构建复核，下表全部有效）：
+然后更新脚本里的 `ADDR` 字典（**本次基线的地址见下表，仅对当前 commit 有效**；2026-09-20 第五次逻辑审查后已对照新构建复核：balance_trace 新增两个静态变量使自 `g_st3215_ring` 起的 11 个符号统一 +4，下表与三个硬编码脚本均已按新 map 更新，全部有效）：
 
 | 符号 | 地址 | 含义 |
 |------|------|------|
@@ -169,16 +169,16 @@ EOF
 | `g_body_pitch / g_body_pitch_rate` | `0x20000014 / 0x20000018` | DRDY 发布的最新姿态 |
 | `g_ctrl_tau_l / g_ctrl_tau_r` | `0x2000001C / 0x20000020` | 缓存的轮力矩命令 |
 | `g_loop_heartbeat_ms` | `0x20000034` | 主循环心跳（stall 取证，EXTI1 观察） |
-| `g_st3215_ring` | `0x20000324` | servo RX 环：laps@+8, produced@+12, consumed@+16, overrun@+20 |
-| `g_imu` | `0x2000033C` | accel@+4, gyro@+16, temp@+28 |
-| `g_mahony` | `0x200003CC` | pitch@+40, yaw@+44 |
-| `g_ddsm_left/right` | `0x20000404 / 0x2000042C` | velocity_rads@+8, health@+20 |
-| `g_servos[4]` | `0x20000454` | 每元素 52B，health@+32 |
-| `g_startup_manager` | `0x20000524` | phase（0=INIT..4=READY,5=FAILED） |
-| `g_control_section` | `0x20000704` | ★ 控制节状态：lqr@+20（x_est@+40,x_ref@+44,x_int@+48）、supervisor.phase@+76（AC6 短枚举） |
-| `g_pi_transport` | `0x20000858` | Pi RX 环：read_idx@+6, laps@+8, produced@+12, consumed@+16, overrun@+20 |
-| `g_safety_state` | `0x20000888` | mode@+0, fault_mask@+12 |
-| `g_pi_cmd_heartbeat` | `0x200009A8` | mode@+0, vx@+4, wz@+8, d0@+12, last_hb@+16 |
+| `g_st3215_ring` | `0x20000328` | servo RX 环：laps@+8, produced@+12, consumed@+16, overrun@+20 |
+| `g_imu` | `0x20000340` | accel@+4, gyro@+16, temp@+28 |
+| `g_mahony` | `0x200003D0` | pitch@+40, yaw@+44 |
+| `g_ddsm_left/right` | `0x20000408 / 0x20000430` | velocity_rads@+8, health@+20 |
+| `g_servos[4]` | `0x20000458` | 每元素 52B，health@+32 |
+| `g_startup_manager` | `0x20000528` | phase（0=INIT..4=READY,5=FAILED） |
+| `g_control_section` | `0x20000708` | ★ 控制节状态：lqr@+20（x_est@+40,x_ref@+44,x_int@+48）、supervisor.phase@+76（AC6 短枚举） |
+| `g_pi_transport` | `0x2000085C` | Pi RX 环：read_idx@+6, laps@+8, produced@+12, consumed@+16, overrun@+20 |
+| `g_safety_state` | `0x2000088C` | mode@+0, fault_mask@+12 |
+| `g_pi_cmd_heartbeat` | `0x200009AC` | mode@+0, vx@+4, wz@+8, d0@+12, last_hb@+16 |
 | `g_body_gyro` | `0x200000A8` | float[3] |
 | `uwTick` | `0x200000A0` | HAL 毫秒计数器 |
 
@@ -209,6 +209,16 @@ python kuafu_balance_trace.py 60
 ## 7. 当前状态（截至 2026-09-20）
 
 ### 7.0 逻辑审查记录（最新在前）
+
+#### 2026-09-20 第五次审查（独立第八轮）
+
+按"忽视既有审查、仅从源码重推"的要求执行的全库审查（固件全部模块 + Pi5 运行时 + 跨层契约），共修复 3 项发现并全部带红绿回归验证；有界残留与保留决策清单见 `docs/validation/stm32-firmware-2026-09-20-5.md`。对新接手者行为相关的：
+
+1. **Pi 接收环 overrun 后不再永久停滞（高严重度）**：`pi_transport_poll` 的解析跨度原先取自 read_index 与 write_index 的比较，而 overrun 恢复后两者重合、整环仍待解析——比较结果为 0，消费端于是永远比生产端落后整整一环，此后每个新字节都被记成新的 overrun 且不再解析任何帧：主循环只要停滞超过一环（921600 波特下约 2.2 ms，一次阻塞 I2C 或中断风暴即可达到），Pi 链路接收侧直到断电重启都失聪（发送侧遥测照常，故障表象像 Pi 侧问题）。现在跨度改由绝对游标 produced-consumed（钳到一环）推导，overrun 只丢弃被覆写的前缀、同一轮内解析剩余有效字节；圈数/NDTR 采样竞态（读取顺序允许的有界少计）也因此变为结构性无害——陈旧采样最多让生产游标晚一轮推进，consumed 永不可能超过 produced。原有测试把停滞行为钉成了预期值，本轮一并修正。
+2. **平衡 trace 的故障冻结可解除（中严重度）**：此前首次故障（含可自动恢复的瞬态轮/舵机新鲜度闪烁）就把 256 样本环冻结到会话结束——之后真正崩溃的窗口不会被记录（`record` 在消费 pending FAULT 事件前就返回），首次故障之后的全部取证丢失。现在冻结在两个条件下解除：无故障期后出现**新**故障（新证据取代被保留的窗口），或系统已连续无故障满一个 64 样本尾巴（约 256 ms，跨越恢复瞬态保窗）；严重故障锁定时按设计保持冻结（机器人已锁定，无可记录）。新增两个文件级静态变量（RW +4 字节），11 个 SWD 符号地址统一 +4，§5.2 表与三个硬编码调试脚本已重新基线化。
+3. **LQR 对非有限输入取滑行哨兵（低）**：`lqr_update_elapsed_dt` 的任一非有限输入原先会穿过增益进入力矩输出（NaN 与任何钳位界比较均为假，派发层只钳幅度不挡 NaN）；当前调用链上游已验证故不可达，防护针对未来调用者，与 `ddsm_build_torque`/`quantize_i16`/`servo_angle_to_tick` 同类。附带说明：`TEST_NEAR` 对 NaN 失明，数值回归需显式断言 `isfinite`。
+
+主机测试全过（含 3 条新回归，均先在修复前源码上验证失败）；Keil 0 错 0 警告（RW +4，即两个新静态变量）；SWD 符号表 23 项中 11 项 +4 已更新；Pi 侧 67 项 pytest + 平衡 trace 离线 5 项全过。
 
 #### 2026-09-20 第四次审查（独立第六轮）
 
@@ -311,7 +321,8 @@ Keil 0 错误 0 警告；SWD 符号地址对照新 map 全部不变。保留的�
 - **50Hz 舵机期限是"忙重试"而非"忙丢弃"**：sync-write/FAULT 禁使能帧被总线拒绝时保留 pending，下个调度遍重试（与轮派发的 `next_wheel_tx_ms` 同型）。这是 `LEG_HOLD_MAX_AGE_MS`（100ms）腿保持窗口的可靠性前提——连续 5 个丢失周期即关闭轮输出门。
 - **模式化指令契约**：`vx/wz` 仅在 ACTIVE 生效（STAND 是位置保持，CLIMB 只驱动腿高 `D0`）；residual 还要求链路新鲜。固件不信任发送方把非本模式字段清零。
 - **链路序列门双向可重同步**：固件接收侧对"CRC 合法、非 HELLO、仅被序列门拒绝"的帧连续计数，8 帧即判定 Pi 重启并重置基线（与 Pi 侧解码器镜像）——Pi 重启时其唯一的启动 HELLO 若在链路上损坏，新会话也不会被单调门黑洞。孤立重复帧仍被丢弃；载荷校验失败的帧不计入计数。
-- **RX 环 overrun 计数**：servo/Pi 两环以"圈数×容量+位置"重构生产者（TC 中断为圈数真源，圈数先于 NDTR 读取），消费滞后一整圈时精确计数丢弃字节；重臂路径把消费端锚定到当前圈边界并**保留圈真值**（同步 abort 会完成旧流，竞态圈是真实的——`dma_rx_ring_rebase` / `pi_transport_reset` 同一语义）。SWD 可读 `g_st3215_ring`/`g_pi_transport` 的 overrun 字段。
+- **RX 环 overrun 计数**：servo/Pi 两环以"圈数×容量+位置"重构生产者（TC 中断为圈数真源，圈数先于 NDTR 读取），消费滞后一整圈时精确计数丢弃字节、**同一轮内解析剩余有效字节**（解析跨度取绝对游标 produced-consumed 而非读写索引比较——后者在 overrun 后重合，会把消费端永久钉在生产端后一环，此后每字节都记 overrun 且不再解析，Pi 接收侧直到重启失聪）；重臂路径把消费端锚定到当前圈边界并**保留圈真值**（同步 abort 会完成旧流，竞态圈是真实的——`dma_rx_ring_rebase` / `pi_transport_reset` 同一语义）。SWD 可读 `g_st3215_ring`/`g_pi_transport` 的 overrun 字段。
+- **平衡 trace 故障尾巴与冻结**：故障后保留 64 样本（256ms）尾巴并冻结环以保全取证窗口；冻结可解除——无故障期后出现新故障（新证据取代旧窗口）或连续无故障满一个尾巴即恢复记录；严重故障锁定时按设计保持冻结。首次故障（含自动恢复的瞬态闪烁）不会再把整会话的 trace 致盲。
 
 ### 7.6 已知约束与待验证
 

@@ -63,7 +63,15 @@ BMI088, two DDSM315 wheel motors, and four ST3215 servos powered together.
   paths (post-error abort) rebase their consumer state at the current lap
   boundary — preserving the lap truth, since the synchronous abort
   completes the old stream — so pre-restart bytes are never re-parsed and
-  no already-counted lap is ever erased.
+  no already-counted lap is ever erased. When a consumer falls a full ring
+  behind, the overwritten prefix is billed to `overrun_count` and the
+  still-valid remainder is parsed in the same poll: the parse span comes
+  from the absolute produced/consumed cursors, never from a
+  read-index-vs-write-index comparison, so an overrun can never leave the
+  consumer stalled one ring behind the producer (billing every fresh byte as
+  another overrun and parsing nothing), and a stale lap/NDTR sample — the
+  bounded undercount the read ordering permits — can only defer parsing by
+  one poll.
 - The 50 Hz leg-write deadline is retry-on-busy, not drop-on-busy: a
   refused sync-write (or FAULT torque-disable) keeps its deadline pending
   and is retried on the next scheduler pass until a frame is actually
@@ -109,7 +117,12 @@ BMI088, two DDSM315 wheel motors, and four ST3215 servos powered together.
 tick — including INIT/FAULT — with real firmware timestamps, mode/fault/startup/
 actuator state, per-device freshness ages, and separate target/sent/feedback
 wheel torques in body-frame Nm. After a fault it keeps a 64-sample tail, then
-freezes. `MDK-ARM/debug_tools/dump_balance_trace.py` attaches over SWD without
+freezes so the post-fault window survives for the dump; the freeze releases
+when a new fault arrives after a fault-free period (the newer evidence
+supersedes the preserved window) or once the system has been fault-free for a
+full tail, so an auto-recovered transient fault cannot blind the rest of the
+session, while a latched serious fault keeps the ring frozen by design.
+`MDK-ARM/debug_tools/dump_balance_trace.py` attaches over SWD without
 resetting or halting the target, exports only genuinely recorded samples, and
 writes a provenance sidecar (`*.meta.json`) plus build/model-hash metadata.
 
