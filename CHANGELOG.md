@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+### Firmware logic review, third record (2026-09-20)
+
+An independent fifth-pass review performed from source alone (prior
+records consulted only afterwards to re-verify their invariants; all held).
+Six findings, all closed in this round. Record:
+`docs/validation/stm32-firmware-2026-09-20-3.md`.
+
+- (Medium) Both ST3215 write-frame failure paths — a lost TX-complete
+  interrupt and a UART error during the write — recover through the same
+  explicit transmit abort before the bus returns to IDLE. An error storm is
+  precisely when completion interrupts go missing; either path skipping the
+  abort can wedge the HAL transmit state at `BUSY_TX` forever (all leg
+  writes fail `HAL_BUSY`, the 100 ms leg-hold window expires, the wheel
+  gate closes, and the 20 ms deadline backstop is disarmed because phase is
+  already IDLE). Regression in `test_st3215.c`.
+- (Medium-low) Circular RX-ring re-arms preserve the lap truth: new
+  `dma_rx_ring_rebase()` anchors the consumer at the current lap boundary
+  while keeping every counted lap and the cumulative overrun diagnostic —
+  the same semantics `pi_transport_reset` already implements (the
+  synchronous abort completes the old stream, so a racing lap is real).
+  The ring is also initialised before the peripheral that starts its DMA.
+  A lost or invented lap skews the producer cursor by up to one ring and
+  re-feeds overwritten bytes to the parser as spurious checksum failures.
+  Regression in `test_dma_rx_ring.c`.
+- (Medium-low) Diagnostic, health, and FAULT telemetry ride the SysTick
+  wall clock (250 Hz diag, 10 Hz health, FAULT while latched) instead of
+  the gyro data-ready tick: an IMU-path failure no longer silences the
+  frames that diagnose it. Fusion-state telemetry (IMU/joints) stays
+  DRDY-gated — frozen fusion output has no value, and the health frame's
+  age fields carry that information. The cadence divider is a `main()`
+  stack local, so the SWD symbol table is unchanged.
+- (Low) `balance_trace_init()` seeds the first recorded sample with the
+  INIT boot marker (the event type existed; nothing produced it).
+- (Low) Telemetry quantization returns the zero sentinel for non-finite
+  inputs instead of an undefined float-to-int cast; finite encodings are
+  unchanged. Regression in `test_pi_link.c`.
+- (Low) `pi_link_on_tx_error` carries the `tx_active` guard its completion
+  twin has, so an error arriving while nothing of ours is transmitting
+  cannot pop a merely queued telemetry frame.
+
 ### Firmware logic review, second pass (2026-09-20)
 
 An independent fourth-pass review layered on the 09-20 three-pass baseline

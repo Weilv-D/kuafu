@@ -19,6 +19,14 @@ BMI088, two DDSM315 wheel motors, and four ST3215 servos powered together.
   from it are therefore ordered within a single control period, and the gate
   verdict is held in `g_wheel_output_gate` between deadlines. If the IMU dies,
   fault detection and tracing keep running on the wall clock.
+- Telemetry splits by timebase. Fusion-state frames (IMU at 250 Hz, joints at
+  250 Hz) ride the 1 kHz data-ready tick and the fusion gate — with the
+  fusion path down their values are frozen and worthless. Diagnostic frames
+  (diag at 250 Hz, health at 10 Hz, FAULT while latched) ride the SysTick
+  wall clock instead: an IMU-path failure — I2C dead or the data-ready line
+  itself stopped — leaves fault latching, per-device ages, error counters,
+  and the FAULT broadcast to the Pi fully alive, so the failure that killed
+  balance is also the one best reported over the link.
 - LQR/LQI command calculation integrates with the measured wall-clock delta
   (`lqr_update_elapsed_dt`), bounded to 20 ms; a skipped or late deadline is
   never integrated as a nominal 4 ms step.
@@ -42,11 +50,15 @@ BMI088, two DDSM315 wheel motors, and four ST3215 servos powered together.
   or a bounded undercount and never an overcount). A consumer lag past one
   full ring is billed to `overrun_count`; speed decodes as sign-magnitude per
   the ST serial protocol. Write frames (sync-write, torque) carry their own
-  20 ms deadline and recover through an explicit transmit abort, so a lost
-  TX-complete interrupt costs one frame instead of the servo subsystem. The
-  Pi USART6 ring uses the same accounting in `pi_transport`, and both re-arm
-  paths (post-error abort) reset their consumer state so pre-restart bytes
-  are never re-parsed.
+  20 ms deadline, and BOTH write-frame failure paths — a lost TX-complete
+  interrupt and a UART error recorded during the write — recover through an
+  explicit transmit abort, so either costs one frame instead of the servo
+  subsystem. The ring is initialised before the DMA is started, and the
+  Pi USART6 ring uses the same accounting in `pi_transport`; both re-arm
+  paths (post-error abort) rebase their consumer state at the current lap
+  boundary — preserving the lap truth, since the synchronous abort
+  completes the old stream — so pre-restart bytes are never re-parsed and
+  no already-counted lap is ever erased.
 - The 50 Hz leg-write deadline is retry-on-busy, not drop-on-busy: a
   refused sync-write (or FAULT torque-disable) keeps its deadline pending
   and is retried on the next scheduler pass until a frame is actually

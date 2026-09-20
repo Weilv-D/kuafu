@@ -12,12 +12,14 @@ high-level command (Pi5)
   -> wheel/servo commands
 ```
 
-The runtime runs on four deadline-bounded layers driven by the 1 kHz BMI088 gyro data-ready timebase:
+The runtime runs on four deadline-bounded layers. Layers 1–3 are paced by the
+1 kHz BMI088 gyro data-ready tick; layer 4 is paced by the SysTick wall clock
+so that an IMU-path failure never silences diagnostics:
 
 1. **1 kHz IMU layer** — BMI088 sampling and Mahony attitude fusion, never waiting on actuator buses.
 2. **250 Hz safety-control layer** — snapshots the newest valid sensor and command state, runs the state machine, then LQR/LQI with reference tracking, yaw heading/rate tracking, and roll leveling.
-3. **50 Hz leg/Pi layer** — projects Qx/D0 residuals through five-bar IK onto ST3215 targets, parses Pi traffic, and publishes telemetry.
-4. **Low-rate diagnostic layer** — reports temperatures, per-device bus ages, error counters, reset cause, and safety mode.
+3. **50 Hz leg/Pi layer** — projects Qx/D0 residuals through five-bar IK onto ST3215 targets, parses Pi traffic, and publishes fusion-state telemetry (IMU/joint frames).
+4. **Wall-clock diagnostic layer** — reports fault masks, temperatures, per-device bus ages, error counters, reset cause, and safety mode (250 Hz diagnostic frames, 10 Hz health frames, FAULT frames while latched), independently of the data-ready tick and of IMU health.
 
 A separate `startup_manager` gates actuator power through `WAIT_POWER → IMU_DISCOVERY → ACTUATOR_DISCOVERY → READY` (with a `FAILED` terminal that latches FAULT); gyro bias calibration is deliberately **not** a startup gate — it accumulates in the background while the robot stands, because a zero bias is a valid autonomous STAND starting point. Torque is never enabled merely because initialization began; the system reaches STAND only once every device reports fresh. Wheel torque is a separately armed domain with three baseline conditions — the system operational (STAND/ACTIVE/CLIMB, so INIT keeps the wheels locked to read-only queries), startup READY, and no latched fault — whose loss is immediately revoked; this is independent of the Pi so standalone STAND balance works with no Pi attached. Entering ACTIVE additionally requires a compatible Pi model hash, a fresh heartbeat, and an explicit mode request.
 
