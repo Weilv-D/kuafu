@@ -31,15 +31,22 @@ BMI088, two DDSM315 wheel motors, and four ST3215 servos powered together.
   with overflow accounting, and `ddsm_bus_get_last_tx()` exposes
   queued/TX-complete/feedback status without inventing ACKs for no-reply
   frames.
+- Servo freshness requires a real first feedback frame: the poll round-robin
+  restores online state on the first valid reply, and a servo that never
+  replied cannot carry startup into STAND or the wheel gate open on legs
+  whose feedback has never been seen.
 - ST3215 feedback is polled round-robin through a circular DMA ring whose
   producer is reconstructed as lap_count * size + write_index (the DMA
   transfer-complete interrupt is the lap truth source; the lap count is read
   before NDTR, an ordering under which every interrupt interleaving is exact
   or a bounded undercount and never an overcount). A consumer lag past one
   full ring is billed to `overrun_count`; speed decodes as sign-magnitude per
-  the ST serial protocol. The Pi USART6 ring uses the same accounting in
-  `pi_transport`, and both re-arm paths (post-error abort) reset their
-  consumer state so pre-restart bytes are never re-parsed.
+  the ST serial protocol. Write frames (sync-write, torque) carry their own
+  20 ms deadline and recover through an explicit transmit abort, so a lost
+  TX-complete interrupt costs one frame instead of the servo subsystem. The
+  Pi USART6 ring uses the same accounting in `pi_transport`, and both re-arm
+  paths (post-error abort) reset their consumer state so pre-restart bytes
+  are never re-parsed.
 - The 50 Hz leg-write deadline is retry-on-busy, not drop-on-busy: a
   refused sync-write (or FAULT torque-disable) keeps its deadline pending
   and is retried on the next scheduler pass until a frame is actually
@@ -50,12 +57,18 @@ BMI088, two DDSM315 wheel motors, and four ST3215 servos powered together.
 - An `ActuatorSupervisor` is the final output verdict: after any fault (or
   restart) recovery re-issues servo torque enable and requires a transmitted
   leg hold, fresh leg feedback, a safe posture, and verified enables before
-  its `wheel_output_allowed` verdict opens. The persistent wheel gate combines
-  that verdict with the runtime intent and completed current-loop
-  re-assertion, and both the LQR computation and the bus dispatch obey the
-  same gate, so torque can never leave the MCU while the legs underneath it
-  are unverified. Serious faults (tilt, pitch rate, overtemp, IMU, emergency,
-  init, internal) latch until reset.
+  its `wheel_output_allowed` verdict opens. The servo enable sequencer in the
+  scheduler is FAULT-gated, so the physical re-issue happens only after the
+  safety machine has left FAULT — during FAULT the one-shot torque-disable
+  owns the servo bus and the software `servos_enabled` flag stays low, which
+  is the drop-and-return the supervisor's re-issue stage keys on. The
+  persistent wheel gate combines that verdict with the runtime intent and
+  completed current-loop re-assertion, and both the LQR computation and the
+  bus dispatch obey the same gate, so torque can never leave the MCU while
+  the legs underneath it are unverified. Serious faults (tilt, pitch rate,
+  overtemp, IMU, emergency, init, internal) latch until reset; the transient
+  device faults (wheel/servo freshness) auto-recover through that same
+  re-issue stage.
 - The Pi bridge uses USART6 at 921600 baud with circular DMA reception.
 
 ## Balance Trace
