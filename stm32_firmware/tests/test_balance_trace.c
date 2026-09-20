@@ -43,6 +43,9 @@ static void test_empty_and_partial_snapshot(void) {
     TEST_EQ_INT(1, (int)snap.count);
     TEST_EQ_INT(1, (int)snap.total_records);
     TEST_EQ_INT(0, (int)snap.samples[0].seq);
+    /* The first sample after init carries the boot marker without any
+     * explicit note_event call (wired by balance_trace_init itself). */
+    TEST_EQ_INT(BALANCE_TRACE_EVENT_INIT, (int)snap.samples[0].event);
     TEST_EQ_INT(1234, (int)snap.samples[0].timestamp_ms);
     TEST_EQ_INT(2, (int)snap.samples[0].mode);
     TEST_NEAR(0.3f, snap.samples[0].target_torque_left_nm, 1.0e-6f);

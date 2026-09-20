@@ -48,7 +48,9 @@ void balance_trace_init(void) {
     g_bt_seq = 0U;
     g_bt_frozen = 0U;
     g_bt_post_fault_remaining = 0U;
-    g_bt_pending_event = BALANCE_TRACE_EVENT_NONE;
+    /* The first recorded sample carries the INIT marker so a dump shows the
+     * boot boundary without correlating timestamps against the reset cause. */
+    g_bt_pending_event = BALANCE_TRACE_EVENT_INIT;
     copy_text(g_bt_firmware_version, "unknown");
     copy_text(g_bt_build_id, "unknown");
     BALANCE_TRACE_BARRIER();

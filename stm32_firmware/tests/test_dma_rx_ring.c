@@ -117,6 +117,54 @@ static void test_null_and_invalid_arguments(void) {
     TEST_EQ_INT(0, (int)dma_rx_ring_overruns(NULL));
 }
 
+static void test_rebase_preserves_old_stream_laps(void) {
+    uint8_t out[TEST_RING_SIZE];
+    dma_rx_ring_init(&ring, test_buffer, TEST_RING_SIZE); sim_pos = 0U;
+    /* One full lap (8 bytes) plus 2 more, with 2 bytes consumed: the two
+     * newest old-stream bytes sit unconsumed, and the 2-byte over-lap excess
+     * is already billed to overrun_count. */
+    for (uint8_t i = 0U; i < TEST_RING_SIZE + 2U; ++i) produce_byte(i);
+    (void)dma_rx_ring_consume(&ring, out, 2U);
+    TEST_EQ_INT(1, (int)ring.lap_count);
+    TEST_EQ_INT(2, (int)dma_rx_ring_overruns(&ring));
+    /* Re-arm: AbortReceive + Receive_DMA restart the stream at the base.  The
+     * rebase must anchor produced/consumed at the CURRENT lap boundary while
+     * keeping every lap already counted (they belong to the old stream); the
+     * 2 unconsumed old bytes are dropped because the restarted stream is
+     * about to overwrite them from the base. */
+    sim_pos = 0U;
+    dma_rx_ring_rebase(&ring);
+    TEST_EQ_INT(1, (int)ring.lap_count);
+    TEST_EQ_INT((int)(1U * TEST_RING_SIZE), (int)dma_rx_ring_produced(&ring));
+    TEST_EQ_INT((int)(1U * TEST_RING_SIZE), (int)dma_rx_ring_consumed(&ring));
+    TEST_EQ_INT(0, (int)dma_rx_ring_available(&ring));
+    TEST_EQ_INT(2, (int)dma_rx_ring_overruns(&ring)); /* cumulative */
+    /* The restarted stream produces from the base: exactly one new lap plus
+     * a partial second lap, consumed as it lands so nothing is lost — the
+     * lap accounting must carry the preserved old-stream lap forward. */
+    for (uint8_t i = 0U; i < TEST_RING_SIZE; ++i) produce_byte((uint8_t)('A' + i));
+    TEST_EQ_INT(2, (int)ring.lap_count);
+    TEST_EQ_INT((int)(2U * TEST_RING_SIZE), (int)dma_rx_ring_produced(&ring));
+    TEST_EQ_INT((int)TEST_RING_SIZE, (int)dma_rx_ring_available(&ring));
+    TEST_EQ_INT(2, (int)dma_rx_ring_overruns(&ring)); /* no fabricated loss */
+    (void)dma_rx_ring_consume(&ring, out, sizeof(out));
+    TEST_EQ_INT(0, (int)memcmp(out, "ABCDEFGH", TEST_RING_SIZE));
+    for (uint8_t i = 0U; i < 3U; ++i) produce_byte((uint8_t)('I' + i));
+    TEST_EQ_INT(2, (int)ring.lap_count);
+    TEST_EQ_INT((int)(2U * TEST_RING_SIZE + 3U), (int)dma_rx_ring_produced(&ring));
+    (void)dma_rx_ring_consume(&ring, out, sizeof(out));
+    TEST_EQ_INT(0, (int)memcmp(out, "IJK", 3U));
+    /* A lap racing the re-arm (transfer-complete delivered just before the
+     * rebase, e.g. between Receive_DMA success and the rebase call) must be
+     * absorbed as old-stream production; a zeroing re-init would have erased
+     * it and re-fed the whole ring once as spurious data. */
+    dma_rx_ring_note_lap(&ring);
+    dma_rx_ring_rebase(&ring);
+    TEST_EQ_INT(3, (int)ring.lap_count);
+    TEST_EQ_INT((int)(3U * TEST_RING_SIZE), (int)dma_rx_ring_produced(&ring));
+    TEST_EQ_INT(0, (int)dma_rx_ring_available(&ring));
+}
+
 void run_dma_rx_ring_tests(void) {
     test_init_and_empty();
     test_consume_preserves_order_across_wrap();
@@ -124,5 +172,6 @@ void run_dma_rx_ring_tests(void) {
     test_overrun_keeps_newest_bytes_and_counts();
     test_filled_to_end_without_transfer_complete();
     test_stale_lap_sample_undercounts_then_heals();
+    test_rebase_preserves_old_stream_laps();
     test_null_and_invalid_arguments();
 }

@@ -39,6 +39,14 @@ typedef struct {
 
 void dma_rx_ring_init(DmaRxRing_t *ring, uint8_t *buffer, uint16_t size);
 
+/* Re-arm recovery for a restarted circular RX stream (AbortReceive +
+ * Receive_DMA): rebases produced/consumed to the current lap boundary while
+ * PRESERVING lap_count (every lap counted so far belongs to the old stream;
+ * the restarted stream produces from lap_count * size).  overrun_count is a
+ * cumulative diagnostic and is preserved.  Call only after the new
+ * HAL_UART_Receive_DMA has succeeded. */
+void dma_rx_ring_rebase(DmaRxRing_t *ring);
+
 /* Call from the DMA transfer-complete (UART RxCplt) callback — interrupt
  * context, one invocation per completed ring lap. */
 void dma_rx_ring_note_lap(DmaRxRing_t *ring);

@@ -271,7 +271,20 @@ void st3215_bus_step(ST3215_Bus_t *bus, uint32_t now_ms) {
         if (bus->phase == ST_BUS_TX_READ || bus->phase == ST_BUS_WAIT_REPLY) {
             finish_read_failure(bus, DEVICE_FAILURE_PROTOCOL);
         } else if (bus->phase == ST_BUS_TX_ONLY) {
+            /* A UART error during a write frame must run the SAME HAL-transmit
+             * recovery as the deadline path below.  Going IDLE without the
+             * abort leaves gState at BUSY_TX whenever the TX-complete
+             * interrupt is what got lost (the exact wedge the deadline path
+             * defends against): every later start_tx then fails HAL_BUSY
+             * forever, all leg writes stop, LEG_HOLD_MAX_AGE_MS expires and
+             * the wheel gate closes on a balancing robot.  A late TxCplt
+             * after a completed transfer finds the bus IDLE and is ignored;
+             * a truncated frame is dropped by the servo's own checksum. */
+            if (bus->huart != NULL) {
+                (void)HAL_UART_AbortTransmit(bus->huart);
+            }
             bus->phase = ST_BUS_IDLE;
+            reset_parser(bus);
         }
     }
     if ((bus->phase == ST_BUS_TX_READ || bus->phase == ST_BUS_WAIT_REPLY) &&

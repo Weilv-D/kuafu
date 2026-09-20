@@ -194,13 +194,21 @@ int main(void) {
      * timeout into an unbounded wait. */
     NVIC_SetPriority(SysTick_IRQn, 0U);
 
+    /* The ST3215 RX ring must exist BEFORE MX_USART3_UART_Init starts its
+     * circular DMA stream: the DMA transfer-complete callback notes every
+     * completed lap through dma_rx_ring_note_lap, and a lap counted between
+     * the DMA start and a later zeroing dma_rx_ring_init would be erased,
+     * skewing the absolute producer cursor and re-feeding overwritten bytes
+     * to the parser as spurious checksum failures. */
+    dma_rx_ring_init(&g_st3215_ring, g_st3215_rx_buf, ST3215_RX_BUF_SIZE);
+
     /* Initialize all configured peripherals */
     MX_GPIO_Init();
     MX_DMA_Init();
     MX_I2C1_Init();
     MX_USART1_UART_Init();
     MX_USART2_UART_Init();
-    MX_USART3_UART_Init();
+    MX_USART3_UART_Init();  /* starts circular RX DMA into g_st3215_rx_buf */
     MX_USART6_UART_Init();
     MX_IWDG_Init();
 
@@ -208,7 +216,6 @@ int main(void) {
     crc8_init();
     pi_link_init();
     pi_transport_init(&g_pi_transport, g_pi_rx_buf, PI_RX_BUF_SIZE);
-    dma_rx_ring_init(&g_st3215_ring, g_st3215_rx_buf, ST3215_RX_BUF_SIZE);
     safety_state_init();
     control_section_init(&g_control_section, HAL_GetTick());
     balance_trace_init();
@@ -278,6 +285,7 @@ int main(void) {
     uint8_t fault_servo_disable_idx = 0U;
     uint32_t temp_refresh_counter = 0;
     uint8_t health_telemetry_divider = 0U;
+    uint32_t last_diag_tx_ms = 0U; /* wall-clock slot for diag/health/fault frames */
     uint8_t bmi_init_in_progress = 0U;
     uint8_t servo_enable_step = 0U;
     uint8_t servos_enabled = 0U;
@@ -328,7 +336,10 @@ int main(void) {
             (void)HAL_UART_AbortReceive(&huart3);
             __HAL_UART_CLEAR_OREFLAG(&huart3);
             if (HAL_UART_Receive_DMA(&huart3, g_st3215_rx_buf, ST3215_RX_BUF_SIZE) == HAL_OK) {
-                dma_rx_ring_init(&g_st3215_ring, g_st3215_rx_buf, ST3215_RX_BUF_SIZE);
+                /* Rebase, not re-init: the synchronous abort completes the
+                 * old stream, so a lap racing the re-arm is real and must
+                 * stay counted (see dma_rx_ring_rebase). */
+                dma_rx_ring_rebase(&g_st3215_ring);
                 g_uart3_rx_rearm = 0U;
             }
         } else if ((hdma_usart3_rx.Instance->CR & DMA_SxCR_EN) == 0U) {
@@ -804,18 +815,20 @@ int main(void) {
                     g_body_pitch_rate = body_pitch_rate;
                 }
 
-                /* 3. Telemetry slots on the 1 kHz tick cadence.  Control and
-                 * trace live in the 250 Hz control section above; this block only
-                 * publishes fusion results and streams telemetry, so a stopped
-                 * DRDY freezes telemetry but never fault detection or tracing. */
+                /* 3. State telemetry on the 1 kHz tick cadence.  Control and
+                 * trace live in the 250 Hz control section above; this block
+                 * only publishes fusion results.  Diagnostic telemetry lives
+                 * on the wall clock below, so a stopped DRDY freezes state
+                 * telemetry but never diagnostics, fault frames, or fault
+                 * detection itself. */
                 uint8_t slot = last_tick % 4;
 
                 /* --- Slot 2: Queue telemetry data to Raspberry Pi 5 --- */
                 if (slot == 2) {
-                    pi_link_send_imu(&huart6, 
-                                     g_mahony.roll, 
-                                     g_mahony.pitch, 
-                                     g_mahony.yaw, 
+                    pi_link_send_imu(&huart6,
+                                     g_mahony.roll,
+                                     g_mahony.pitch,
+                                     g_mahony.yaw,
                                       g_body_gyro[0],
                                       g_body_gyro[1],
                                       g_body_gyro[2]);
@@ -838,52 +851,68 @@ int main(void) {
                                         wheel_r_pos, WHEEL_DIR_R * right_feedback.velocity_rads, WHEEL_DIR_R * right_feedback.torque,
                                         servo_pos, servo_vel, servo_cur);
                 }
+            }
+        }
 
-                /* --- Slot 3: Diagnostic packages & main controller logic --- */
-                else if (slot == 3) {
-                    /* Battery sensing is not populated on this hardware.  Zero is
-                     * the protocol sentinel for unavailable, not an undervoltage.
-                     * The BMI088 covers -40..85 degC; saturate before the uint8
-                     * field because a negative float-to-unsigned cast is UB and
-                     * would wrap (e.g. -5 degC -> 251) on a cold bench. */
-                    uint8_t diag_temp_c =
-                        (g_imu.temperature < 0.0f) ? 0U :
-                        ((g_imu.temperature > 255.0f) ? 255U
-                                                      : (uint8_t)g_imu.temperature);
-                    pi_link_send_diag(&huart6, 0U, diag_temp_c,
-                                      safety_state_legacy_fault_mask());
+        /* --- 250 Hz diagnostic telemetry on the wall clock (HAL tick) ---
+         * Diag, health, and FAULT frames report fault state, per-device ages,
+         * and error counters — none of which depend on the fusion path.  They
+         * are therefore driven by the SysTick millisecond, not the DRDY tick
+         * and not g_imu.initialized: when the IMU path dies (I2C failure or a
+         * stopped data-ready), the 250 Hz control section still latches the
+         * fault on the wall clock and these frames still tell the Pi — and
+         * the operator — exactly what failed and when.  State telemetry
+         * (IMU/joints, above) intentionally stays DRDY-gated: with the fusion
+         * path down its values are frozen and worthless, and the age fields
+         * here already carry that information. */
+        {
+            uint32_t diag_now = HAL_GetTick();
+            if (diag_now != last_diag_tx_ms && (diag_now & 3U) == 3U) {
+                last_diag_tx_ms = diag_now;
+                /* Battery sensing is not populated on this hardware.  Zero is
+                 * the protocol sentinel for unavailable, not an undervoltage.
+                 * The BMI088 covers -40..85 degC; saturate before the uint8
+                 * field because a negative float-to-unsigned cast is UB and
+                 * would wrap (e.g. -5 degC -> 251) on a cold bench.  With the
+                 * sensor path down this reports the last read value, which the
+                 * health frame's imu_age_ms dates. */
+                uint8_t diag_temp_c =
+                    (g_imu.temperature < 0.0f) ? 0U :
+                    ((g_imu.temperature > 255.0f) ? 255U
+                                                  : (uint8_t)g_imu.temperature);
+                pi_link_send_diag(&huart6, 0U, diag_temp_c,
+                                  safety_state_legacy_fault_mask());
 
-                    if (++health_telemetry_divider >= 25U) {
-                        Pi_HealthTelemetry_t health;
-                        int i;
-                        uint32_t health_now = HAL_GetTick();
-                        health_telemetry_divider = 0U;
-                        health.fault_mask = g_safety_state.fault_mask;
-                        health.mode = (uint8_t)g_safety_state.current_mode;
-                        health.reset_cause = g_reset_cause;
-                        health.imu_age_ms = Device_Age_Ms(&g_imu.health, health_now);
-                        health.wheel_l_age_ms = Device_Age_Ms(&left_feedback.health, health_now);
-                        health.wheel_r_age_ms = Device_Age_Ms(&right_feedback.health, health_now);
-                        health.imu_errors = Device_Error_Count(&g_imu.health);
-                        health.wheel_l_errors = Device_Error_Count(&left_feedback.health);
-                        health.wheel_r_errors = Device_Error_Count(&right_feedback.health);
-                        health.wheel_l_timeout_errors = Device_Timeout_Count(&left_feedback.health);
-                        health.wheel_l_checksum_errors = Device_Checksum_Count(&left_feedback.health);
-                        health.wheel_l_protocol_errors = Device_Protocol_Count(&left_feedback.health);
-                        health.wheel_r_timeout_errors = Device_Timeout_Count(&right_feedback.health);
-                        health.wheel_r_checksum_errors = Device_Checksum_Count(&right_feedback.health);
-                        health.wheel_r_protocol_errors = Device_Protocol_Count(&right_feedback.health);
-                        for (i = 0; i < 4; ++i) {
-                            health.servo_age_ms[i] = Device_Age_Ms(&servo_feedback[i].health,
-                                                                   health_now);
-                            health.servo_errors[i] = Device_Error_Count(&servo_feedback[i].health);
-                        }
-                        (void)pi_link_send_health(&huart6, &health);
+                if (++health_telemetry_divider >= 25U) {
+                    Pi_HealthTelemetry_t health;
+                    int i;
+                    uint32_t health_now = HAL_GetTick();
+                    health_telemetry_divider = 0U;
+                    health.fault_mask = g_safety_state.fault_mask;
+                    health.mode = (uint8_t)g_safety_state.current_mode;
+                    health.reset_cause = g_reset_cause;
+                    health.imu_age_ms = Device_Age_Ms(&g_imu.health, health_now);
+                    health.wheel_l_age_ms = Device_Age_Ms(&left_feedback.health, health_now);
+                    health.wheel_r_age_ms = Device_Age_Ms(&right_feedback.health, health_now);
+                    health.imu_errors = Device_Error_Count(&g_imu.health);
+                    health.wheel_l_errors = Device_Error_Count(&left_feedback.health);
+                    health.wheel_r_errors = Device_Error_Count(&right_feedback.health);
+                    health.wheel_l_timeout_errors = Device_Timeout_Count(&left_feedback.health);
+                    health.wheel_l_checksum_errors = Device_Checksum_Count(&left_feedback.health);
+                    health.wheel_l_protocol_errors = Device_Protocol_Count(&left_feedback.health);
+                    health.wheel_r_timeout_errors = Device_Timeout_Count(&right_feedback.health);
+                    health.wheel_r_checksum_errors = Device_Checksum_Count(&right_feedback.health);
+                    health.wheel_r_protocol_errors = Device_Protocol_Count(&right_feedback.health);
+                    for (i = 0; i < 4; ++i) {
+                        health.servo_age_ms[i] = Device_Age_Ms(&servo_feedback[i].health,
+                                                               health_now);
+                        health.servo_errors[i] = Device_Error_Count(&servo_feedback[i].health);
                     }
+                    (void)pi_link_send_health(&huart6, &health);
+                }
 
-                    if (g_safety_state.current_mode == STATE_FAULT) {
-                        pi_link_send_fault(&huart6, safety_state_legacy_fault_mask());
-                    }
+                if (g_safety_state.current_mode == STATE_FAULT) {
+                    pi_link_send_fault(&huart6, safety_state_legacy_fault_mask());
                 }
             }
         }

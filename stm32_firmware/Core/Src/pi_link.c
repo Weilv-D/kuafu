@@ -49,6 +49,10 @@ static void write_i16_be(uint8_t *bytes, int16_t value) {
 
 static int16_t quantize_i16(float value, float scale) {
     float scaled = value * scale;
+    /* A non-finite input must not reach the float-to-int cast (undefined
+     * behaviour in C; the hardware default would happen to yield 0, but the
+     * protocol's zero is the explicit unavailable/safe sentinel). */
+    if (!isfinite(scaled)) return 0;
     if (scaled > 32767.0f) return 32767;
     if (scaled < -32768.0f) return -32768;
     return (int16_t)scaled;
@@ -239,7 +243,11 @@ void pi_link_on_tx_complete(UART_HandleTypeDef *huart) {
 }
 
 void pi_link_on_tx_error(UART_HandleTypeDef *huart) {
-    if (huart != tx_uart || tx_count == 0U) return;
+    /* Guard mirrors on_tx_complete: with tx_active == 0 the error is not
+     * about one of our transmissions (nothing is on the wire), and popping
+     * the head would drop a merely queued telemetry frame.  A stalled queue
+     * self-heals on the next pi_link_transmit, which retries start_next_tx. */
+    if (huart != tx_uart || !tx_active || tx_count == 0U) return;
     tx_head = (uint8_t)((tx_head + 1U) % PI_TX_QUEUE_DEPTH);
     --tx_count;
     tx_active = 0U;

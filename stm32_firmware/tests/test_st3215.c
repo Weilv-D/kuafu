@@ -160,4 +160,22 @@ void run_st3215_tests(void) {
     TEST_EQ_INT(ST_BUS_TX_ONLY, bus.phase);
     st3215_bus_on_tx_complete(&bus);            /* normal close still works */
     TEST_TRUE(st3215_bus_is_idle(&bus));
+
+    /* A UART error during a write frame must run the SAME HAL-transmit
+     * recovery as the lost-TX-complete deadline above: going IDLE without
+     * the explicit AbortTransmit strands gState at BUSY_TX whenever the
+     * error and the lost completion coincide, and every later queue call
+     * then fails HAL_BUSY forever (no leg writes -> wheel gate closes). */
+    test_uart_reset();
+    test_set_time_ms(400U);
+    TEST_EQ_INT(0, st3215_bus_queue_torque(&bus, 1U, 1U));
+    TEST_EQ_INT(ST_BUS_TX_ONLY, bus.phase);
+    st3215_bus_on_uart_error(&bus);
+    TEST_EQ_INT(ST_BUS_TX_ONLY, bus.phase);  /* deferred: nothing applied yet */
+    st3215_bus_step(&bus, 401U);             /* applied well inside the budget */
+    TEST_TRUE(st3215_bus_is_idle(&bus));
+    TEST_EQ_INT(1, (int)test_uart_abort_count()); /* HAL TX state cleared */
+    TEST_EQ_INT(0, st3215_bus_queue_torque(&bus, 1U, 1U));
+    st3215_bus_on_tx_complete(&bus);
+    TEST_TRUE(st3215_bus_is_idle(&bus));
 }

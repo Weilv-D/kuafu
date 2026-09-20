@@ -12,6 +12,23 @@ void dma_rx_ring_init(DmaRxRing_t *ring, uint8_t *buffer, uint16_t size) {
     ring->overrun_count = 0U;
 }
 
+void dma_rx_ring_rebase(DmaRxRing_t *ring) {
+    if (ring == NULL || ring->size == 0U) return;
+    /* Re-arm recovery (see main.c): after AbortReceive + Receive_DMA the
+     * restarted stream writes from the ring base, but every lap already
+     * counted by the transfer-complete callback belongs to the OLD stream
+     * and must stay counted -- the synchronous abort completes the old
+     * stream, so a lap interrupt that raced the re-arm is real.  Wiping
+     * lap_count here (as plain re-init does) skews the absolute producer
+     * cursor by up to one ring and feeds already-overwritten bytes back to
+     * the parser; the checksum drops them, but as spurious failures.  The
+     * rebased cursors mean exactly: old stream fully accounted, new stream
+     * starts producing at lap_count * size.  overrun_count is a cumulative
+     * diagnostic and is deliberately preserved. */
+    ring->produced = ring->lap_count * (uint32_t)ring->size;
+    ring->consumed = ring->produced;
+}
+
 void dma_rx_ring_note_lap(DmaRxRing_t *ring) {
     if (ring == NULL) return;
     ++ring->lap_count;

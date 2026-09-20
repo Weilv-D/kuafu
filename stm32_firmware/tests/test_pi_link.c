@@ -4,6 +4,7 @@
 #include "kuafu_generated.h"
 #include "test_support.h"
 
+#include <math.h>
 #include <string.h>
 
 static uint16_t build_frame(uint8_t *frame, uint8_t version, uint8_t type,
@@ -161,6 +162,22 @@ void run_pi_link_tests(void) {
     TEST_EQ_U8(0x0EU, health_payload[35]);
     TEST_EQ_U8(0x0FU, health_payload[42]);
     TEST_EQ_U8(0x10U, health_payload[43]);
+
+    /* Non-finite telemetry values quantize to the protocol's zero sentinel
+     * instead of reaching an undefined float-to-int cast.  The IMU payload is
+     * roll..gz (six big-endian i16/1000) starting at frame offset 10: the
+     * NaN roll encodes 0x0000 while the adjacent finite pitch is untouched. */
+    test_uart_reset();
+    TEST_EQ_INT(0, pi_link_send_imu(&uart, NAN, 1.0f, 2.0f,
+                                    3.0f, 4.0f, 5.0f));
+    {
+        const uint8_t *tx = test_uart_last_tx();
+        TEST_TRUE(tx != NULL);
+        TEST_EQ_U8(0U, tx[10]);
+        TEST_EQ_U8(0U, tx[11]);
+        TEST_EQ_U8(0x03U, tx[12]);  /* 1.0 rad * 1000 = 0x03E8 */
+        TEST_EQ_U8(0xE8U, tx[13]);
+    }
 }
 
 void run_pi_transport_tests(void) {
