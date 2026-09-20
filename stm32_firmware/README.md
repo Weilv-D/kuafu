@@ -9,9 +9,14 @@ BMI088, two DDSM315 wheel motors, and four ST3215 servos powered together.
 
 - BMI088 accel/gyro are read with independent per-channel health. The legacy
   aggregate `health` only refreshes on a valid accel+gyro pair, so one dead
-  channel can no longer be masked by the other. `mahony_update_validated()`
-  rejects invalid gyro outright (control authority revoked immediately) and
-  bounds accel-invalid gyro-only propagation to 100 ms.
+  channel can no longer be masked by the other. A fusion cycle reads both
+  channels under one caller-supplied timestamp (`bmi088_read_pair`): the pair
+  is defined by that shared instant rather than by two separately sampled
+  tick values, so the aggregate refresh never depends on where the two I2C
+  transactions fall relative to a millisecond boundary.
+  `mahony_update_validated()` rejects invalid gyro outright (control authority
+  revoked immediately) and bounds accel-invalid gyro-only propagation to
+  100 ms.
 - The 250 Hz control section runs on a wall-clock deadline (never on the gyro
   data-ready interrupt): safety state machine -> actuator-supervisor verdict ->
   wheel output gate -> LQR/LQI computation -> balance trace, in one linear
@@ -89,9 +94,14 @@ BMI088, two DDSM315 wheel motors, and four ST3215 servos powered together.
   rebooted Pi whose single startup HELLO was corrupted on the wire is not
   locked out of `ACTIVE` until the STM32 is power-cycled. Payload-invalid
   frames never count toward the resync and isolated duplicates are still
-  dropped. Frame encoders decode non-finite values as their safe
-  sentinels (zero torque, dwell tick) rather than undefined float→int
-  casts.
+  dropped. The decoder consumes a whole ring of bytes in bounded slices —
+  each slice fills the holding buffer, drains every complete frame and keeps
+  only the trailing fragment, and the next slice continues behind it — so a
+  chunk larger than the buffer is decoded instead of dropped, and only a
+  fragment that can never complete inside the buffer (impossible under the
+  frame-length validation) is discarded. Frame encoders decode non-finite
+  values as their safe sentinels (zero torque, dwell tick) rather than
+  undefined float→int casts.
 
 ## Balance Trace
 
@@ -180,7 +190,7 @@ powershell -ExecutionPolicy Bypass -File stm32_firmware\tools\build_keil.ps1
 The target project is `MDK-ARM/stm32_firmware.uvprojx`. The accepted build has
 zero compiler errors and zero warnings. Flash and inspect it with the tools under
 `MDK-ARM/debug_tools`. The most recent logic-review evidence is recorded in
-`../docs/validation/` (latest record: `stm32-firmware-2026-09-20-4.md`; the
+`../docs/validation/` (latest record: `stm32-firmware-2026-09-21.md`; the
 electronics bring-up acceptance remains `stm32-firmware-2026-07-16.md`).
 
 The electronics gate does not replace mechanical motion acceptance. Wheel
