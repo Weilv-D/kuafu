@@ -114,9 +114,15 @@ incompatible; ACTIVE-mode deployment requires a retrained or explicitly
 revalidated policy (see `policy.onnx.manifest.json`). Standalone STAND balance
 does not depend on the policy.
 
-In `FAULT` the firmware keeps streaming explicit zero-torque frames to both
-wheels (a read-only query would leave the last torque latched in the motor) and
-queues motor disable. The safety state machine runs on the millisecond control
+Whenever the wheel output gate closes on a wheel that is still enabled — in
+`FAULT`, or in an operational mode demoted by the actuator supervisor — the
+firmware streams explicit zero-torque frames to it (a read-only query would
+leave the last torque latched in the motor's current loop, actively driving
+an uncontrolled robot); `FAULT` additionally queues motor disable, and plain
+read queries are used only while the wheels are disabled (INIT/discovery),
+where a command frame would be pointless. Torque frames elicit the same
+status reply as queries, so feedback freshness survives every branch. The
+safety state machine runs on the millisecond control
 deadline, not on the gyro DRDY timebase, so a dead BMI088 still latches
 `FAULT_IMU` and zeroes the wheels instead of freezing with torque applied.
 Gyro bias calibration only accumulates samples while all gyro axes read below

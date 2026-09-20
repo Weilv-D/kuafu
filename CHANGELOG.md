@@ -2,6 +2,80 @@
 
 ## Unreleased
 
+### Firmware logic review, second pass (2026-09-20)
+
+An independent fourth-pass review layered on the 09-20 three-pass baseline
+(architecture and every module re-derived from source before the prior
+records were consulted). Record: `docs/validation/stm32-firmware-2026-09-20-2.md`.
+
+- Wheel dispatch no longer leaves torque latched in the DDSM315 current
+  loop when the output gate closes on a still-enabled wheel: an explicit
+  zero-torque frame is sent in any mode (previously only `FAULT`; other
+  gate-closed states sent a read query, and the motor kept driving the
+  pre-closure LQR torque — reachable via a supervisor HOLDING demotion
+  while the mode stayed operational, e.g. the 100 ms leg-hold window
+  expiring under servo-bus congestion — until the 45° TILT backstop).
+  Torque frames elicit the same status reply as queries, so feedback
+  freshness is unchanged in every branch. New regression in
+  `test_ddsm315.c` pins the zero-frame encoding and the reply channel.
+- `SERVO_FAIL_LIMIT` comment corrected: it is the round-robin poll's
+  `offline_after` (3 consecutive read failures mark a servo offline), not a
+  fatal-FAULT latch; fault latching belongs to the safety layer's freshness
+  path.
+- Documented as deliberate (no code change): telemetry is silent while the
+  IMU path is down (slots live in the DRDY-gated fusion block — SWD-only
+  forensics in that state); the DDSM feedback mode byte is diagnostic-only
+  (no runtime re-assert verification); the LQR position estimate freezes
+  during gate-closed periods (≤ one 20 ms catch-up step, ~4 cm worst-case
+  `x_est` bias for a 100 ms demotion).
+- Documentation: HANDOFF repository path updated after the workspace move;
+  the dispatch policy is now stated wire-accurately in the safety-gating
+  section; this changelog gained the previously missing 09-20 three-pass
+  entry below.
+
+### Firmware logic review (2026-09-20, three passes)
+
+Full-codebase review layered on the 09-13/09-16 baselines: two review
+passes (the second re-verifying the first's fixes via byte-level echo-filter
+traces, FAULT bus-queue priority, a UB audit, and an NVIC priority audit)
+plus a closeout pass. 10 defects fixed (1 high, 5 medium, 4 low). Record:
+`docs/validation/stm32-firmware-2026-09-20.md`.
+
+- (High) The servo enable sequencer was mode-blind: during `FAULT` it fought
+  the 50 Hz one-shot torque-disable (~80 ms enable/disable churn) and re-set
+  `servos_enabled`, so a transient-fault recovery could clear the
+  supervisor's re-issue stage on the racing 0→1 and reopen the wheel gate on
+  physically torque-free legs. The sequencer is now gated on
+  `mode != FAULT`, giving the supervisor the genuine drop-and-return its
+  re-issue stage requires.
+- (Medium) The DDSM bus timeout verdict is re-validated under the IRQ mask
+  against phase and deadline, closing the one main-context phase transition
+  the concurrency contract left uncovered (a stale verdict could kill a
+  transaction the completion ISR had just started).
+- (Medium) ST3215 write frames (sync-write/torque) carry a 20 ms deadline
+  and recover through an explicit `AbortTransmit`, so a lost TX-complete
+  interrupt costs one frame instead of wedging the servo bus until a
+  freshness fault.
+- (Medium) Servo freshness requires a real first feedback frame: the
+  boot-time optimistic online flag could make a never-replied servo look
+  fresh for the first second, briefly opening the wheel gate on legs whose
+  feedback had never been seen.
+- (Medium, bench builds only) The two calibration images latch `FAULT_INIT`
+  (serious) in addition to the transient diagnostic bits: a transient bit
+  alone auto-recovers to STAND within seconds of the freshly polled devices
+  reporting fresh, re-arming actuation on an image that must stay
+  torque-free.
+- (Medium) The 1 kHz tick block's deep `continue` became an explicit
+  `if (g_imu.initialized)` guard — the `continue` silently skipped every
+  scheduler stage below it (50 Hz legs, servo poll), coupling them to IMU
+  init state.
+- (Low) `pi_link` critical sections restore the saved PRIMASK instead of a
+  bare `__enable_irq()`; `bmi088_read_temp` gained the handle guard its
+  sibling readers have; `queued_mode` no longer records an enable frame's
+  CRC as a control mode; the retired `STARTUP_GYRO_CALIBRATION` enum member
+  was deleted (numeric gap kept for trace-encoding stability) and dead
+  declarations clarified.
+
 ### Firmware & Pi5-runtime logic review (2026-09-16)
 
 - The freshness-fault grace window (100 ms + stale-counter reset) is now
@@ -94,7 +168,10 @@
 - Right DDSM315 motor is physically mirrored: `WHEEL_DIR_R = -1` and the LQR yaw-differential formula is adapted so forward torque + positive yaw produce a correct right turn.
 - DDSM315 torque polarity is opposite to the cart-pole convention; LQR output is negated accordingly.
 - Pitch-gated torque fade (20°→50° linear) prevents wheels spinning at full power when the robot is beyond recoverable tilt; anti-windup zeros the position integral at 50°.
-- FAULT state streams zero-torque frames to the wheels (not query frames), ensuring motors actually stop.
+- Wheel dispatch streams zero-torque frames whenever the output gate is
+  closed on an enabled wheel (any mode), ensuring the current loop actually
+  stops instead of holding its last setpoint; read queries are used only
+  while the wheels are disabled.
 - BMI088 initialization retries with I2C bus recovery (9 SCL clocks per AN3273) on failure; a soft reset no longer requires a power-cycle for the IMU to come online.
 - USART ORE/NE/FE sub-error diagnostics surfaced in DeviceHealth for SWD readout; the 46-byte health telemetry payload is unchanged.
 - Pi link auto-accepts the first well-formed heartbeat as proof of protocol compatibility when no explicit HELLO has been received.

@@ -58,10 +58,12 @@ rl/.venv/bin/python rl/export/export_policy.py --ckpt <model.pt> --out <policy.o
 
 ## Documentation
 
+- `docs/HANDOFF.md`: start here — the engineer/agent handoff covering the two-board architecture, the safety and startup state machines, build/flash/SWD-debug procedures, and the firmware review history with current known limits.
 - `docs/architecture/system.md`: control, simulation, learning, and runtime architecture.
 - `docs/contracts/interface.md`: normative coordinate, unit, observation, action, and UART contract.
 - `docs/operations/training.md`: training, resume, export, and release workflow.
 - `docs/operations/deployment.md`: ONNX and Pi5/STM32 deployment procedure.
 - `docs/validation/acceptance.md`: automated and hardware acceptance matrix.
+- `docs/validation/stm32-firmware-*.md`: dated firmware review records — every logic-review round with its defect list and verification evidence.
 - `docs/hardware/calibration.md`: required physical measurements and calibration records.
 - `docs/KUAFU.md`: canonical physical-model reference.

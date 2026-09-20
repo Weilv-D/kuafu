@@ -69,7 +69,7 @@ kuafu/
 
 ## 4. 开发、编译、烧录、测试命令
 
-> **环境**：Windows + Git Bash。所有命令在仓库根 `C:\Users\Deng2\Desktop\temp\kuafu` 下执行。
+> **环境**：Windows + Git Bash。所有命令在仓库根 `C:\WORKSPACE\temp\kuafu` 下执行。
 
 ### 4.1 主机单元测试（不依赖硬件，先跑这个）
 
@@ -114,7 +114,7 @@ python -m pyocd flash --target stm32f407zgtx \
 ```bash
 cd stm32_firmware/tests && cmake --build build --config Release && \
 (cd build && ctest -C Release) && \
-cd /c/Users/Deng2/Desktop/temp/kuafu/stm32_firmware/MDK-ARM && \
+cd /c/WORKSPACE/temp/kuafu/stm32_firmware/MDK-ARM && \
 "/c/Keil_v5/UV4/UV4.exe" -j0 -r stm32_firmware.uvprojx -o build.log && \
 tail -3 build.log && \
 python -m pyocd flash --target stm32f407zgtx --connect under-reset \
@@ -199,7 +199,7 @@ python kuafu_balance_trace.py 60
 运行模式（`safety_state.h`）：`INIT → STAND → ACTIVE/CLIMB → FAULT`
 
 **关键门控：**
-- **轮子授权** `wheel_authorized = (phase==READY) && (mode 为运行态 STAND/ACTIVE/CLIMB) && (mode != FAULT)`。INIT 期间轮子只收只读查询帧；未授权时 DDSM 力矩强制为 0。最终输出还叠加监督器判决与电流环补发完成（`g_wheel_output_gate`，见 §7.5）。
+- **轮子授权** `wheel_authorized = (phase==READY) && (mode 为运行态 STAND/ACTIVE/CLIMB) && (mode != FAULT)`。INIT 期间轮子只收只读查询帧；未授权时 DDSM 力矩强制为 0。最终输出还叠加监督器判决与电流环补发完成（`g_wheel_output_gate`，见 §7.5）。**派发策略**：门开启→LQR 力矩帧；门关闭且轮仍使能（任何模式，含 FAULT 与监督器降级）→显式零力矩帧（电流环会锁存最后设定值，必须主动清零）；门关闭且轮未使能→只读查询帧。三类帧都有状态回复，反馈新鲜度在所有分支下等价。
 - **陀螺标定静止门**：仅当三轴角速度都 < 0.08 rad/s 才累加样本（移动样本**跳过但不重置**），窗口累计 1000 个有效样本（~1s）并通过方差门。**不阻断启动**——上电无需保持静止。
 - **FAULT 是锁存的**，唯一恢复方式是**整机断电重启**（启动失败 STARTUP_FAILED 同理锁存）。例外：**轮/舵机新鲜度这类瞬态故障可自动恢复**（见 §7.2）。
 - 新鲜度故障（IMU/轮/舵机反馈超龄）经 8 拍（32ms）去抖后锁存。当前阈值：轮 250ms、舵机 1000ms、IMU 20ms（`pin_config.h`）。去抖另受 100ms 迁移宽限窗抑制，但**只有设备驱动的迁移**（INIT→STAND、FAULT→STAND 恢复）发放宽限窗并清零计数器——命令驱动的迁移（模式请求、断链降级）不清零，Pi 抖动模式请求无法抑制故障（2026-09-16 修复）。
@@ -209,6 +209,16 @@ python kuafu_balance_trace.py 60
 ## 7. 当前状态（截至 2026-09-20）
 
 ### 7.0 逻辑审查记录（最新在前）
+
+#### 2026-09-20 第二次审查（独立第四轮）
+
+在 09-20 三轮基线之上，从源码独立重推了一遍架构与全部模块（先审代码、后读历史记录核对不变量），修复 1 项缺陷（中高）与 1 处过时注释，并把 3 项设计决策正式写入文档；完整清单与证据见 `docs/validation/stm32-firmware-2026-09-20-2.md`。对新接手者行为相关的：
+
+1. **门关闭时不再残留电流环力矩（中高严重度）**：派发层此前只在 FAULT 发零力矩帧，其它门关闭状态发只读查询——而 DDSM315 电流环会**保持最后一个力矩设定值**。监督器把机器人降级 HOLDING 时模式仍是 STAND/ACTIVE（典型诱因：舵机总线拥塞使 100ms 腿保持窗过期），轮子仍使能、平衡已停摆，电机会带着关闭前的 LQR 力矩主动驱动机器人，直到 45° 倾角故障兜底（机器人实际已倒）。现在只要**门关闭且轮仍使能**就发显式零力矩帧（力矩帧与查询帧同样有回复，反馈新鲜度不受影响）；查询帧仅用于轮未使能的场景（INIT/发现期/禁用排空窗）。
+2. **过时注释修正**：`SERVO_FAIL_LIMIT` 注释声称的"连续失败→致命 FAULT 锁定"路径早已不存在，实际语义是轮询的 offline_after（连续 3 次失败置离线），故障锁存归安全层新鲜度路径。
+3. **三项设计决策文档化（不改码）**：IMU 通路失效期间遥测完全静默（FAULT 帧也发不出，只能 SWD 取证）；DDSM 反馈模式字节仅作诊断、不做运行时校验（单电机 spontaneous 掉电无现场证据，按证据驱动方法论不新增故障源）；LQR 位置估计在门关闭期间冻结（elapsed-dt 钳制最多补积一步 20ms，100ms 降级最多引入 ~4cm x_est 偏差——不值得为二阶误差重构现场验证过的控制器）。
+
+主机测试全过（含零力矩派发新回归）；Keil 0 错误 0 警告；SWD 符号地址对照新 map 全部不变。
 
 #### 2026-09-20 审查（09-19/20，三轮）
 
@@ -287,6 +297,9 @@ Keil 0 错误 0 警告；SWD 符号地址对照新 map 全部不变。保留的�
 - **左轮 RS485 通信最易掉线**（timeout 计数约为右轮 2.4×）；虽不再致命，仍建议检查左轮线缆。
 - **SWD 探针偶发掉线**（`Unexpected ACK '0'`）：长 trace 会中途断，降速至 200 kHz 更稳。
 - BMI088 加计配置 `ACC_CONF=0xAC` 已按 Bosch 官方 BMI08x_SensorAPI 位域核实：高半字节带宽 NORMAL、低半字节 ODR 1600Hz，均合法；1600Hz 采样覆盖 1kHz 轮询，每通道新鲜度时间戳语义成立（来源见 `bmi088.c` 注释）。
+- **IMU 通路失效期间遥测完全静默**：遥测槽在 `g_imu.initialized` + DRDY tick 守卫内，I2C 失效或 DRDY 停摆时 Pi 收不到任何帧（含 FAULT/健康帧）；此时 250Hz 控制节仍按墙钟检测并锁存故障，但只能靠 SWD 取证。
+- **DDSM 反馈模式字节仅作诊断**：固件不运行时校验反馈帧里的模式字节（若电机自发掉电回复默认速度环，恢复路径是倾角故障而非模式校验）；`ddsm_bus_mode_feedback()` 供 SWD/诊断读取。
+- **LQR 位置估计在门关闭期间冻结**：`last_lqr_ms` 只在实际运行时推进，重开后 elapsed-dt 钳制（≤20ms）最多补积一步；100ms 级降级引入的 x_est 偏差上限 ~4cm，对 K0 项 ≈0.04Nm，在可接受范围内。
 - 无磁力计 → Mahony yaw 长期漂移，只能做角速度阻尼，无法绝对航向保持。
 - CPU MuJoCo harness 的轮接触解算有伪影，速度环仿真不可信（pitch 环可参考）。
 - 地面测试是破坏性的（撞、浪涌欠压重启、机械冲击），不能高频裸地迭代。
