@@ -10,7 +10,29 @@ Pi_Command_Action_t g_pi_cmd_action;
 
 static uint16_t tx_sequence = 0;
 static uint16_t last_rx_sequence = 0;
-static uint8_t have_rx_sequence = 0;
+/* Sequence-gate state byte: bit0 = a session baseline exists (last_rx_sequence
+ * is valid); bits 1..4 count consecutive CRC-valid frames rejected by the
+ * monotonic gate.  PI_RX_RESYNC_REJECTS of them mean the peer restarted its
+ * counter (see below).  The counter is packed into this existing byte — not a
+ * new global — so the RW image, and with it the SWD debug-script address
+ * contract, is unchanged by this state. */
+#define PI_RX_HAVE_BASELINE(s)  ((uint8_t)((s) & 0x01U))
+#define PI_RX_REJECTS(s)        ((uint8_t)((s) >> 1))
+#define PI_RX_GATE_STATE(have, rejects) \
+    ((uint8_t)(((rejects) << 1) | (have)))
+/* Consecutive CRC-valid, non-HELLO frames rejected by the sequence gate alone
+ * before the gate concludes the peer restarted its counter.  This is the
+ * firmware mirror of the Pi-side StreamDecoder resync: a Pi that reboots
+ * restarts its TX counter at 0, and every Pi-side program sends HELLO exactly
+ * once at startup — if that single HELLO is corrupted on the wire, the
+ * monotonic gate would blackhole every later heartbeat until the rebooted
+ * counter climbed back past the stored high-water mark (minutes at 50 Hz),
+ * locking the robot out of ACTIVE until an STM32 power cycle.  Eight
+ * consecutive gated rejections cannot be a duplicate storm (any accepted
+ * frame clears the streak), so they are judged a peer restart.  Payload-
+ * invalid frames never count, so line noise cannot open the gate. */
+#define PI_RX_RESYNC_REJECTS 8U
+static uint8_t have_rx_sequence = 0U;
 static uint8_t link_compatible = 0;
 static uint8_t rx_stream[2 * (12 + PI_MAX_PAYLOAD)];
 static uint16_t rx_stream_len = 0;
@@ -60,7 +82,8 @@ static int16_t quantize_i16(float value, float scale) {
 
 static uint8_t sequence_is_new(uint16_t sequence) {
     uint16_t delta = (uint16_t)(sequence - last_rx_sequence);
-    return !have_rx_sequence || (delta != 0u && delta < 0x8000u);
+    return !PI_RX_HAVE_BASELINE(have_rx_sequence) ||
+           (delta != 0u && delta < 0x8000u);
 }
 
 void pi_link_init(void) {
@@ -68,7 +91,7 @@ void pi_link_init(void) {
     memset(&g_pi_cmd_action, 0, sizeof(g_pi_cmd_action));
     g_pi_cmd_heartbeat.target_leg_d0 = 0.058f;
     tx_sequence = 0;
-    have_rx_sequence = 0;
+    have_rx_sequence = 0U;
     link_compatible = 0;
     rx_stream_len = 0;
     tx_head = 0U;
@@ -198,9 +221,21 @@ int pi_link_parse_packet(const uint8_t *buf, uint16_t len) {
         /* A validated HELLO starts a new Pi session and deliberately resets the
          * sequence window; every other frame is monotonic within that session. */
         uint8_t is_hello = type == PI_CMD_HELLO;
-        if ((is_hello || sequence_is_new(sequence)) && parse_payload(type, &rx_stream[offset + 10], payload_len)) {
+        if (!is_hello && !sequence_is_new(sequence)) {
+            /* Rejected by the gate alone (CRC already valid): count it toward
+             * the peer-restart resync above. */
+            uint8_t rejects = PI_RX_REJECTS(have_rx_sequence);
+            if (rejects < PI_RX_RESYNC_REJECTS) {
+                ++rejects;
+            }
+            have_rx_sequence = (rejects >= PI_RX_RESYNC_REJECTS)
+                ? 0U : PI_RX_GATE_STATE(1U, rejects);
+            offset += frame_len;
+            continue;
+        }
+        if (parse_payload(type, &rx_stream[offset + 10], payload_len)) {
             last_rx_sequence = sequence;
-            have_rx_sequence = 1;
+            have_rx_sequence = PI_RX_GATE_STATE(1U, 0U);
             ++parsed;
         }
         offset += frame_len;

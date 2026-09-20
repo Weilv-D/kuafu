@@ -1,6 +1,8 @@
 #include "servo_mapping.h"
 #include "pin_config.h"
 
+#include <math.h>
+
 static const int8_t k_servo_direction[SERVO_MAPPING_COUNT] = SERVO_DIR_INIT;
 static const int16_t k_servo_center[SERVO_MAPPING_COUNT] = SERVO_CENTER_INIT;
 
@@ -9,6 +11,13 @@ int16_t servo_angle_to_tick(float angle_rad, uint8_t index) {
     int32_t tick;
     if (index >= SERVO_MAPPING_COUNT) {
         return 0;
+    }
+    /* A non-finite angle compares false against every bound and would reach
+     * the float-to-int cast below as undefined behaviour.  IK outputs are
+     * finite by construction, so this guard is for future callers; the safe
+     * sentinel is the calibrated dwell tick, never a mechanical extreme. */
+    if (!isfinite(angle_rad)) {
+        return k_servo_center[index];
     }
     delta = (int32_t)((float)k_servo_direction[index] * angle_rad * SERVO_TICKS_PER_RAD);
     tick = (int32_t)k_servo_center[index] + delta;

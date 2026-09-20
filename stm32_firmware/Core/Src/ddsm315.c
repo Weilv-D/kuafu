@@ -2,6 +2,7 @@
 #include "crc8.h"
 #include "pin_config.h"
 
+#include <math.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -95,6 +96,12 @@ static void arm_rx(DDSM_Bus_t *bus) {
 
 void ddsm_build_torque(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, float torque_nm) {
     int16_t raw;
+    /* A NaN compares false against every clamp bound and would reach the
+     * float-to-int cast below as undefined behaviour; the current call chain
+     * validates finiteness upstream, so this guard is for future callers of a
+     * public encoder.  Non-finite decodes as zero torque (coast), never as a
+     * saturated command. */
+    if (!isfinite(torque_nm)) torque_nm = 0.0f;
     if (torque_nm > DDSM_MAX_TORQUE_NM) torque_nm = DDSM_MAX_TORQUE_NM;
     if (torque_nm < -DDSM_MAX_TORQUE_NM) torque_nm = -DDSM_MAX_TORQUE_NM;
     raw = (int16_t)(torque_nm * DDSM_TORQUE_TO_RAW);
@@ -107,6 +114,8 @@ void ddsm_build_torque(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, float torque
 }
 
 void ddsm_build_speed(uint8_t packet[DDSM_FRAME_SIZE], uint8_t id, float rpm) {
+    /* Same non-finite guard as ddsm_build_torque for this public encoder. */
+    if (!isfinite(rpm)) rpm = 0.0f;
     int16_t raw = (int16_t)(rpm * 10.0f);
     memset(packet, 0, DDSM_FRAME_SIZE);
     packet[0] = id;

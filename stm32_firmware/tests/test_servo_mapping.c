@@ -1,11 +1,18 @@
 #include "servo_mapping.h"
 #include "test_support.h"
 
+#include <math.h>
+
 void run_servo_mapping_tests(void) {
     TEST_EQ_INT(275, servo_angle_to_tick(0.0f, 0));
     TEST_EQ_INT(1097, servo_angle_to_tick(0.0f, 1));
     TEST_EQ_INT(2809, servo_angle_to_tick(0.0f, 2));
     TEST_EQ_INT(1023, servo_angle_to_tick(0.0f, 3));
+
+    /* A non-finite angle encodes the calibrated dwell tick, not a mechanical
+     * extreme and not an undefined float-to-int cast. */
+    TEST_EQ_INT(275, servo_angle_to_tick((float)NAN, 0));
+    TEST_EQ_INT(1023, servo_angle_to_tick((float)NAN, 3));
 
     TEST_TRUE(servo_angle_to_tick(-0.1f, 0) < 275);
     TEST_TRUE(servo_angle_to_tick(-0.1f, 1) > 1097);

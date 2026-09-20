@@ -121,6 +121,35 @@ void run_pi_link_tests(void) {
     TEST_EQ_INT(2, pi_link_parse_packet(joined, (uint16_t)(2U + len + len2)));
     TEST_EQ_INT(0, pi_link_parse_packet(frame, len));
 
+    /* Peer-restart resync (firmware mirror of the Pi decoder's RESYNC_REJECTS):
+     * a Pi that reboots with its single startup HELLO corrupted on the wire
+     * restarts its sequence at 0 while the stored high-water mark stays.  The
+     * first PI_RX_RESYNC_REJECTS gated rejections are dropped as before, then
+     * the gate concludes the peer restarted and accepts the stream again —
+     * without it the lockout lasts until the counter climbs back to the old
+     * mark (minutes at 50 Hz). */
+    {
+        uint16_t reboot_seq;
+        pi_link_init();
+        test_set_time_ms(600U);
+        make_heartbeat(heartbeat, 1U, 100, 0, 58);
+        len = build_frame(frame, PI_PROTOCOL_VERSION, PI_CMD_HEARTBEAT, 30000U,
+                          heartbeat, sizeof(heartbeat));
+        TEST_EQ_INT(1, pi_link_parse_packet(frame, len));
+        for (reboot_seq = 0U; reboot_seq < 8U; ++reboot_seq) {
+            len = build_frame(frame, PI_PROTOCOL_VERSION, PI_CMD_HEARTBEAT,
+                              reboot_seq, heartbeat, sizeof(heartbeat));
+            TEST_EQ_INT(0, pi_link_parse_packet(frame, len));
+        }
+        len = build_frame(frame, PI_PROTOCOL_VERSION, PI_CMD_HEARTBEAT, 8U,
+                          heartbeat, sizeof(heartbeat));
+        TEST_EQ_INT(1, pi_link_parse_packet(frame, len));
+        TEST_NEAR(0.1f, g_pi_cmd_heartbeat.target_velocity, 0.0001f);
+        /* An isolated duplicate is still dropped: the resync counter resets on
+         * every accepted frame, so one replay cannot reopen the gate. */
+        TEST_EQ_INT(0, pi_link_parse_packet(frame, len));
+    }
+
     test_uart_reset();
     pi_link_init();
     TEST_EQ_INT(0, pi_link_send_diag(&uart, 0U, 40U, 0U));

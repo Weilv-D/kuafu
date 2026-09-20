@@ -2,6 +2,7 @@
 #include "crc8.h"
 #include "test_support.h"
 
+#include <math.h>
 #include <string.h>
 
 static void make_feedback(uint8_t frame[DDSM_FRAME_SIZE], uint8_t id) {
@@ -236,5 +237,16 @@ void run_ddsm315_tests(void) {
         TEST_TRUE(state.health.online);
         TEST_TRUE(ddsm_bus_is_idle(&bus));
         TEST_EQ_INT(DDSM_TX_STATUS_FEEDBACK_VALID, (int)ddsm_bus_status(&bus));
+    }
+
+    /* A non-finite torque command decodes as zero (coast), never as an
+     * undefined float-to-int cast or a saturated command: NaN compares false
+     * against every clamp bound, so the encoder must reject it explicitly. */
+    {
+        uint8_t nan_packet[DDSM_FRAME_SIZE];
+        memset(nan_packet, 0, sizeof(nan_packet));
+        ddsm_build_torque(nan_packet, 1U, (float)NAN);
+        TEST_EQ_INT(0, (int)(int16_t)(((uint16_t)nan_packet[2] << 8) | nan_packet[3]));
+        TEST_EQ_U8(crc8_calculate(nan_packet, 9U), nan_packet[9]);
     }
 }
