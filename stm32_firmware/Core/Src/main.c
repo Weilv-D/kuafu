@@ -106,7 +106,10 @@ static uint8_t g_imu_control_valid = 0U;
 static uint32_t g_leg_hold_tx_ms = 0U;
 #define LEG_HOLD_MAX_AGE_MS 100U
 
-/* Max consecutive servo failures before a fatal FAULT lockdown */
+/* Consecutive read failures before the round-robin poll marks a servo
+ * offline (offline_after).  Freshness fault latching is the safety layer's
+ * job (SAFETY_SERVO_MAX_AGE_MS + debounce); this only drives device_health
+ * online state. */
 #define SERVO_FAIL_LIMIT         3
 
 /* DMA Buffer for Pi Bridge (USART6 RX) */
@@ -653,9 +656,20 @@ int main(void) {
          * wheel a 125 Hz update rate.  Removing it caused RS485 overruns.
          * Positioned after the 250 Hz control section so a frame on the wire
          * never predates the verdict and torque computed in the same period;
-         * g_wheel_output_gate is the persistent authorization, and closed
-         * states keep polling (zero-torque in FAULT, plain queries otherwise)
-         * so wheel feedback freshness survives every revocation. */
+         * g_wheel_output_gate is the persistent authorization.  Closed states
+         * keep polling so wheel feedback freshness survives every revocation:
+         * torque command frames (0x64) elicit the same status reply as a
+         * query, so the freshness channel is identical in every branch.
+         *
+         * Zero-torque, not a query, whenever the motor is still enabled: the
+         * DDSM315 current loop HOLDS its last setpoint, so a closed gate on an
+         * enabled wheel would otherwise leave the pre-closure LQR torque
+         * actively driving the robot (supervisor HOLDING demotions keep the
+         * mode operational, so the TILT fault backstop only arrives after the
+         * robot has fallen).  Zero-torque pins the setpoint to coast.  Plain
+         * queries are reserved for motors that are (or may be) disabled --
+         * INIT/discovery and the disable-drain window -- where a command
+         * frame would be pointless and the mode re-assertion owns re-arming. */
         if (g_actuator_configured && ddsm_bus_is_idle(&g_ddsm_bus) &&
             (int32_t)(startup_now - next_wheel_tx_ms) >= 0) {
             int wheel_result;
@@ -668,7 +682,8 @@ int main(void) {
                 wheel_result = ddsm_bus_queue_torque(&g_ddsm_bus, wheel,
                                                      torque, startup_now);
                 sent_torque_frame = (uint8_t)(wheel_result == 0);
-            } else if (g_safety_state.current_mode == STATE_FAULT) {
+            } else if (g_safety_state.current_mode == STATE_FAULT ||
+                       wheel_enable_mask != 0U) {
                 wheel_result = ddsm_bus_queue_torque(&g_ddsm_bus, wheel,
                                                      0.0f, startup_now);
             } else {

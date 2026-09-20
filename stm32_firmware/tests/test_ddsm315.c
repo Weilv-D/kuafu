@@ -209,4 +209,32 @@ void run_ddsm315_tests(void) {
         ddsm_bus_on_tx_complete_at(&bus, 63U);
         TEST_TRUE(ddsm_bus_is_idle(&bus));
     }
+
+    /* Gate-closed dispatch on an ENABLED wheel sends an explicit zero-torque
+     * frame, not a read query: the DDSM315 current loop holds its last
+     * setpoint, so a query-only policy would leave the pre-closure torque
+     * driving the robot until the TILT fault backstop.  Pin both properties
+     * the scheduler relies on: the zero frame is byte-exact, and it keeps
+     * the same reply/freshness channel as every other torque frame. */
+    {
+        test_uart_reset();
+        memset(&state, 0, sizeof(state));
+        state.id = 1U;
+        device_health_init(&state.health);
+        ddsm_bus_init(&bus, &uart);
+
+        ddsm_build_torque(packet, 1U, 0.0f);
+        TEST_EQ_U8(0x64U, packet[1]);
+        TEST_EQ_INT(0, (int)(int16_t)(((uint16_t)packet[2] << 8) | packet[3]));
+        TEST_EQ_U8(crc8_calculate(packet, 9U), packet[9]);
+
+        TEST_EQ_INT(0, ddsm_bus_queue_torque(&bus, &state, 0.0f, 70U));
+        TEST_EQ_INT(1, (int)bus.expect_reply);
+        ddsm_bus_on_tx_complete_at(&bus, 70U);
+        make_feedback(frame, 1U);
+        feed_bus(&bus, frame, DDSM_FRAME_SIZE, 71U);
+        TEST_TRUE(state.health.online);
+        TEST_TRUE(ddsm_bus_is_idle(&bus));
+        TEST_EQ_INT(DDSM_TX_STATUS_FEEDBACK_VALID, (int)ddsm_bus_status(&bus));
+    }
 }
